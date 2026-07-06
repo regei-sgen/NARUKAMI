@@ -3,6 +3,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../db';
+import { gitStatus, gitDiffRanges } from '../services/gitStatus';
 
 // Directories we never descend into when building the file tree — noise + size.
 const IGNORE_DIRS = new Set([
@@ -229,6 +230,38 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
       }
 
       return { matches, truncated };
+    },
+  );
+
+  // Git working-tree status for the whole project — which files changed since the
+  // last commit (drives the file-tree change markers). Non-repo → isRepo:false.
+  app.get<{ Params: { id: string } }>('/api/projects/:id/git/status', async (req, reply) => {
+    const project = await prisma.project.findUnique({ where: { id: req.params.id } });
+    if (!project) return reply.code(404).send({ error: 'Project not found.' });
+    return gitStatus(project.path);
+  });
+
+  // Changed line ranges for one file (drives the editor's diff gutter). The path
+  // is lexically validated here (rejects `..`/symlink escapes) and git itself runs
+  // with GIT_LITERAL_PATHSPECS so pathspec magic (`:/`, `:(top)`) can't escape.
+  app.get<{ Params: { id: string }; Querystring: { path?: string } }>(
+    '/api/projects/:id/git/diff',
+    async (req, reply) => {
+      const project = await prisma.project.findUnique({ where: { id: req.params.id } });
+      if (!project) return reply.code(404).send({ error: 'Project not found.' });
+
+      const rel = req.query.path;
+      if (typeof rel !== 'string' || !rel.trim()) {
+        return reply.code(400).send({ error: 'A file path is required.' });
+      }
+      try {
+        resolveInProject(project.path, rel); // reject `..` / symlink escapes
+      } catch (err) {
+        return reply.code(400).send({ error: (err as Error).message });
+      }
+
+      const normalized = rel.replace(/^[\\/]+/, '').split('\\').join('/');
+      return gitDiffRanges(project.path, normalized);
     },
   );
 

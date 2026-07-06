@@ -2,6 +2,8 @@ import type {
   AnalyzerResult,
   EodEntry,
   FileContent,
+  GitDiff,
+  GitStatus,
   Project,
   ProjectTree,
   RestoredRun,
@@ -145,6 +147,13 @@ export const api = {
     request<{ matches: { path: string; line: number; text: string }[]; truncated: boolean }>(
       `/api/projects/${projectId}/search?q=${encodeURIComponent(q)}`,
     ),
+
+  // Git working-tree status (changed files) for the file-tree change markers.
+  getGitStatus: (projectId: string) => request<GitStatus>(`/api/projects/${projectId}/git/status`),
+
+  // Changed line ranges for one file, for the editor's diff gutter.
+  getGitDiff: (projectId: string, filePath: string) =>
+    request<GitDiff>(`/api/projects/${projectId}/git/diff?path=${encodeURIComponent(filePath)}`),
 
   // --- workspace / session restore ---
   getWorkspace: () => request<WorkspaceState>('/api/workspace'),

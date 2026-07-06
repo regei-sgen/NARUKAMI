@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Editor, { type OnMount } from '@monaco-editor/react';
 import '../lib/monaco-setup'; // side-effect: offline workers + narukami theme + loader.config
 import { api } from '../api';
-import type { FileNode, Project } from '../types';
+import { changedFolders, diffDecorations } from '../lib/gitChanges';
+import type { DiffRange, FileNode, GitChange, Project } from '../types';
 
 interface Props {
   project: Project;
@@ -141,19 +142,40 @@ interface TreeProps {
   toggle: (p: string) => void;
   onOpen: (n: FileNode) => void;
   currentPath: string | null;
+  // Git working-tree changes: file path → change type, plus the set of folders
+  // that contain a change (so a collapsed dir still flags what's inside).
+  changed: Map<string, GitChange>;
+  changedDirs: Set<string>;
 }
 
-function TreeNodes({ nodes, depth, expanded, toggle, onOpen, currentPath }: TreeProps) {
+// Memoized: `content` state lives in CodeEditor, so without this the whole
+// visible tree would reconcile on every editor keystroke. All props are
+// referentially stable across a keystroke, so the shallow compare bails out.
+// (Recursion uses the outer `TreeNodes` const, not the inner name, so the
+// memoization applies at every level.)
+const TreeNodes = memo(function TreeNodesInner({
+  nodes,
+  depth,
+  expanded,
+  toggle,
+  onOpen,
+  currentPath,
+  changed,
+  changedDirs,
+}: TreeProps) {
   return (
     <>
       {nodes.map((n) => {
         const isDir = n.type === 'dir';
         const isOpen = expanded.has(n.path);
         const active = !isDir && currentPath === n.path;
+        const status = isDir ? undefined : changed.get(n.path);
+        const dirChanged = isDir && changedDirs.has(n.path);
+        const changeClass = status ? `changed changed-${status}` : dirChanged ? 'changed-dir' : '';
         return (
           <div key={n.path}>
             <div
-              className={`ft-row ${active ? 'active' : ''} ${isDir ? 'ft-dir' : 'ft-file'}`}
+              className={`ft-row ${active ? 'active' : ''} ${isDir ? 'ft-dir' : 'ft-file'} ${changeClass}`}
               style={{ paddingLeft: 8 + depth * 13 }}
               onClick={() => (isDir ? toggle(n.path) : onOpen(n))}
               title={n.path}
@@ -165,6 +187,8 @@ function TreeNodes({ nodes, depth, expanded, toggle, onOpen, currentPath }: Tree
               )}
               {isDir ? <FolderIcon open={isOpen} /> : <FileIcon />}
               <span className="ft-name">{n.name}</span>
+              {status && <span className={`ft-status-dot ${status}`} title={`Modified (${status})`} />}
+              {dirChanged && <span className="ft-status-dot dir" title="Contains changes" />}
             </div>
             {isDir && isOpen && n.children && n.children.length > 0 && (
               <TreeNodes
@@ -174,6 +198,8 @@ function TreeNodes({ nodes, depth, expanded, toggle, onOpen, currentPath }: Tree
                 toggle={toggle}
                 onOpen={onOpen}
                 currentPath={currentPath}
+                changed={changed}
+                changedDirs={changedDirs}
               />
             )}
           </div>
@@ -181,7 +207,7 @@ function TreeNodes({ nodes, depth, expanded, toggle, onOpen, currentPath }: Tree
       })}
     </>
   );
-}
+});
 
 export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
   const [tree, setTree] = useState<FileNode[]>([]);
@@ -206,9 +232,29 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
   const [codeSearching, setCodeSearching] = useState(false);
   const [codeErr, setCodeErr] = useState<string | null>(null);
 
-  // Line to reveal after a file opens (set when jumping from a code-search hit).
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
-  const [revealLine, setRevealLine] = useState<number | null>(null);
+  const monacoRef = useRef<Parameters<OnMount>[1] | null>(null);
+  // Mirror of currentPath for stable async callbacks (poll/diff) + open sequencing
+  // so a slow read can't overwrite a newer file the user clicked.
+  const currentPathRef = useRef<string | null>(null);
+  const openSeqRef = useRef(0);
+  // Line to reveal after a file opens (from a code-search hit). Held in a ref so
+  // the reveal survives the <Editor> remount and runs once the new editor mounts;
+  // the nonce re-triggers the effect even when the file content is identical.
+  const pendingRevealRef = useRef<number | null>(null);
+  const [revealNonce, setRevealNonce] = useState(0);
+
+  // Git working-tree changes (path → change type), polled while the editor is
+  // open. Drives the file-tree markers; the open file's diff gutter is fetched
+  // separately (see refreshOpenDiff). The signature ref suppresses no-op
+  // re-renders — and the whole-tree reconcile — when git state hasn't moved.
+  const [changed, setChanged] = useState<Map<string, GitChange>>(new Map());
+  const gitSigRef = useRef('');
+  const gitBusyRef = useRef(false); // in-flight guard so slow polls don't stack
+  // Live diff decorations for the open file (Monaco decoration ids + source data).
+  const decorationsRef = useRef<string[]>([]);
+  const diffRangesRef = useRef<DiffRange[]>([]);
+  const untrackedRef = useRef(false);
 
   const dirty = currentPath !== null && content !== original;
 
@@ -252,20 +298,30 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
 
   const openPath = useCallback(
     async (filePath: string, line?: number) => {
+      const seq = (openSeqRef.current += 1); // newest open wins if reads overlap
       setLoadingFile(true);
       setFileErr(null);
       setSaved(false);
+      // Drop the previous file's diff so a remount can't paint its ranges here.
+      diffRangesRef.current = [];
+      untrackedRef.current = false;
       try {
         const r = await api.readFile(project.id, filePath);
+        if (openSeqRef.current !== seq) return; // superseded by a newer open
+        currentPathRef.current = filePath;
         setCurrentPath(filePath);
         setContent(r.content);
         setOriginal(r.content);
-        if (line && line > 0) setRevealLine(line);
+        // Set OR clear the pending reveal: a plain open (no line) must wipe any
+        // stale reveal so it can't fire on the wrong file when it mounts.
+        pendingRevealRef.current = line && line > 0 ? line : null;
+        if (line && line > 0) setRevealNonce((n) => n + 1);
         onOpenFile?.(filePath); // persist as the project's last-open file
       } catch (e) {
+        if (openSeqRef.current !== seq) return;
         setFileErr((e as Error).message);
       } finally {
-        setLoadingFile(false);
+        if (openSeqRef.current === seq) setLoadingFile(false);
       }
     },
     [project.id, onOpenFile],
@@ -286,6 +342,108 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
     rec(tree);
     return out;
   }, [tree]);
+
+  // Folders that (transitively) contain a change — collapsed dirs still get a marker.
+  const changedDirs = useMemo(() => changedFolders(changed.keys()), [changed]);
+
+  // Paint the open file's changed lines: a colored gutter stripe + subtle line
+  // tint (added/modified), or a gutter glyph for a deletion. Reads the latest
+  // diff/untracked from refs so it can be called from mount, poll, or edits.
+  const applyDecorations = useCallback(() => {
+    const ed = editorRef.current;
+    const mon = monacoRef.current;
+    if (!ed || !mon) return;
+    const model = ed.getModel();
+    if (!model) return;
+    const specs = diffDecorations(
+      diffRangesRef.current,
+      model.getLineCount(),
+      untrackedRef.current,
+    );
+    const decos = specs.map((s) => ({
+      range: new mon.Range(s.startLine, 1, s.endLine, 1),
+      options: s.className
+        ? {
+            isWholeLine: s.isWholeLine,
+            className: s.className,
+            linesDecorationsClassName: s.linesDecorationsClassName,
+          }
+        : { linesDecorationsClassName: s.linesDecorationsClassName },
+    }));
+    decorationsRef.current = ed.deltaDecorations(decorationsRef.current, decos);
+  }, []);
+
+  // Poll git working-tree status so edits (incl. Claude's, made outside the editor)
+  // surface within a few seconds. The signature guard skips setState — and the
+  // whole-tree re-render — when nothing actually changed; the busy guard stops
+  // slow polls from stacking git spawns.
+  const refreshGit = useCallback(async () => {
+    if (gitBusyRef.current) return;
+    gitBusyRef.current = true;
+    try {
+      const r = await api.getGitStatus(project.id);
+      const sig = r.files.map((f) => `${f.path}:${f.status}`).join('|');
+      if (sig === gitSigRef.current) return;
+      gitSigRef.current = sig;
+      const m = new Map<string, GitChange>();
+      for (const f of r.files) m.set(f.path, f.status);
+      setChanged(m);
+    } catch {
+      /* status is a decoration — never fatal */
+    } finally {
+      gitBusyRef.current = false;
+    }
+  }, [project.id]);
+
+  // Fetch changed line ranges for the OPEN file and repaint the gutter. Decoupled
+  // from `changed` on purpose: git collapses every edit to the same "modified"
+  // bucket, so re-editing an already-modified file leaves the status signature
+  // unchanged — the gutter has to refresh on its own cadence (poll + save + open),
+  // keyed on the file path rather than the coarse status set, or it would freeze.
+  const refreshOpenDiff = useCallback(async () => {
+    const fp = currentPathRef.current;
+    if (!fp) {
+      diffRangesRef.current = [];
+      untrackedRef.current = false;
+      applyDecorations();
+      return;
+    }
+    try {
+      const r = await api.getGitDiff(project.id, fp);
+      if (currentPathRef.current !== fp) return; // file switched mid-flight
+      untrackedRef.current = r.isRepo && !r.tracked;
+      diffRangesRef.current = r.ranges;
+    } catch {
+      if (currentPathRef.current !== fp) return;
+      diffRangesRef.current = [];
+      untrackedRef.current = false;
+    }
+    applyDecorations();
+    // applyDecorations is stable; listed for lint completeness.
+  }, [project.id, applyDecorations]);
+
+  useEffect(() => {
+    gitSigRef.current = '';
+    setChanged(new Map());
+    void refreshGit();
+    void refreshOpenDiff();
+    const t = setInterval(() => {
+      void refreshGit();
+      void refreshOpenDiff();
+    }, 3000);
+    return () => clearInterval(t);
+  }, [refreshGit, refreshOpenDiff]);
+
+  // Refetch the gutter when the open file changes (independent of the poll).
+  useEffect(() => {
+    void refreshOpenDiff();
+  }, [currentPath, refreshOpenDiff]);
+
+  // Re-apply decorations on edits so an untracked file's whole-file highlight
+  // tracks new lines and decorations survive buffer changes.
+  useEffect(() => {
+    applyDecorations();
+  }, [content, applyDecorations]);
 
   const nameResults = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -327,15 +485,23 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
     };
   }, [project.id, query, searchMode]);
 
-  // Reveal + focus a line once the target file's content has loaded.
-  useEffect(() => {
-    if (!revealLine || !editorRef.current) return;
+  // Reveal + focus a pending line on the LIVE editor. Called both from the effect
+  // below (same-file jump: editor already mounted) and from onMount (cross-file
+  // jump remounts <Editor>, so the reveal must wait for the new editor). Guards on
+  // getModel() so a stale/disposed editor no-ops without clearing the pending line.
+  const doReveal = useCallback(() => {
+    const line = pendingRevealRef.current;
     const ed = editorRef.current;
-    ed.revealLineInCenter(revealLine);
-    ed.setPosition({ lineNumber: revealLine, column: 1 });
+    if (!line || !ed || !ed.getModel()) return;
+    ed.revealLineInCenter(line);
+    ed.setPosition({ lineNumber: line, column: 1 });
     ed.focus();
-    setRevealLine(null);
-  }, [revealLine, content]);
+    pendingRevealRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    doReveal();
+  }, [revealNonce, content, doReveal]);
 
   const openFile = useCallback(
     (node: FileNode) => {
@@ -363,17 +529,26 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
       await api.saveFile(project.id, currentPath, content);
       setOriginal(content);
       setSaved(true);
+      // Reflect the save immediately: tree markers (refreshGit) + gutter for the
+      // saved file (refreshOpenDiff — needed because git keeps it in the same
+      // "modified" bucket, so the status signature alone wouldn't refresh it).
+      void refreshGit();
+      void refreshOpenDiff();
     } catch (e) {
       setFileErr((e as Error).message);
     } finally {
       setSaving(false);
     }
-  }, [project.id, currentPath, content, original, saving]);
+  }, [project.id, currentPath, content, original, saving, refreshGit, refreshOpenDiff]);
   saveRef.current = save;
 
   const handleMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
+    monacoRef.current = monaco;
+    decorationsRef.current = [];
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveRef.current());
+    applyDecorations(); // paint gutter for the freshly-mounted editor
+    doReveal(); // complete a pending cross-file jump-to-line on the new editor
   };
 
   return (
@@ -426,19 +601,25 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
                   nameResults.length === 0 ? (
                     <div className="ft-note">No file names match.</div>
                   ) : (
-                    nameResults.map((p) => (
-                      <div
-                        key={p}
-                        className={`ft-row ft-file ${currentPath === p ? 'active' : ''}`}
-                        style={{ paddingLeft: 8 }}
-                        title={p}
-                        onClick={() => void openPath(p)}
-                      >
-                        <span className="ft-chevron-spacer" />
-                        <FileIcon />
-                        <span className="ft-name ft-name-path">{p}</span>
-                      </div>
-                    ))
+                    nameResults.map((p) => {
+                      const st = changed.get(p);
+                      return (
+                        <div
+                          key={p}
+                          className={`ft-row ft-file ${currentPath === p ? 'active' : ''} ${
+                            st ? `changed changed-${st}` : ''
+                          }`}
+                          style={{ paddingLeft: 8 }}
+                          title={p}
+                          onClick={() => void openPath(p)}
+                        >
+                          <span className="ft-chevron-spacer" />
+                          <FileIcon />
+                          <span className="ft-name ft-name-path">{p}</span>
+                          {st && <span className={`ft-status-dot ${st}`} title={`Modified (${st})`} />}
+                        </div>
+                      );
+                    })
                   )
                 ) : (
                   <>
@@ -480,6 +661,8 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
                     toggle={toggle}
                     onOpen={openFile}
                     currentPath={currentPath}
+                    changed={changed}
+                    changedDirs={changedDirs}
                   />
                   {truncated && (
                     <div className="ft-note ft-trunc">
