@@ -1,0 +1,105 @@
+generator client {
+  provider = "prisma-client-js"
+  // Non-dot output so electron-builder bundles it (it strips node_modules/.prisma).
+  // Ships inside backend/dist/generated/prisma via the build copy step.
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Project {
+  id          String    @id @default(cuid())
+  name        String
+  path        String    @unique
+  type        String?   // e.g. "node", "python", "unknown"
+  packageMgr  String?   // e.g. "npm", "pnpm", "yarn", "pip", "poetry"
+  status      String    @default("registered") // registered | analyzed | error
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  commands    RunCommand[]
+  runs        Run[]
+  analyses    Analysis[]
+  eodEntries  EodEntry[]
+}
+
+model RunCommand {
+  id         String   @id @default(cuid())
+  projectId  String
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  label      String   // e.g. "dev", "install", "build"
+  command    String   // e.g. "npm run dev"
+  cwd        String?  // defaults to project.path if null
+  isDefault  Boolean  @default(false)
+  source     String   @default("detected") // detected (from analyze) | custom (user-added)
+  createdAt  DateTime @default(now())
+
+  runs       Run[]
+}
+
+model Run {
+  id          String      @id @default(cuid())
+  projectId   String
+  project     Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  commandId   String?
+  command     RunCommand? @relation(fields: [commandId], references: [id], onDelete: SetNull)
+  kind        String      @default("command") // shell | claude | command
+  name        String?     // user-renamed tab label (persisted)
+  dockOpen    Boolean     @default(false)     // is this an open tab in the workspace (restored on reopen)
+  pid         Int?
+  status      String      @default("running") // running | exited | killed | error
+  exitCode    Int?
+  startedAt   DateTime    @default(now())
+  endedAt     DateTime?
+
+  logs        RunLog[]
+
+  @@index([dockOpen])
+}
+
+// Key/value store for persisted UI state (dock size, selected project, view,
+// last-open editor file, …). One row per key; value is a JSON string.
+model AppSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+model RunLog {
+  id     String   @id @default(cuid())
+  runId  String
+  run    Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  chunk  String
+  ts     DateTime @default(now())
+
+  @@index([runId, ts])
+}
+
+model Analysis {
+  id         String   @id @default(cuid())
+  projectId  String
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  rawResult  Json     // full JSON returned by claude -p
+  createdAt  DateTime @default(now())
+}
+
+// End-of-Day snapshot: what a project finished on a given day. Compiled on
+// demand (button) into one row per project per day. Retention: keep the newest
+// 10 days per project; older ones are pruned on each compile.
+model EodEntry {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  day       String   // local date key 'YYYY-MM-DD' — one EOD per project per day
+  items     String   // JSON array snapshot of finished runs that day
+  note      String?  // user-editable free-text note
+  summary   String?  // AI-generated narrative (claude -p), on demand
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([projectId, day])
+  @@index([projectId, day])
+}

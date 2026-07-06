@@ -1,0 +1,17 @@
+{
+  "name": "NARUKAMI · Project Runner",
+  "short_name": "NARUKAMI",
+  "description": "Local project runner",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#08080a",
+  "theme_color": "#08080a",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "type": "image/svg+xml",
+      "sizes": "any",
+      "purpose": "any maskable"
+    }
+  ]
+}

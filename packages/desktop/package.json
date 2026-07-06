@@ -1,0 +1,84 @@
+{
+  "name": "desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "NARUKAMI desktop (Electron) shell — embedded SQLite, no Docker.",
+  "author": "NARUKAMI",
+  "main": "dist-main/main.js",
+  "scripts": {
+    "build:main": "tsc -p tsconfig.json",
+    "stage": "node scripts/stage.mjs",
+    "serve:updates": "node scripts/serve-updates.mjs",
+    "start": "npm run build:main && electron .",
+    "dist": "npm run build:main && npm run stage && electron-builder --win nsis"
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.0.2",
+    "@fastify/static": "^8.0.0",
+    "@prisma/client": "^6.3.1",
+    "dotenv": "^16.4.7",
+    "electron-updater": "^6.8.9",
+    "fastify": "^5.2.1",
+    "node-pty": "^1.1.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "electron": "33.4.11",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.7.3"
+  },
+  "build": {
+    "appId": "com.narukami.app",
+    "productName": "NARUKAMI",
+    "electronVersion": "33.4.11",
+    "npmRebuild": false,
+    "icon": "build/icon.png",
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "http://127.0.0.1:4210/"
+      }
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist-app/**"
+    ],
+    "extraMetadata": {
+      "main": "dist-app/main.js"
+    },
+    "extraResources": [
+      {
+        "from": "../frontend/dist",
+        "to": "frontend"
+      },
+      {
+        "from": "../backend/prisma/dev.db",
+        "to": "narukami-template.db"
+      },
+      {
+        "from": "../backend/mcp-bridge.mjs",
+        "to": "mcp-bridge.mjs"
+      }
+    ],
+    "asarUnpack": [
+      "**/node_modules/node-pty/**",
+      "**/node_modules/@prisma/**",
+      "**/node_modules/.prisma/**",
+      "**/node_modules/prisma/**",
+      "**/*.node"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "artifactName": "NARUKAMI-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

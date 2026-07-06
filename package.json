@@ -1,0 +1,24 @@
+{
+  "name": "narukami",
+  "version": "1.0.0",
+  "private": true,
+  "description": "NARUKAMI — local project runner: register projects by path, analyze how they run with Claude Code, and run each in its own live browser terminal.",
+  "workspaces": [
+    "packages/backend",
+    "packages/frontend",
+    "packages/desktop"
+  ],
+  "scripts": {
+    "token": "node scripts/gen-token.mjs",
+    "dev": "npm run token && concurrently -k -n backend,frontend -c cyan,magenta \"npm:dev:backend\" \"npm:dev:frontend\"",
+    "dev:backend": "npm run dev -w backend",
+    "dev:frontend": "npm run dev -w frontend",
+    "build": "npm run build -w backend && npm run build -w frontend",
+    "migrate": "npm run migrate -w backend",
+    "desktop": "npm run build && npm run start -w desktop",
+    "desktop:dist": "npm run build && npm run dist -w desktop"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
