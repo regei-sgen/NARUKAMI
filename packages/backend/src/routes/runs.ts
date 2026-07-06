@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../db';
 import { isRunning, startClaude, startRun, startShell, stopRun } from '../services/runner';
+import { startAdminShell } from '../services/brokerServer';
 import { AnalyzerError, diagnoseRun } from '../services/analyzer';
 
 export async function runRoutes(app: FastifyInstance): Promise<void> {
@@ -47,26 +48,42 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
   );
 
   // Open an interactive shell (PowerShell / $SHELL) rooted at the project dir.
-  app.post<{ Params: { id: string } }>('/api/projects/:id/shell', async (req, reply) => {
-    const project = await prisma.project.findUnique({ where: { id: req.params.id } });
-    if (!project) return reply.code(404).send({ error: 'Project not found.' });
+  // `admin: true` (Windows only) opens an ELEVATED shell via the broker: it fires
+  // a UAC prompt and the run goes live once the elevated agent connects back.
+  app.post<{ Params: { id: string }; Body: { admin?: boolean } }>(
+    '/api/projects/:id/shell',
+    async (req, reply) => {
+      const project = await prisma.project.findUnique({ where: { id: req.params.id } });
+      if (!project) return reply.code(404).send({ error: 'Project not found.' });
 
-    const run = await prisma.run.create({
-      data: { projectId: project.id, kind: 'shell', dockOpen: true, status: 'running' },
-    });
+      const admin = req.body?.admin === true;
+      if (admin && process.platform !== 'win32') {
+        return reply.code(400).send({ error: 'Admin shells are only supported on Windows.' });
+      }
 
-    try {
-      const { pid } = startShell({ runId: run.id, cwd: project.path });
-      await prisma.run.update({ where: { id: run.id }, data: { pid } });
-      return reply.code(201).send({ runId: run.id, pid });
-    } catch (err) {
-      await prisma.run.update({
-        where: { id: run.id },
-        data: { status: 'error', endedAt: new Date() },
+      const run = await prisma.run.create({
+        data: { projectId: project.id, kind: 'shell', dockOpen: true, status: 'running' },
       });
-      return reply.code(500).send({ error: `Failed to open shell: ${String(err)}` });
-    }
-  });
+
+      try {
+        if (admin) {
+          // No local pid — elevation is async. The tab shows "waiting for UAC"
+          // until the broker connects (then /api/runs/:id reports live=true).
+          await startAdminShell({ runId: run.id, cwd: project.path });
+          return reply.code(201).send({ runId: run.id, elevated: true, pending: true });
+        }
+        const { pid } = startShell({ runId: run.id, cwd: project.path });
+        await prisma.run.update({ where: { id: run.id }, data: { pid } });
+        return reply.code(201).send({ runId: run.id, pid, elevated: false });
+      } catch (err) {
+        await prisma.run.update({
+          where: { id: run.id },
+          data: { status: 'error', endedAt: new Date() },
+        });
+        return reply.code(500).send({ error: `Failed to open shell: ${String(err)}` });
+      }
+    },
+  );
 
   // Open an interactive Claude Code session in the project dir. `continue: true`
   // resumes the most recent conversation in that dir (`claude --continue`) and

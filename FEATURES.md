@@ -122,8 +122,8 @@ PTY details:
 - **Retention**: keep the newest 10 days **per project**; older entries pruned on each compile.
 
 ### 4.12 Finish notifications
-- When a session-started shell/claude run ends, an in-app toast (bottom-right; click routes to that run's project+tab) plus a best-effort **native OS notification** when the window is backgrounded.
-- Gating (`lib/notify.ts`): session-scoped, deduped, terminal-only, shell/claude-only.
+- **Finish toast** — when a session-started shell/claude run ends, an in-app toast (bottom-right; click routes to that run's project+tab) plus a best-effort **native OS notification** when the window is backgrounded. Gating (`lib/notify.ts`): session-scoped, deduped, terminal-only, shell/claude-only.
+- **Task-done toast** — a Claude session that finishes responding and goes idle raises a "task done" toast. To avoid false fires it is armed only on a **submit** (Enter), waits out a **5 s** idle window (spans mid-response pauses), and is scoped to **Claude tabs only** (shell/command output pauses are indistinguishable from "done" on a timer and are covered instead by the finish-on-exit toast).
 
 ### 4.13 Claude ↔ Claude terminal orchestration (new)
 Lets a Claude session **running inside NARUKAMI** read and drive the *other* live terminals.
@@ -149,7 +149,25 @@ Lets a Claude session **running inside NARUKAMI** read and drive the *other* liv
 
 **Usage**: open a Claude tab plus another tab, then tell the Claude e.g. *"list_terminals, then send `npm test` to the shell tab and read the result."* First use shows a one-time "approve MCP server?" prompt in the orchestrator tab.
 
-### 4.14 Workspace persistence
+### 4.14 Elevated (Administrator) shells — broker (Windows)
+A **"🛡 Shell (Admin)"** button opens a real elevated PowerShell **streamed in-app**, without elevating the rest of NARUKAMI.
+
+**Why it needs a broker:** node-pty's ConPTY is owned by the backend at Medium integrity; a Medium process cannot attach a console to a High-integrity (elevated) child. But a loopback socket crosses integrity levels. So:
+
+1. `POST /api/projects/:id/shell` with `{admin:true}` creates the Run and calls `startAdminShell` (`services/brokerServer.ts`).
+2. The backend mints a one-time token, writes a `0600` config to temp, and launches `broker-agent.mjs` **elevated** via `Start-Process -Verb RunAs` (the UAC prompt). The token travels in the temp file, not argv.
+3. The elevated agent (High integrity) spawns an elevated PowerShell PTY and connects back to the backend's loopback listener, authenticating with the token (consumed once; expires after 90 s).
+4. The backend wraps that socket as a `RunTransport` and `registerRun`s it — from here it streams to xterm exactly like a local run (`runner.ts` is transport-agnostic: local PTY or broker socket).
+
+**Frontend UX:** the tab shows *"⏳ Waiting for Administrator elevation — approve the UAC prompt…"* and polls `GET /api/runs/:id` until `live:true`, then opens the WebSocket. If UAC is cancelled or times out, the run is marked errored with an explanatory line. Elevated tabs carry a 🛡 badge.
+
+**Wire protocol** (agent ↔ backend, newline-delimited JSON, terminal bytes base64): `hello{token,runId,pid}` → `data` / `exit`; backend → `input` / `resize` / `kill`.
+
+**Security:** listener binds 127.0.0.1; only a connection presenting the pending run's one-time token is accepted; token is a 32-byte secret in a `0600` file, consumed on first use, expired on timeout. Elevation is per-tab — the backend and all other runs stay non-elevated. Env `NARUKAMI_BROKER_NO_ELEVATE=1` runs the agent **without** UAC (plumbing tests only; the shell is then not actually elevated). Packaged via `extraResource` (`resources/broker-agent.mjs`, outside asar — it's spawned as its own process).
+
+**Limitation:** Restarting an admin tab spawns a plain (non-elevated) shell — elevation isn't persisted across restart in v1.
+
+### 4.15 Workspace persistence
 - `GET /api/workspace` — restore all open terminal tabs (with live/exited status) + persisted UI settings.
 - `POST /api/settings` — bulk-upsert UI state (dock size, selected project, active view, last-open editor file, …) as one row per key.
 
@@ -228,6 +246,7 @@ All under `/api`, bearer-token gated.
 | `RUNNER_TOKEN_FILE` | Where the bearer token is stored (default `<repo>/.runner-token`) |
 | `NARUKAMI_EMBEDDED` | `1` in the Electron shell; makes `index.ts` skip standalone `main()` and let Electron call `start()` |
 | `NARUKAMI_ORCHESTRATION` | `0` disables the Claude↔Claude MCP bridge |
+| `NARUKAMI_BROKER_NO_ELEVATE` | `1` runs the admin-shell broker agent WITHOUT UAC (plumbing tests only — the shell is then not actually elevated) |
 
 **Dev-launch note (this machine):** the interactive shell profile bakes in `NARUKAMI_EMBEDDED=1` and a mismatched `RUNNER_TOKEN_FILE`, which silently break `npm run dev` (backend never binds 4000 → 401s). Launch with both unset: `env -u NARUKAMI_EMBEDDED -u RUNNER_TOKEN_FILE npm run dev`.
 

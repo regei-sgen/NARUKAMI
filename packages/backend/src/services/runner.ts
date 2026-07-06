@@ -12,9 +12,48 @@ export type RunnerEvent =
 
 type Subscriber = (event: RunnerEvent) => void;
 
+/**
+ * Everything a managed run needs from its underlying process, regardless of
+ * whether that process is a local node-pty (normal runs) or an elevated PTY
+ * hosted by a separate admin broker and piped over a loopback socket (admin
+ * shells). Decoupling the run bookkeeping from node-pty lets both share the same
+ * streaming / persistence / attach machinery.
+ */
+export interface RunTransport {
+  readonly pid: number;
+  write(data: string): void;
+  resize(cols: number, rows: number): void;
+  kill(): void;
+  onData(cb: (chunk: string) => void): void;
+  onExit(cb: (info: { exitCode: number | null }) => void): void;
+}
+
+/** Wrap a local node-pty process as a RunTransport. */
+function ptyTransport(file: string, args: string[], cwd: string): RunTransport {
+  const proc = pty.spawn(file, args, {
+    name: 'xterm-color',
+    cols: 80,
+    rows: 30,
+    cwd,
+    env: cleanEnv(),
+  });
+  return {
+    pid: proc.pid,
+    write: (data) => proc.write(data),
+    resize: (cols, rows) => proc.resize(cols, rows),
+    kill: () => proc.kill(),
+    onData: (cb) => {
+      proc.onData(cb);
+    },
+    onExit: (cb) => {
+      proc.onExit(({ exitCode }) => cb({ exitCode: exitCode ?? null }));
+    },
+  };
+}
+
 interface ManagedRun {
   runId: string;
-  proc: pty.IPty;
+  transport: RunTransport;
   subscribers: Set<Subscriber>;
   killedByUser: boolean;
   /** Un-persisted chunks awaiting a DB flush. */
@@ -142,19 +181,15 @@ export function interactiveShell(): { file: string; args: string[] } {
   return { file: shell, args: ['-i'] };
 }
 
-/** Spawn a pty, wire up streaming/persistence, and track it. Throws if spawn fails. */
-function spawnManaged(runId: string, file: string, args: string[], cwd: string): { pid: number } {
-  const proc = pty.spawn(file, args, {
-    name: 'xterm-color',
-    cols: 80,
-    rows: 30,
-    cwd,
-    env: cleanEnv(),
-  });
-
+/**
+ * Wire a transport's streaming/persistence/exit handling and track it in the
+ * run map. Shared by local-pty runs and admin-broker runs. Throws only if the
+ * transport constructor itself threw before calling this.
+ */
+export function registerRun(runId: string, transport: RunTransport): void {
   const managed: ManagedRun = {
     runId,
-    proc,
+    transport,
     subscribers: new Set(),
     killedByUser: false,
     logBuffer: [],
@@ -167,14 +202,15 @@ function spawnManaged(runId: string, file: string, args: string[], cwd: string):
   };
   runs.set(runId, managed);
 
-  proc.onData((chunk) => {
+  transport.onData((chunk) => {
     appendTranscript(managed, chunk);
     for (const sub of managed.subscribers) sub({ type: 'data', chunk });
     managed.logBuffer.push(chunk);
     scheduleFlush(managed);
   });
 
-  proc.onExit(({ exitCode }) => {
+  transport.onExit(({ exitCode }) => {
+    if (managed.exited) return; // idempotent — a broker socket close + exit frame can race
     managed.exited = true;
     managed.finalStatus = managed.killedByUser ? 'killed' : 'exited';
     managed.finalExitCode = exitCode ?? null;
@@ -202,8 +238,13 @@ function spawnManaged(runId: string, file: string, args: string[], cwd: string):
       runs.delete(runId);
     })();
   });
+}
 
-  return { pid: proc.pid };
+/** Spawn a local pty, wire it up, and track it. Throws if spawn fails. */
+function spawnManaged(runId: string, file: string, args: string[], cwd: string): { pid: number } {
+  const transport = ptyTransport(file, args, cwd);
+  registerRun(runId, transport);
+  return { pid: transport.pid };
 }
 
 /** Spawn a pty for `command`. Throws synchronously if the shell can't start. */
@@ -345,7 +386,7 @@ export function getFinalState(runId: string): { status: RunFinalStatus; exitCode
 export function writeToRun(runId: string, data: string): boolean {
   const m = runs.get(runId);
   if (!m || m.exited) return false;
-  m.proc.write(data);
+  m.transport.write(data);
   return true;
 }
 
@@ -353,7 +394,7 @@ export function resizeRun(runId: string, cols: number, rows: number): boolean {
   const m = runs.get(runId);
   if (!m || m.exited) return false;
   try {
-    m.proc.resize(Math.max(1, Math.floor(cols)), Math.max(1, Math.floor(rows)));
+    m.transport.resize(Math.max(1, Math.floor(cols)), Math.max(1, Math.floor(rows)));
     return true;
   } catch {
     return false;
@@ -365,7 +406,7 @@ export function stopRun(runId: string): boolean {
   if (!m) return false;
   m.killedByUser = true;
   try {
-    m.proc.kill();
+    m.transport.kill();
   } catch {
     // best effort — onExit will still fire if it was already dying
   }

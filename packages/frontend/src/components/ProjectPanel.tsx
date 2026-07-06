@@ -6,7 +6,7 @@ interface Props {
   project: Project;
   onAnalyze: (id: string) => Promise<{ project: Project; analysis: AnalyzerResult }>;
   onRun: (project: Project, command: RunCommand) => void;
-  onShell: (project: Project) => void;
+  onShell: (project: Project, admin?: boolean) => void;
   onClaude: (project: Project) => void;
   onContinueClaude: (project: Project) => void;
   onChanged: () => void | Promise<void>;
@@ -105,6 +105,13 @@ export function ProjectPanel({
         <div className="panel-head-actions">
           <button className="btn btn-shell" onClick={() => onShell(project)}>
             ⌨ Shell
+          </button>
+          <button
+            className="btn btn-shell"
+            title="Open an elevated PowerShell (Administrator) — triggers a UAC prompt"
+            onClick={() => onShell(project, true)}
+          >
+            🛡 Shell (Admin)
           </button>
           <button
             className="btn btn-claude"

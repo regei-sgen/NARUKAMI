@@ -18,8 +18,10 @@ interface Props {
 }
 
 // Quiet period after the last output byte before we call the run "idle"/done.
-// Spans Claude's spinner-frame gaps; short enough to feel responsive.
-const IDLE_MS = 2500;
+// Must span Claude's mid-response pauses (tool calls / thinking) so we don't
+// fire a premature "task done" while it's still working — hence a few seconds,
+// not sub-second.
+const IDLE_MS = 5000;
 
 interface ServerMessage {
   type: 'data' | 'exit' | 'error';
@@ -50,6 +52,8 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity }
     let working = false;
     let pendingTask = false; // user sent input since the last idle → next idle is a task
     let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    // For elevated shells: the liveness poll timer while awaiting UAC + broker.
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
     const goIdle = () => {
       idleTimer = null;
       if (!working) return;
@@ -105,92 +109,133 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity }
         safeFit();
       }
 
-      const socket = new WebSocket(runWsUrl(run.runId));
-      ws = socket;
-
-      const sendResize = () => {
-        if (socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({ type: 'resize', cols: t.cols, rows: t.rows }));
-        }
-      };
-
-      socket.onopen = () => {
-        onStatus(run.runId, 'running', null);
-        sendResize();
-      };
-
-      dataDisposable = t.onData((data) => {
-        // Any user keystroke arms "a task is in progress" so the next idle edge
-        // is reported as a completed task (booting/replay has no input → no toast).
-        pendingTask = true;
-        if (socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({ type: 'input', data }));
-        }
-      });
-
-      socket.onmessage = (ev) => {
+      const openSocket = () => {
         if (disposed) return;
-        let msg: ServerMessage;
-        try {
-          msg = JSON.parse(ev.data as string) as ServerMessage;
-        } catch {
-          return;
-        }
-        if (msg.type === 'data' && typeof msg.chunk === 'string') {
-          t.write(msg.chunk);
-          bumpActivity();
-        } else if (msg.type === 'exit') {
-          gotExit = true;
-          if (idleTimer) clearTimeout(idleTimer);
-          idleTimer = null;
-          working = false;
-          onActivity?.(run.runId, false, false); // process ended → finish-toast handles "done"
-          const status = normalizeStatus(msg.status);
-          onStatus(run.runId, status, msg.exitCode ?? null);
-          // A hard-killed full-screen TUI (vim/htop) can't restore the terminal
-          // itself — leave the alt buffer, re-show the cursor, and turn off mouse
-          // tracking / bracketed paste so the tab isn't left on a frozen frame.
-          t.write('\x1b[?1049l\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?2004l');
-          const code = msg.exitCode != null ? ` — exit ${msg.exitCode}` : '';
-          t.write(`\r\n\x1b[90m[process ${status}${code}]\x1b[0m\r\n`);
-        } else if (msg.type === 'error') {
-          gotExit = true;
-          if (idleTimer) clearTimeout(idleTimer);
-          idleTimer = null;
-          working = false;
-          onActivity?.(run.runId, false, false);
-          onStatus(run.runId, 'error', null);
-          t.write(`\r\n\x1b[31m[error] ${msg.message ?? 'unknown'}\x1b[0m\r\n`);
-        }
+        const socket = new WebSocket(runWsUrl(run.runId));
+        ws = socket;
+
+        const sendResize = () => {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'resize', cols: t.cols, rows: t.rows }));
+          }
+        };
+
+        socket.onopen = () => {
+          onStatus(run.runId, 'running', null);
+          sendResize();
+        };
+
+        dataDisposable = t.onData((data) => {
+          // Arm "a task is in progress" only on a SUBMIT (Enter/carriage-return),
+          // not on every keystroke. Otherwise arrow keys, tab-completion, Ctrl-C,
+          // scrolling, or a bare Enter would each arm a false "task done" toast on
+          // the next output pause. Booting/replay has no input → no toast.
+          if (data.includes('\r') || data.includes('\n')) pendingTask = true;
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'input', data }));
+          }
+        });
+
+        socket.onmessage = (ev) => {
+          if (disposed) return;
+          let msg: ServerMessage;
+          try {
+            msg = JSON.parse(ev.data as string) as ServerMessage;
+          } catch {
+            return;
+          }
+          if (msg.type === 'data' && typeof msg.chunk === 'string') {
+            t.write(msg.chunk);
+            bumpActivity();
+          } else if (msg.type === 'exit') {
+            gotExit = true;
+            if (idleTimer) clearTimeout(idleTimer);
+            idleTimer = null;
+            working = false;
+            onActivity?.(run.runId, false, false); // process ended → finish-toast handles "done"
+            const status = normalizeStatus(msg.status);
+            onStatus(run.runId, status, msg.exitCode ?? null);
+            // A hard-killed full-screen TUI (vim/htop) can't restore the terminal
+            // itself — leave the alt buffer, re-show the cursor, and turn off mouse
+            // tracking / bracketed paste so the tab isn't left on a frozen frame.
+            t.write('\x1b[?1049l\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?2004l');
+            const code = msg.exitCode != null ? ` — exit ${msg.exitCode}` : '';
+            t.write(`\r\n\x1b[90m[process ${status}${code}]\x1b[0m\r\n`);
+          } else if (msg.type === 'error') {
+            gotExit = true;
+            if (idleTimer) clearTimeout(idleTimer);
+            idleTimer = null;
+            working = false;
+            onActivity?.(run.runId, false, false);
+            onStatus(run.runId, 'error', null);
+            t.write(`\r\n\x1b[31m[error] ${msg.message ?? 'unknown'}\x1b[0m\r\n`);
+          }
+        };
+
+        socket.onerror = () => {
+          if (!disposed) t.write('\r\n\x1b[31m[websocket error — is the backend running?]\x1b[0m\r\n');
+        };
+
+        // An abnormal close (backend crash/restart) never sends an exit message —
+        // surface it so the tab doesn't stay stuck 'running' forever.
+        socket.onclose = () => {
+          if (!disposed && !gotExit) onStatus(run.runId, 'error', null);
+        };
+
+        onWinResize = () => {
+          safeFit();
+          sendResize();
+        };
+        window.addEventListener('resize', onWinResize);
+
+        // Refit when the container becomes visible / changes size (tab switch).
+        ro = new ResizeObserver(() => {
+          safeFit();
+          sendResize();
+        });
+        if (container) ro.observe(container);
       };
 
-      socket.onerror = () => {
-        if (!disposed) t.write('\r\n\x1b[31m[websocket error — is the backend running?]\x1b[0m\r\n');
-      };
-
-      // An abnormal close (backend crash/restart) never sends an exit message —
-      // surface it so the tab doesn't stay stuck 'running' forever.
-      socket.onclose = () => {
-        if (!disposed && !gotExit) onStatus(run.runId, 'error', null);
-      };
-
-      onWinResize = () => {
-        safeFit();
-        sendResize();
-      };
-      window.addEventListener('resize', onWinResize);
-
-      // Refit when the container becomes visible / changes size (tab switch).
-      ro = new ResizeObserver(() => {
-        safeFit();
-        sendResize();
-      });
-      if (container) ro.observe(container);
+      // An elevated (admin) shell isn't live until the broker connects back after
+      // the UAC prompt. Streaming before then would make the ws slow-path report a
+      // premature exit — so poll liveness first and only open the socket once live.
+      if (run.pending) {
+        t.write(
+          '\x1b[90m⏳ Waiting for Administrator elevation — approve the UAC prompt…\x1b[0m\r\n',
+        );
+        const poll = async () => {
+          if (disposed) return;
+          try {
+            const info = await api.getRun(run.runId);
+            if (disposed) return;
+            if (info.live) {
+              openSocket();
+              return;
+            }
+            const s = info.status;
+            if (s && s !== 'running' && s !== 'connecting') {
+              // Errored/ended before going live (UAC cancelled or timed out).
+              const hist = (info.logs ?? []).map((l) => l.chunk).join('');
+              if (hist) t.write(hist);
+              gotExit = true;
+              onStatus(run.runId, normalizeStatus(s), info.exitCode ?? null);
+              return;
+            }
+          } catch {
+            /* transient — keep polling */
+          }
+          pollTimer = setTimeout(poll, 800);
+        };
+        void poll();
+      } else {
+        openSocket();
+      }
     });
 
     return () => {
       disposed = true;
       cancelAnimationFrame(raf);
+      if (pollTimer) clearTimeout(pollTimer);
       if (idleTimer) clearTimeout(idleTimer);
       if (working) onActivity?.(run.runId, false, false); // tab unmounting → clear working
       if (onWinResize) window.removeEventListener('resize', onWinResize);
@@ -223,6 +268,7 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity }
     <div className="terminal-tab">
       <div className="terminal-toolbar">
         <span className="term-title">
+          {run.elevated ? '🛡 ' : ''}
           {run.kind === 'shell' ? '⌨ ' : run.kind === 'claude' ? '✦ ' : ''}
           {run.projectName} · {run.customLabel ?? run.label}
         </span>

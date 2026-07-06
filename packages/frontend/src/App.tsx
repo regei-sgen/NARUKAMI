@@ -293,6 +293,7 @@ export default function App() {
     project: Project,
     label: string,
     kind: 'command' | 'shell' | 'claude',
+    opts: { elevated?: boolean; pending?: boolean } = {},
   ) => {
     sessionRunsRef.current.add(runId); // eligible for a finish notification
     setActiveRuns((cur) => [
@@ -305,6 +306,8 @@ export default function App() {
         kind,
         status: 'connecting',
         exitCode: null,
+        elevated: opts.elevated,
+        pending: opts.pending,
       },
     ]);
     setActiveTabByProject((m) => ({ ...m, [project.id]: runId }));
@@ -320,11 +323,14 @@ export default function App() {
     }
   };
 
-  const openShell = async (project: Project) => {
+  const openShell = async (project: Project, admin = false) => {
     setError(null);
     try {
-      const { runId } = await api.openShell(project.id);
-      openRunTab(runId, project, 'shell', 'shell');
+      const { runId, elevated, pending } = await api.openShell(project.id, admin);
+      openRunTab(runId, project, admin ? 'shell (admin)' : 'shell', 'shell', {
+        elevated: elevated ?? admin,
+        pending: pending ?? admin,
+      });
     } catch (e) {
       setError((e as Error).message);
     }
@@ -426,7 +432,11 @@ export default function App() {
       const run = activeRunsRef.current.find((r) => r.runId === runId);
       if (!run || run.status !== 'running') return;
       if (!sessionRunsRef.current.has(runId)) return;
-      if (run.kind !== 'claude' && run.kind !== 'shell' && run.kind !== 'command') return;
+      // Task-done toasts fire for Claude sessions only. Shell/command tabs run
+      // long-lived processes (dev servers, watchers) whose output pauses look
+      // identical to "done" on a timer — a guaranteed false-positive source.
+      // Those still get the reliable finish toast when the process actually exits.
+      if (run.kind !== 'claude') return;
       taskSeqRef.current += 1;
       pushToast(taskToast(run, taskSeqRef.current));
     },
@@ -614,6 +624,7 @@ export default function App() {
                             title="Double-click to rename"
                           >
                             <span className={`dot dot-${r.status}`} />
+                            {r.elevated ? '🛡 ' : ''}
                             {r.kind === 'shell' ? '⌨ ' : r.kind === 'claude' ? '✦ ' : ''}
                             {r.customLabel ?? r.label}
                           </button>

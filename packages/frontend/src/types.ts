@@ -69,6 +69,10 @@ export interface ActiveRun {
   kind: 'command' | 'shell' | 'claude';
   status: RunStatus;
   exitCode: number | null;
+  // Admin (elevated) shell — streamed via the broker. `pending` is true while the
+  // UAC prompt is outstanding and the elevated agent hasn't connected back yet.
+  elevated?: boolean;
+  pending?: boolean;
 }
 
 // A notification shown as a clickable toast (routes to the tab).

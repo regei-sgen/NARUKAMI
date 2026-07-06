@@ -94,10 +94,23 @@ export const api = {
       body: JSON.stringify({ commandId }),
     }),
 
-  openShell: (projectId: string) =>
-    request<{ runId: string; pid: number }>(`/api/projects/${projectId}/shell`, {
-      method: 'POST',
-    }),
+  // admin: open an ELEVATED shell (Windows) — fires UAC; goes live once the
+  // elevated broker connects back. `pid` is absent until then.
+  openShell: (projectId: string, admin = false) =>
+    request<{ runId: string; pid?: number; elevated?: boolean; pending?: boolean }>(
+      `/api/projects/${projectId}/shell`,
+      { method: 'POST', body: JSON.stringify({ admin }) },
+    ),
+
+  // Run details + liveness (used to poll a pending elevated shell until it's live).
+  getRun: (runId: string) =>
+    request<{
+      id: string;
+      status: string;
+      exitCode: number | null;
+      live: boolean;
+      logs?: { chunk: string }[];
+    }>(`/api/runs/${runId}`),
 
   // resume: reopen the most recent conversation in the project dir (claude --continue).
   openClaude: (projectId: string, opts: { effort?: string; resume?: boolean } = {}) =>
