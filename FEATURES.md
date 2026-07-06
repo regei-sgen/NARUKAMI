@@ -108,12 +108,16 @@ PTY details:
 - `GET /api/projects/:id/tree` — bounded, ignore-filtered file tree (skips `node_modules`, `.git`, `dist`, `venv`, caches, etc.; caps at 4000 entries / depth 12; reports `truncated`).
 - `GET /api/projects/:id/file?path=…` — read a file (≤1 MiB; binary sniff rejects files with NUL in the first 8 KB).
 - `POST /api/projects/:id/file` — create-or-overwrite (≤5 MiB) inside the project root, with the symlink/escape guards described in §3.
+- **Search** — the tree sidebar has a **Name / Code** toggle + search box:
+  - *Name* filters the file tree client-side by path (quick-open); click a result to open it.
+  - *Code* calls `GET /api/projects/:id/search?q=…` (debounced), a case-insensitive content grep across the project. Bounded for safety: ignore-dirs, per-file ≤512 KB, binaries skipped, ≤500 total matches (`truncated` flagged). Each hit shows file · line · text; clicking opens the file and **reveals + focuses the matched line** in Monaco.
 
 ### 4.10 Diagnose a failed run
 - `POST /api/runs/:runId/diagnose` — feed a failed run's captured output (tail) to `claude -p`, get a plain-text explanation + fix steps.
 
 ### 4.11 End-of-Day (EOD) view
 - Third main view alongside Runner and Editor.
+- **Features added (git commits)** — each EOD entry leads with a detailed list of the day's git commits for the project: subject, full body/details, short hash, and files-changed count. Recomputed from git **on read** (`services/gitLog.ts`; `gitCommitsForDay` filters `git log` by the local day) so nothing extra is stored and history stays accurate — no schema change (safe for already-installed DBs). Bounded (≤200 commits, ≤4 KB body, 10 s git timeout); returns `[]` if the project isn't a git repo. The AI day summary now leads with these commits too.
 - `POST /api/projects/:id/eod/compile` — snapshot every run that **finished today** (status exited/killed/error) into one `EodEntry` per project per day (`@@unique([projectId, day])`), with an optional free-text note.
 - `POST /api/eod/:eodId/note` — edit an entry's note without recompiling.
 - `POST /api/eod/:eodId/summarize` — generate an AI narrative (`claude -p`) of the day from the run items + note.
@@ -208,9 +212,10 @@ All under `/api`, bearer-token gated.
 - `GET  /api/projects/:id/tree`
 - `GET  /api/projects/:id/file`
 - `POST /api/projects/:id/file`
+- `GET  /api/projects/:id/search`
 
 **End-of-Day**
-- `GET    /api/projects/:id/eod`
+- `GET    /api/projects/:id/eod` (each entry includes the day's git `commits`)
 - `POST   /api/projects/:id/eod/compile`
 - `POST   /api/eod/:eodId/note`
 - `POST   /api/eod/:eodId/summarize`

@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../db';
 import { AnalyzerError, summarizeDay } from '../services/analyzer';
+import { commitsToText, gitCommitsForDay, type Commit } from '../services/gitLog';
 
 // Keep the newest N days of EOD entries per project; older ones are pruned.
 const RETENTION_DAYS = 10;
@@ -19,6 +20,12 @@ export function dayBounds(d: Date): { start: Date; end: Date } {
   const end = new Date(start);
   end.setDate(end.getDate() + 1);
   return { start, end };
+}
+
+/** Local-day bounds from a 'YYYY-MM-DD' key (for recomputing a past day's commits). */
+export function boundsForDayKey(day: string): { start: Date; end: Date } {
+  const [y, m, d] = day.split('-').map(Number);
+  return dayBounds(new Date(y, (m || 1) - 1, d || 1));
 }
 
 export interface EodItem {
@@ -77,17 +84,20 @@ export function parseItems(raw: string): EodItem[] {
   }
 }
 
-function serialize(entry: {
-  id: string;
-  projectId: string;
-  day: string;
-  items: string;
-  note: string | null;
-  summary: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-}) {
-  return { ...entry, items: parseItems(entry.items) };
+function serialize(
+  entry: {
+    id: string;
+    projectId: string;
+    day: string;
+    items: string;
+    note: string | null;
+    summary: string | null;
+    createdAt: Date;
+    updatedAt: Date;
+  },
+  commits: Commit[] = [],
+) {
+  return { ...entry, items: parseItems(entry.items), commits };
 }
 
 export async function eodRoutes(app: FastifyInstance): Promise<void> {
@@ -100,7 +110,14 @@ export async function eodRoutes(app: FastifyInstance): Promise<void> {
       where: { projectId: project.id },
       orderBy: { day: 'desc' },
     });
-    return entries.map(serialize);
+    // Recompute each day's commits from git on read (no schema/storage needed;
+    // git history is immutable). One git call per kept day (≤10) — cheap.
+    return Promise.all(
+      entries.map(async (e) => {
+        const { start, end } = boundsForDayKey(e.day);
+        return serialize(e, await gitCommitsForDay(project.path, start, end));
+      }),
+    );
   });
 
   // Compile (or re-compile) today's EOD for a project: snapshot every run that
@@ -149,7 +166,8 @@ export async function eodRoutes(app: FastifyInstance): Promise<void> {
         where: { projectId: project.id, id: { notIn: [...keepIds] } },
       });
 
-      return reply.code(201).send(serialize(entry));
+      const commits = await gitCommitsForDay(project.path, start, end);
+      return reply.code(201).send(serialize(entry, commits));
     },
   );
 
@@ -157,14 +175,19 @@ export async function eodRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Params: { eodId: string }; Body: { note?: string } }>(
     '/api/eod/:eodId/note',
     async (req, reply) => {
-      const existing = await prisma.eodEntry.findUnique({ where: { id: req.params.eodId } });
+      const existing = await prisma.eodEntry.findUnique({
+        where: { id: req.params.eodId },
+        include: { project: true },
+      });
       if (!existing) return reply.code(404).send({ error: 'EOD entry not found.' });
       const raw = typeof req.body?.note === 'string' ? req.body.note.trim().slice(0, 2000) : '';
       const entry = await prisma.eodEntry.update({
         where: { id: existing.id },
         data: { note: raw || null },
       });
-      return serialize(entry);
+      const { start, end } = boundsForDayKey(existing.day);
+      const commits = await gitCommitsForDay(existing.project.path, start, end);
+      return serialize(entry, commits);
     },
   );
 
@@ -178,19 +201,23 @@ export async function eodRoutes(app: FastifyInstance): Promise<void> {
 
     const items = parseItems(entry.items);
     const runsText = items.map(itemLine).join('\n');
+    const { start, end } = boundsForDayKey(entry.day);
+    const commits = await gitCommitsForDay(entry.project.path, start, end);
+    const commitsText = commitsToText(commits);
 
     try {
       const summary = await summarizeDay(
         entry.project.path,
         entry.day,
         runsText,
+        commitsText,
         entry.note ?? '',
       );
       const updated = await prisma.eodEntry.update({
         where: { id: entry.id },
         data: { summary: summary || null },
       });
-      return serialize(updated);
+      return serialize(updated, commits);
     } catch (err) {
       if (err instanceof AnalyzerError) {
         return reply.code(502).send({ error: err.message });

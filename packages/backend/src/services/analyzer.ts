@@ -313,17 +313,23 @@ export async function summarizeDay(
   projectPath: string,
   day: string,
   runsText: string,
+  commitsText: string,
   note: string,
 ): Promise<string> {
   const prompt = `You are writing a short end-of-day work summary for a software project, for ${day}.
 
-Here is what finished in the project today (label · kind · status · duration):
+Features/changes committed to git today (subject + details per commit):
 """
-${runsText.slice(-8000) || '(no finished runs recorded)'}
+${commitsText.slice(-9000) || '(no commits today)'}
+"""
+
+Runs that finished in the project today (label · kind · status · duration):
+"""
+${runsText.slice(-6000) || '(no finished runs recorded)'}
 """
 
 ${note ? `The developer's own note for the day:\n"""\n${note.slice(0, 2000)}\n"""\n` : ''}
-Write a concise, factual end-of-day summary (2-4 sentences, plain text, no markdown, no bullet list) describing what appears to have been worked on and any failures worth noting. If there's very little signal, say so briefly. Do not invent specifics that aren't supported by the data.`;
+Write a concise, factual end-of-day summary (2-5 sentences, plain text, no markdown, no bullet list). Lead with the features/changes that were added (from the commits); mention notable run failures if any. If there's very little signal, say so briefly. Do not invent specifics that aren't supported by the data.`;
 
   const stdout = await runClaude(prompt, projectPath);
   return unwrapEnvelope(stdout).trim();

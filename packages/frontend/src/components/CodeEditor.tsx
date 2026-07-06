@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Editor, { type OnMount } from '@monaco-editor/react';
 import '../lib/monaco-setup'; // side-effect: offline workers + narukami theme + loader.config
 import { api } from '../api';
@@ -198,6 +198,18 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
+  // Search: by file name (client-side filter of the tree) or by code (backend grep).
+  const [searchMode, setSearchMode] = useState<'name' | 'code'>('name');
+  const [query, setQuery] = useState('');
+  const [codeResults, setCodeResults] = useState<{ path: string; line: number; text: string }[]>([]);
+  const [codeTruncated, setCodeTruncated] = useState(false);
+  const [codeSearching, setCodeSearching] = useState(false);
+  const [codeErr, setCodeErr] = useState<string | null>(null);
+
+  // Line to reveal after a file opens (set when jumping from a code-search hit).
+  const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
+  const [revealLine, setRevealLine] = useState<number | null>(null);
+
   const dirty = currentPath !== null && content !== original;
 
   // Load the file tree whenever the selected project changes.
@@ -239,7 +251,7 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
   }, []);
 
   const openPath = useCallback(
-    async (filePath: string) => {
+    async (filePath: string, line?: number) => {
       setLoadingFile(true);
       setFileErr(null);
       setSaved(false);
@@ -248,6 +260,7 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
         setCurrentPath(filePath);
         setContent(r.content);
         setOriginal(r.content);
+        if (line && line > 0) setRevealLine(line);
         onOpenFile?.(filePath); // persist as the project's last-open file
       } catch (e) {
         setFileErr((e as Error).message);
@@ -257,6 +270,72 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
     },
     [project.id, onOpenFile],
   );
+
+  // Flattened file paths for the name-search filter (rebuilt when the tree changes).
+  const flatFiles = useMemo(() => {
+    const out: string[] = [];
+    const rec = (ns: FileNode[]): void => {
+      for (const n of ns) {
+        if (n.type === 'dir') {
+          if (n.children) rec(n.children);
+        } else {
+          out.push(n.path);
+        }
+      }
+    };
+    rec(tree);
+    return out;
+  }, [tree]);
+
+  const nameResults = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (searchMode !== 'name' || !q) return [];
+    return flatFiles.filter((p) => p.toLowerCase().includes(q)).slice(0, 300);
+  }, [flatFiles, query, searchMode]);
+
+  // Debounced backend content search.
+  useEffect(() => {
+    const q = query.trim();
+    if (searchMode !== 'code' || !q) {
+      setCodeResults([]);
+      setCodeTruncated(false);
+      setCodeErr(null);
+      setCodeSearching(false);
+      return;
+    }
+    setCodeSearching(true);
+    let cancelled = false;
+    const t = setTimeout(() => {
+      api
+        .searchCode(project.id, q)
+        .then((r) => {
+          if (cancelled) return;
+          setCodeResults(r.matches);
+          setCodeTruncated(r.truncated);
+          setCodeErr(null);
+        })
+        .catch((e) => {
+          if (!cancelled) setCodeErr((e as Error).message);
+        })
+        .finally(() => {
+          if (!cancelled) setCodeSearching(false);
+        });
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [project.id, query, searchMode]);
+
+  // Reveal + focus a line once the target file's content has loaded.
+  useEffect(() => {
+    if (!revealLine || !editorRef.current) return;
+    const ed = editorRef.current;
+    ed.revealLineInCenter(revealLine);
+    ed.setPosition({ lineNumber: revealLine, column: 1 });
+    ed.focus();
+    setRevealLine(null);
+  }, [revealLine, content]);
 
   const openFile = useCallback(
     (node: FileNode) => {
@@ -293,6 +372,7 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
   saveRef.current = save;
 
   const handleMount: OnMount = (editor, monaco) => {
+    editorRef.current = editor;
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveRef.current());
   };
 
@@ -303,23 +383,112 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
           <div className="ft-note">Loading tree…</div>
         ) : treeErr ? (
           <div className="ft-note ft-err">{treeErr}</div>
-        ) : tree.length === 0 ? (
-          <div className="ft-note">Empty project.</div>
         ) : (
           <>
-            <TreeNodes
-              nodes={tree}
-              depth={0}
-              expanded={expanded}
-              toggle={toggle}
-              onOpen={openFile}
-              currentPath={currentPath}
-            />
-            {truncated && (
-              <div className="ft-note ft-trunc">
-                Tree truncated — some files hidden (large project).
+            <div className="ft-search">
+              <div className="ft-search-modes">
+                <button
+                  className={`ft-mode ${searchMode === 'name' ? 'active' : ''}`}
+                  onClick={() => setSearchMode('name')}
+                  title="Find files by name"
+                >
+                  Name
+                </button>
+                <button
+                  className={`ft-mode ${searchMode === 'code' ? 'active' : ''}`}
+                  onClick={() => setSearchMode('code')}
+                  title="Search inside file contents"
+                >
+                  Code
+                </button>
               </div>
-            )}
+              <div className="ft-search-box">
+                <input
+                  className="ft-search-input"
+                  placeholder={searchMode === 'name' ? 'Search file name…' : 'Search in files…'}
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  spellCheck={false}
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                />
+                {query && (
+                  <button className="ft-search-clear" title="Clear" onClick={() => setQuery('')}>
+                    ×
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="ft-body">
+              {query.trim() ? (
+                searchMode === 'name' ? (
+                  nameResults.length === 0 ? (
+                    <div className="ft-note">No file names match.</div>
+                  ) : (
+                    nameResults.map((p) => (
+                      <div
+                        key={p}
+                        className={`ft-row ft-file ${currentPath === p ? 'active' : ''}`}
+                        style={{ paddingLeft: 8 }}
+                        title={p}
+                        onClick={() => void openPath(p)}
+                      >
+                        <span className="ft-chevron-spacer" />
+                        <FileIcon />
+                        <span className="ft-name ft-name-path">{p}</span>
+                      </div>
+                    ))
+                  )
+                ) : (
+                  <>
+                    {codeSearching && <div className="ft-note">Searching…</div>}
+                    {codeErr && <div className="ft-note ft-err">{codeErr}</div>}
+                    {!codeSearching && !codeErr && codeResults.length === 0 && (
+                      <div className="ft-note">No matches.</div>
+                    )}
+                    {codeResults.map((m, i) => (
+                      <div
+                        key={`${m.path}:${m.line}:${i}`}
+                        className="ft-hit"
+                        title={`${m.path}:${m.line}`}
+                        onClick={() => void openPath(m.path, m.line)}
+                      >
+                        <div className="ft-hit-loc">
+                          {m.path.split('/').pop()}
+                          <span className="ft-hit-line">:{m.line}</span>
+                          <span className="ft-hit-dir">{m.path}</span>
+                        </div>
+                        <div className="ft-hit-text">{m.text}</div>
+                      </div>
+                    ))}
+                    {codeTruncated && (
+                      <div className="ft-note ft-trunc">
+                        Showing the first {codeResults.length} matches.
+                      </div>
+                    )}
+                  </>
+                )
+              ) : tree.length === 0 ? (
+                <div className="ft-note">Empty project.</div>
+              ) : (
+                <>
+                  <TreeNodes
+                    nodes={tree}
+                    depth={0}
+                    expanded={expanded}
+                    toggle={toggle}
+                    onOpen={openFile}
+                    currentPath={currentPath}
+                  />
+                  {truncated && (
+                    <div className="ft-note ft-trunc">
+                      Tree truncated — some files hidden (large project).
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
           </>
         )}
       </aside>

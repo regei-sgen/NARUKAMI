@@ -171,10 +171,45 @@ export function EodView({ project }: Props) {
                       {KIND_ICON[k] ?? '•'} {n}
                     </span>
                   ))}
+                  {e.commits.length > 0 && (
+                    <span className="eod-stat eod-featchip">
+                      ✚ {e.commits.length} {e.commits.length === 1 ? 'feature' : 'features'}
+                    </span>
+                  )}
                 </div>
 
                 {open && (
                   <div className="eod-body">
+                    {/* Features/changes added that day, from git commits. */}
+                    <div className="eod-features">
+                      <div className="eod-features-head">
+                        Features added
+                        <span className="eod-features-count">{e.commits.length}</span>
+                      </div>
+                      {e.commits.length === 0 ? (
+                        <div className="muted eod-features-empty">
+                          No commits recorded for this day (not a git repo, or nothing committed).
+                        </div>
+                      ) : (
+                        <ul className="eod-commits">
+                          {e.commits.map((c) => (
+                            <li key={c.hash} className="eod-commit">
+                              <div className="eod-commit-top">
+                                <span className="eod-commit-subject">{c.subject}</span>
+                                {c.filesChanged != null && (
+                                  <span className="eod-commit-files">
+                                    {c.filesChanged} {c.filesChanged === 1 ? 'file' : 'files'}
+                                  </span>
+                                )}
+                                <code className="eod-commit-hash">{c.hash}</code>
+                              </div>
+                              {c.body && <pre className="eod-commit-body">{c.body}</pre>}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+
                     {e.items.length === 0 ? (
                       <div className="muted">No finished runs recorded for this day.</div>
                     ) : (

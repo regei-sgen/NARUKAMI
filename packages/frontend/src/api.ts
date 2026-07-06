@@ -140,6 +140,12 @@ export const api = {
       body: JSON.stringify({ path: filePath, content }),
     }),
 
+  // Case-insensitive content search across the project's files.
+  searchCode: (projectId: string, q: string) =>
+    request<{ matches: { path: string; line: number; text: string }[]; truncated: boolean }>(
+      `/api/projects/${projectId}/search?q=${encodeURIComponent(q)}`,
+    ),
+
   // --- workspace / session restore ---
   getWorkspace: () => request<WorkspaceState>('/api/workspace'),
 

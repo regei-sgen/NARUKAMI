@@ -33,6 +33,11 @@ const MAX_DEPTH = 12;
 const MAX_READ_BYTES = 1024 * 1024; // 1 MiB — refuse to open anything larger
 const MAX_WRITE_BYTES = 5 * 1024 * 1024; // 5 MiB write ceiling
 
+// Content-search bounds so grepping a big repo can't hang or blow up the payload.
+const MAX_SEARCH_MATCHES = 500;
+const MAX_SEARCH_FILE_BYTES = 512 * 1024; // skip files larger than this when searching
+const SEARCH_LINE_CLAMP = 240; // trim long matched lines in the response
+
 interface FileNode {
   name: string;
   path: string; // project-relative, POSIX separators
@@ -126,6 +131,28 @@ function buildTree(root: string): { tree: FileNode[]; truncated: boolean } {
   return { tree: walk(rootResolved, 0), truncated };
 }
 
+/** Flatten a file tree to its file paths (project-relative, POSIX). */
+function flattenFiles(nodes: FileNode[]): string[] {
+  const out: string[] = [];
+  const rec = (ns: FileNode[]): void => {
+    for (const n of ns) {
+      if (n.type === 'dir') {
+        if (n.children) rec(n.children);
+      } else {
+        out.push(n.path);
+      }
+    }
+  };
+  rec(nodes);
+  return out;
+}
+
+export interface SearchMatch {
+  path: string; // project-relative
+  line: number; // 1-based
+  text: string; // the matched line (trimmed + clamped)
+}
+
 export async function fileRoutes(app: FastifyInstance): Promise<void> {
   // Project file tree (bounded, ignore-filtered).
   app.get<{ Params: { id: string } }>('/api/projects/:id/tree', async (req, reply) => {
@@ -143,6 +170,67 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
     const { tree, truncated } = buildTree(project.path);
     return { root: project.path, tree, truncated };
   });
+
+  // Search file contents across the project (case-insensitive substring). Bounded
+  // by ignore-dirs, per-file size, and a total match cap so a big repo is safe.
+  app.get<{ Params: { id: string }; Querystring: { q?: string } }>(
+    '/api/projects/:id/search',
+    async (req, reply) => {
+      const project = await prisma.project.findUnique({ where: { id: req.params.id } });
+      if (!project) return reply.code(404).send({ error: 'Project not found.' });
+
+      const q = typeof req.query.q === 'string' ? req.query.q : '';
+      if (!q.trim()) return { matches: [], truncated: false };
+
+      try {
+        if (!fs.statSync(project.path).isDirectory()) {
+          return reply.code(400).send({ error: 'Project path is not a directory.' });
+        }
+      } catch {
+        return reply.code(400).send({ error: `Project path no longer exists: ${project.path}` });
+      }
+
+      const rootResolved = path.resolve(project.path);
+      const needle = q.toLowerCase();
+      const files = flattenFiles(buildTree(project.path).tree);
+
+      const matches: SearchMatch[] = [];
+      let truncated = false;
+
+      outer: for (const rel of files) {
+        const abs = path.join(rootResolved, rel);
+        let stat: fs.Stats;
+        try {
+          stat = fs.statSync(abs);
+        } catch {
+          continue;
+        }
+        if (stat.size > MAX_SEARCH_FILE_BYTES) continue;
+
+        let buf: Buffer;
+        try {
+          buf = fs.readFileSync(abs);
+        } catch {
+          continue;
+        }
+        // Skip binaries (NUL in the first 8 KB).
+        if (buf.subarray(0, 8192).includes(0)) continue;
+
+        const lines = buf.toString('utf8').split(/\r?\n/);
+        for (let i = 0; i < lines.length; i += 1) {
+          if (lines[i].toLowerCase().includes(needle)) {
+            matches.push({ path: rel, line: i + 1, text: lines[i].trim().slice(0, SEARCH_LINE_CLAMP) });
+            if (matches.length >= MAX_SEARCH_MATCHES) {
+              truncated = true;
+              break outer;
+            }
+          }
+        }
+      }
+
+      return { matches, truncated };
+    },
+  );
 
   // Read a single file's UTF-8 contents.
   app.get<{ Params: { id: string }; Querystring: { path?: string } }>(
