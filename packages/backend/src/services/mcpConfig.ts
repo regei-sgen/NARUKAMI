@@ -83,3 +83,28 @@ export function buildClaudeMcpArgs(selfRunId: string): string[] {
     return [];
   }
 }
+
+/**
+ * Delete the per-run MCP config for a run that has ended. These files embed the
+ * live bearer token, so they must not accumulate in the shared temp dir for the
+ * machine's lifetime. Best-effort — a missing file is fine.
+ */
+export function cleanupMcpConfig(selfRunId: string): void {
+  try {
+    fs.rmSync(path.join(CONFIG_DIR, `${selfRunId}.json`), { force: true });
+  } catch {
+    /* already gone — ignore */
+  }
+}
+
+/**
+ * On boot, remove the entire config dir: any files left there belong to a prior
+ * session whose Claude processes are dead, and they still hold a stale token.
+ */
+export function sweepMcpConfigs(): void {
+  try {
+    fs.rmSync(CONFIG_DIR, { recursive: true, force: true });
+  } catch {
+    /* nothing to sweep — ignore */
+  }
+}

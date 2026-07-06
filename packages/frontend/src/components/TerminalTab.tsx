@@ -24,7 +24,7 @@ interface Props {
 const IDLE_MS = 5000;
 
 interface ServerMessage {
-  type: 'data' | 'exit' | 'error';
+  type: 'data' | 'exit' | 'error' | 'ready';
   chunk?: string;
   status?: string;
   exitCode?: number | null;
@@ -121,7 +121,10 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity }
         };
 
         socket.onopen = () => {
-          onStatus(run.runId, 'running', null);
+          // Don't assume 'running' on open: a dead/restored run reaches the
+          // server's replay path and gets an 'exit' (never 'ready'), so setting
+          // running here flashed it briefly before correcting. Wait for the
+          // explicit 'ready' (run is actually live) message below instead.
           sendResize();
         };
 
@@ -147,6 +150,9 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity }
           if (msg.type === 'data' && typeof msg.chunk === 'string') {
             t.write(msg.chunk);
             bumpActivity();
+          } else if (msg.type === 'ready') {
+            // Server confirmed the run is live — safe to show 'running'.
+            onStatus(run.runId, 'running', null);
           } else if (msg.type === 'exit') {
             gotExit = true;
             if (idleTimer) clearTimeout(idleTimer);

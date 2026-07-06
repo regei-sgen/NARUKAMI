@@ -80,4 +80,16 @@ describe('isAllowedHost', () => {
     expect(auth.isAllowedHost('192.168.1.5:4000')).toBe(false);
     expect(auth.isAllowedHost(undefined)).toBe(false);
   });
+
+  it('handles bracketed IPv6 loopback with and without a port', () => {
+    // Regression: the old split(':')[0] returned "[" for "[::1]:4000", so the
+    // IPv6 loopback branch was dead and every [::1] Host was wrongly rejected —
+    // disagreeing with isAllowedOrigin (which accepts it).
+    expect(auth.isAllowedHost('[::1]')).toBe(true);
+    expect(auth.isAllowedHost('[::1]:4000')).toBe(true);
+    expect(auth.isAllowedOrigin('http://[::1]:4000')).toBe(true); // now consistent
+    // Non-loopback IPv6 is still rejected.
+    expect(auth.isAllowedHost('[2001:db8::1]:4000')).toBe(false);
+    expect(auth.isAllowedHost('[::1')).toBe(false); // malformed
+  });
 });

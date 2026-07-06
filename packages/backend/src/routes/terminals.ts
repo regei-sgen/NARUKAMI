@@ -21,11 +21,16 @@ const MAX_READ_LINES = 2_000;
 export function makeRateLimiter(max: number, windowMs: number) {
   const hits = new Map<string, number[]>();
   return function allow(key: string, now: number): boolean {
-    const recent = (hits.get(key) ?? []).filter((t) => now - t < windowMs);
-    if (recent.length >= max) {
-      hits.set(key, recent);
-      return false;
+    // Evict keys whose window has fully elapsed so the map can't grow unbounded
+    // (one permanent entry per distinct terminal id ever targeted). Cheap here:
+    // at most a handful of targets are live within any single window.
+    for (const [k, times] of hits) {
+      const live = times.filter((t) => now - t < windowMs);
+      if (live.length === 0) hits.delete(k);
+      else hits.set(k, live);
     }
+    const recent = hits.get(key) ?? [];
+    if (recent.length >= max) return false;
     recent.push(now);
     hits.set(key, recent);
     return true;
@@ -101,7 +106,13 @@ export async function terminalRoutes(app: FastifyInstance): Promise<void> {
     if (text.length > MAX_SEND_CHARS) {
       return reply.code(413).send({ error: `text exceeds ${MAX_SEND_CHARS} chars.` });
     }
-    if (from && from === targetId) {
+    // `from` (the caller's own run id) is REQUIRED: the self-send guard below is
+    // the anti-feedback-loop backstop, and it can be trivially bypassed by simply
+    // omitting `from`. The only caller — the MCP bridge — always sends it.
+    if (!from) {
+      return reply.code(400).send({ error: 'from (the caller run id) is required.' });
+    }
+    if (from === targetId) {
       return reply.code(400).send({ error: 'A terminal cannot send to itself.' });
     }
     if (!isRunning(targetId)) {

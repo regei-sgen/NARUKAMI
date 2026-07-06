@@ -4,6 +4,7 @@ import type { FastifyInstance } from 'fastify';
 import { Prisma } from '../generated/prisma';
 import { prisma } from '../db';
 import { analyzeProject, AnalyzerError, suggestCommand } from '../services/analyzer';
+import { stopRun } from '../services/runner';
 
 // Serialize analysis per project so two overlapping requests can't interleave
 // the deleteMany/createMany replacement and produce a duplicated command set.
@@ -68,6 +69,15 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
   // Delete a project (cascades to commands/runs/logs/analyses).
   app.delete<{ Params: { id: string } }>('/api/projects/:id', async (req, reply) => {
     try {
+      // Stop any live ptys for this project FIRST. The cascade delete removes the
+      // Run rows, after which those processes would be orphaned — still running,
+      // no longer in the DB, and thus impossible to stop via /stop.
+      const liveRuns = await prisma.run.findMany({
+        where: { projectId: req.params.id, status: 'running' },
+        select: { id: true },
+      });
+      for (const r of liveRuns) stopRun(r.id);
+
       await prisma.project.delete({ where: { id: req.params.id } });
     } catch (err) {
       // P2025 = record to delete not found. Anything else is a real failure.
@@ -99,6 +109,15 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
         });
         // Only replace analyze-detected commands; user-added custom ones survive.
         await tx.runCommand.deleteMany({ where: { projectId: project.id, source: 'detected' } });
+        // Uphold the "at most one default per project" invariant that
+        // createCommand enforces: if the detected set carries a default, clear
+        // any surviving custom default first so we don't end up with two.
+        if (parsed.commands.some((c) => c.isDefault)) {
+          await tx.runCommand.updateMany({
+            where: { projectId: project.id, isDefault: true },
+            data: { isDefault: false },
+          });
+        }
         if (parsed.commands.length) {
           await tx.runCommand.createMany({
             data: parsed.commands.map((c) => ({
@@ -117,7 +136,13 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
             packageMgr: parsed.packageManager,
             status: 'analyzed',
           },
-          include: { commands: { orderBy: [{ isDefault: 'desc' }, { label: 'asc' }] } },
+          // Include `runs` so the response matches the Project shape the client
+          // expects (the list endpoint returns it too); omitting it dropped the
+          // field the frontend types require.
+          include: {
+            commands: { orderBy: [{ isDefault: 'desc' }, { label: 'asc' }] },
+            runs: { orderBy: { startedAt: 'desc' }, take: 1 },
+          },
         });
       });
 

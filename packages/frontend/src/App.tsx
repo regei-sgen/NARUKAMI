@@ -38,6 +38,8 @@ export default function App() {
   const [renameValue, setRenameValue] = useState('');
   const renameSkipBlur = useRef(false);
   const [error, setError] = useState<string | null>(null);
+  // Whether the code editor has unsaved edits — used to guard leaving it.
+  const [editorDirty, setEditorDirty] = useState(false);
   // Finished-process notifications (click routes to the run's tab).
   const [toasts, setToasts] = useState<Toast[]>([]);
   // Runs currently producing output ("working") — drives the sidebar pulse.
@@ -181,6 +183,15 @@ export default function App() {
   };
 
   const selected = projects.find((p) => p.id === selectedId) ?? null;
+
+  // Leaving the editor (switching view or project) unmounts it and would silently
+  // drop unsaved edits — confirm first when the editor is dirty.
+  const confirmLeaveEditor = useCallback((): boolean => {
+    if (view === 'editor' && editorDirty) {
+      return window.confirm('You have unsaved changes in the editor. Discard them?');
+    }
+    return true;
+  }, [view, editorDirty]);
 
   // Sidebar indicator, two states:
   //  - workingProjectIds: a run in this project is actively producing output → bright pulse.
@@ -503,7 +514,7 @@ export default function App() {
             collapsed={sidebarCollapsed}
             workingProjectIds={workingProjectIds}
             claudeIdleProjectIds={claudeIdleProjectIds}
-            onSelect={setSelectedId}
+            onSelect={(id) => confirmLeaveEditor() && setSelectedId(id)}
             onAdd={addProject}
             onDelete={deleteProject}
           />
@@ -513,7 +524,7 @@ export default function App() {
                 <div className="view-switch">
                   <button
                     className={`vs-btn ${view === 'runner' ? 'active' : ''}`}
-                    onClick={() => setView('runner')}
+                    onClick={() => confirmLeaveEditor() && setView('runner')}
                   >
                     Runner
                   </button>
@@ -525,7 +536,7 @@ export default function App() {
                   </button>
                   <button
                     className={`vs-btn ${view === 'eod' ? 'active' : ''}`}
-                    onClick={() => setView('eod')}
+                    onClick={() => confirmLeaveEditor() && setView('eod')}
                   >
                     EOD
                   </button>
@@ -553,6 +564,7 @@ export default function App() {
                     project={selected}
                     initialFile={editorFileByProject[selected.id]}
                     onOpenFile={(p) => setEditorFile(selected.id, p)}
+                    onDirtyChange={setEditorDirty}
                   />
                 )}
               </>

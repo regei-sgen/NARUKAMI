@@ -1644,6 +1644,9 @@ body.resizing-h * {
 .eod-stat.s-ok b {
   color: var(--green);
 }
+.eod-stat.s-warn b {
+  color: var(--yellow);
+}
 .eod-stat.s-err b {
   color: var(--red);
 }

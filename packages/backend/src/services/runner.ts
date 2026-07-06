@@ -1,8 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import * as pty from 'node-pty';
+import { Prisma } from '../generated/prisma';
 import { prisma } from '../db';
-import { buildClaudeMcpArgs } from './mcpConfig';
+import { buildClaudeMcpArgs, cleanupMcpConfig } from './mcpConfig';
+import { resolveExecutable, wrapForWindows } from './exec';
+
+// Re-exported for callers/tests that import it from the runner module.
+export { resolveExecutable } from './exec';
 
 export type RunFinalStatus = 'exited' | 'killed' | 'error';
 
@@ -77,44 +82,39 @@ const MAX_TRANSCRIPT_CHARS = 2_000_000;
 /** Pick a shell + args that run `command` and stay attached to the pty. */
 export function shellFor(command: string): { file: string; args: string[] } {
   if (process.platform === 'win32') {
-    // PowerShell works with ConPTY and handles npm/python/etc. dev commands.
-    return { file: 'powershell.exe', args: ['-NoLogo', '-NoProfile', '-Command', command] };
+    // Prefer PowerShell 7+ (pwsh): it supports `&&` / `||` command chaining that
+    // Windows PowerShell 5.1 (powershell.exe) PARSE-ERRORS on — very common in
+    // detected/custom run commands. Fall back to powershell.exe when pwsh isn't
+    // installed. (POSIX `VAR=val cmd` env prefixes still aren't supported by
+    // either PowerShell — that's a separate shell-syntax limitation.)
+    const pwsh = resolveExecutable('pwsh');
+    const file = pwsh !== 'pwsh' ? pwsh : 'powershell.exe';
+    return { file, args: ['-NoLogo', '-NoProfile', '-Command', command] };
   }
   const shell = process.env.SHELL || 'bash';
   return { file: shell, args: ['-lc', command] };
 }
 
-/**
- * Resolve an executable to a full path via PATH + PATHEXT. Unlike libuv's
- * execFile, node-pty's spawn does NOT search PATH/PATHEXT for a bare name on
- * Windows, so `claude` must be resolved to `…\claude.exe` before spawning.
- * Returns the bare name if not found (let spawn surface a clear error).
- */
-export function resolveExecutable(name: string): string {
-  const isWin = process.platform === 'win32';
-  const sep = isWin ? ';' : ':';
-  const exts = isWin
-    ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';')
-    : [''];
-  const dirs = (process.env.PATH || '').split(sep).filter(Boolean);
-  for (const dir of dirs) {
-    for (const ext of exts) {
-      const candidate = path.join(dir, name + ext);
-      try {
-        if (fs.statSync(candidate).isFile()) return candidate;
-      } catch {
-        /* not here — keep looking */
-      }
-    }
-  }
-  return name;
-}
+// NARUKAMI-internal / secret-bearing env vars that must NOT leak into the
+// (untrusted) project commands, shells, and Claude sessions we spawn. A project's
+// postinstall/dev script would otherwise inherit the path to the bearer token
+// (RUNNER_TOKEN_FILE), the DB URL, and the backend's own PORT (which would also
+// make a child dev server try to bind the backend's port).
+const ENV_DENYLIST = new Set([
+  'DATABASE_URL',
+  'RUNNER_TOKEN_FILE',
+  'PORT',
+]);
+const ENV_DENY_PREFIXES = ['NARUKAMI_', 'PRISMA_'];
 
-/** process.env minus undefined values (node-pty wants Record<string,string>). */
+/** process.env minus undefined values and NARUKAMI-internal/secret vars. */
 export function cleanEnv(): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
-    if (typeof v === 'string') out[k] = v;
+    if (typeof v !== 'string') continue;
+    if (ENV_DENYLIST.has(k)) continue;
+    if (ENV_DENY_PREFIXES.some((p) => k.startsWith(p))) continue;
+    out[k] = v;
   }
   return out;
 }
@@ -151,18 +151,38 @@ function scheduleFlush(m: ManagedRun): void {
   }, LOG_FLUSH_MS);
 }
 
+/** The referenced Run row no longer exists (record-not-found or FK failure). */
+function isMissingRowError(err: unknown): boolean {
+  return (
+    err instanceof Prisma.PrismaClientKnownRequestError &&
+    (err.code === 'P2025' || err.code === 'P2003')
+  );
+}
+
 async function flushLogs(m: ManagedRun): Promise<void> {
   if (m.flushTimer) {
     clearTimeout(m.flushTimer);
     m.flushTimer = null;
   }
   if (m.logBuffer.length === 0) return;
-  const chunk = m.logBuffer.join('');
-  m.logBuffer = [];
+  // Snapshot what we're flushing but DON'T clear the buffer yet — only drop these
+  // chunks once the write is durable, so a transient DB error can't silently and
+  // permanently lose terminal output. New chunks appended during the await sit
+  // after index `count` and are preserved.
+  const count = m.logBuffer.length;
+  const chunk = m.logBuffer.slice(0, count).join('');
   try {
     await prisma.runLog.create({ data: { runId: m.runId, chunk } });
-  } catch {
-    // Run row gone (e.g. project deleted mid-run) — drop the chunk silently.
+    m.logBuffer.splice(0, count);
+  } catch (err) {
+    if (isMissingRowError(err)) {
+      // Run row gone (e.g. project deleted mid-run) — the chunk can never persist,
+      // so drop it rather than retry forever.
+      m.logBuffer.splice(0, count);
+    } else {
+      // Transient failure (e.g. SQLite busy) — keep the chunk buffered and retry.
+      scheduleFlush(m);
+    }
   }
 }
 
@@ -225,17 +245,30 @@ export function registerRun(runId: string, transport: RunTransport): void {
     // authoritative final status to any client that connects during this window.
     void (async () => {
       await flushLogs(managed);
-      await prisma.run
-        .update({
-          where: { id: runId },
-          data: {
-            status: managed.finalStatus ?? 'exited',
-            exitCode: managed.finalExitCode,
-            endedAt: new Date(),
-          },
-        })
-        .catch(() => undefined);
+      const data = {
+        status: managed.finalStatus ?? 'exited',
+        exitCode: managed.finalExitCode,
+        endedAt: new Date(),
+      };
+      try {
+        await prisma.run.update({ where: { id: runId }, data });
+      } catch (err) {
+        if (!isMissingRowError(err)) {
+          // One retry, then surface it. If it still fails the row stays 'running'
+          // in the DB until the next boot's reconcileStaleRuns flips it — but we
+          // no longer swallow it silently (which left runs wrongly 'running' and
+          // dropped from EOD).
+          try {
+            await prisma.run.update({ where: { id: runId }, data });
+          } catch (err2) {
+            process.stderr.write(
+              `[narukami] failed to persist final status for run ${runId}: ${String(err2)}\n`,
+            );
+          }
+        }
+      }
       runs.delete(runId);
+      cleanupMcpConfig(runId); // remove the per-run MCP token file (no-op if none)
     })();
   });
 }
@@ -293,14 +326,16 @@ export function startClaude(opts: {
   settleMs?: number;
   maxWaitMs?: number;
 }): { pid: number } {
-  // node-pty won't PATH-resolve a bare "claude" on Windows — give it a full path.
+  // node-pty won't PATH-resolve a bare "claude" on Windows — give it a full path,
+  // and route a .cmd/.bat shim through cmd.exe (ConPTY can't launch it directly).
   const claudeBin = resolveExecutable('claude');
   // Attach the NARUKAMI MCP bridge so this session can read/drive other live
   // terminals (list_terminals / read_terminal / send_terminal). No-op (returns
   // []) if orchestration is disabled or the bridge script can't be located.
   const mcpArgs = buildClaudeMcpArgs(opts.runId);
-  const args = [...(opts.resume ? ['--continue'] : []), ...mcpArgs];
-  const res = spawnManaged(opts.runId, claudeBin, args, opts.cwd);
+  const rawArgs = [...(opts.resume ? ['--continue'] : []), ...mcpArgs];
+  const { file, args } = wrapForWindows(claudeBin, rawArgs);
+  const res = spawnManaged(opts.runId, file, args, opts.cwd);
 
   if (opts.initInput) {
     scheduleClaudeInit(opts.runId, opts.initInput, opts.settleMs ?? 700, opts.maxWaitMs ?? 15000);
@@ -381,6 +416,18 @@ export function getFinalState(runId: string): { status: RunFinalStatus; exitCode
     return { status: m.finalStatus, exitCode: m.finalExitCode };
   }
   return null;
+}
+
+/**
+ * Full in-memory transcript for a run whose record still exists — including the
+ * brief window AFTER the pty exited but BEFORE its final log flush has committed
+ * and the record is deleted. The WS replay path prefers this over the DB so a
+ * client reconnecting in that window doesn't miss the last un-flushed chunk.
+ * Returns null once the record has been forgotten (DB is then authoritative).
+ */
+export function getFinalTranscript(runId: string): string | null {
+  const m = runs.get(runId);
+  return m ? m.transcript.join('') : null;
 }
 
 export function writeToRun(runId: string, data: string): boolean {

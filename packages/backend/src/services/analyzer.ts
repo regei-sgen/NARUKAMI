@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { AnalyzerCommand, AnalyzerResult } from '../types';
+import { resolveExecutable, wrapForWindows } from './exec';
 
 const execFileAsync = promisify(execFile);
 
@@ -168,18 +169,20 @@ export function normalize(parsed: unknown): AnalyzerResult {
 }
 
 async function runClaude(prompt: string, cwd: string): Promise<string> {
+  // Resolve `claude` to a full path (and route a .cmd/.bat shim through cmd.exe
+  // on Windows). Passing the bare name let libuv find claude.cmd and then throw
+  // EINVAL — surfaced as a misleading "not on PATH" error — for npm-global
+  // installs, which is how Claude Code is normally installed on Windows.
+  const claudeBin = resolveExecutable('claude');
+  const { file, args } = wrapForWindows(claudeBin, ['-p', prompt, '--output-format', 'json']);
   try {
-    const { stdout } = await execFileAsync(
-      'claude',
-      ['-p', prompt, '--output-format', 'json'],
-      {
-        cwd,
-        maxBuffer: MAX_BUFFER,
-        windowsHide: true,
-        timeout: CLAUDE_TIMEOUT_MS,
-        killSignal: 'SIGKILL',
-      },
-    );
+    const { stdout } = await execFileAsync(file, args, {
+      cwd,
+      maxBuffer: MAX_BUFFER,
+      windowsHide: true,
+      timeout: CLAUDE_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+    });
     return stdout;
   } catch (err) {
     const e = err as ExecError;

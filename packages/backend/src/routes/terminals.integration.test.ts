@@ -52,6 +52,16 @@ describe('POST /api/terminals/:id/send guards', () => {
     expect(r.json().error).toMatch(/text is required/);
   });
 
+  it('requires `from` so the self-send guard cannot be bypassed by omitting it (400)', async () => {
+    const r = await app.inject({
+      method: 'POST',
+      url: '/api/terminals/ghost/send',
+      payload: { text: 'hi' }, // no `from`
+    });
+    expect(r.statusCode).toBe(400);
+    expect(r.json().error).toMatch(/from .* required/i);
+  });
+
   it('rejects oversize text (413)', async () => {
     const r = await app.inject({
       method: 'POST',

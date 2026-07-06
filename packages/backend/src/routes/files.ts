@@ -53,7 +53,7 @@ class PathError extends Error {}
  * the target already exists — verifies its realpath so a symlink can't point
  * outside the root either. Throws PathError on any violation.
  */
-function resolveInProject(root: string, rel: string): string {
+export function resolveInProject(root: string, rel: string): string {
   const rootResolved = path.resolve(root);
   // Strip any leading slash/backslash so an "absolute-looking" input is still
   // treated as relative to the project root rather than the filesystem root.
@@ -274,12 +274,15 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
         path: rel.replace(/^[\\/]+/, '').split('\\').join('/'),
         content: buf.toString('utf8'),
         size: stat.size,
+        // The client sends this back on save so we can detect an on-disk change
+        // made since the file was opened (conflict / last-write-wins guard).
+        mtimeMs: stat.mtimeMs,
       };
     },
   );
 
   // Write a file back to disk (create-or-overwrite within the project root).
-  app.post<{ Params: { id: string }; Body: { path?: string; content?: string } }>(
+  app.post<{ Params: { id: string }; Body: { path?: string; content?: string; baseMtimeMs?: number } }>(
     '/api/projects/:id/file',
     async (req, reply) => {
       const project = await prisma.project.findUnique({ where: { id: req.params.id } });
@@ -287,6 +290,7 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
 
       const rel = req.body?.path;
       const content = req.body?.content;
+      const baseMtimeMs = req.body?.baseMtimeMs;
       if (typeof rel !== 'string' || !rel.trim()) {
         return reply.code(400).send({ error: 'A file path is required.' });
       }
@@ -304,10 +308,19 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(400).send({ error: (err as Error).message });
       }
 
-      // Refuse to clobber a directory.
+      // Refuse to clobber a directory; and, if the caller supplied the mtime it
+      // opened the file at, refuse to silently overwrite an edit made on disk
+      // since then (409). Omitting baseMtimeMs forces the write (explicit override).
       try {
-        if (fs.statSync(abs).isDirectory()) {
+        const st = fs.statSync(abs);
+        if (st.isDirectory()) {
           return reply.code(400).send({ error: 'Path is a directory.' });
+        }
+        if (typeof baseMtimeMs === 'number' && st.mtimeMs > baseMtimeMs) {
+          return reply.code(409).send({
+            error:
+              'This file changed on disk since you opened it. Reload to see the latest, or save again to overwrite.',
+          });
         }
       } catch {
         /* target doesn't exist yet — creating a new file, allowed */
@@ -328,7 +341,9 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
       }
 
       await fsp.writeFile(abs, content, 'utf8');
-      return { ok: true, bytes: Buffer.byteLength(content, 'utf8') };
+      // Return the new mtime so the client can update its conflict baseline.
+      const written = fs.statSync(abs);
+      return { ok: true, bytes: Buffer.byteLength(content, 'utf8'), mtimeMs: written.mtimeMs };
     },
   );
 }

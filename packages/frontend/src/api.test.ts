@@ -114,4 +114,14 @@ describe('request + api methods', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(makeResponse(500, '')));
     await expect(apiMod.api.listProjects()).rejects.toThrow('Request failed (500)');
   });
+
+  it('throws the intended message (not a SyntaxError) on a NON-JSON error body', async () => {
+    // A proxy/HTML 500 body previously blew up in JSON.parse before the res.ok
+    // check, surfacing a raw SyntaxError instead of the useful status message.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(makeResponse(502, '<html><body>Bad Gateway</body></html>')),
+    );
+    await expect(apiMod.api.listProjects()).rejects.toThrow('Request failed (502)');
+  });
 });

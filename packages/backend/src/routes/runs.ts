@@ -38,9 +38,11 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
         await prisma.run.update({ where: { id: run.id }, data: { pid } });
         return reply.code(201).send({ runId: run.id, pid });
       } catch (err) {
+        // dockOpen:false so a run that never actually started isn't restored as
+        // a permanent phantom dead tab on the next workspace reload.
         await prisma.run.update({
           where: { id: run.id },
-          data: { status: 'error', endedAt: new Date() },
+          data: { status: 'error', endedAt: new Date(), dockOpen: false },
         });
         return reply.code(500).send({ error: `Failed to start process: ${String(err)}` });
       }
@@ -78,7 +80,7 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
       } catch (err) {
         await prisma.run.update({
           where: { id: run.id },
-          data: { status: 'error', endedAt: new Date() },
+          data: { status: 'error', endedAt: new Date(), dockOpen: false },
         });
         return reply.code(500).send({ error: `Failed to open shell: ${String(err)}` });
       }
@@ -116,7 +118,7 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
       } catch (err) {
         await prisma.run.update({
           where: { id: run.id },
-          data: { status: 'error', endedAt: new Date() },
+          data: { status: 'error', endedAt: new Date(), dockOpen: false },
         });
         return reply.code(500).send({ error: `Failed to start Claude Code: ${String(err)}` });
       }
@@ -174,6 +176,12 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
     });
     if (!old) return reply.code(404).send({ error: 'Run not found.' });
 
+    // Stop the old pty if it's still live BEFORE spawning the replacement.
+    // Without this, restarting a still-running tab orphaned the old process
+    // (kept running, detached and unreachable) — and a server run would fail the
+    // new spawn with EADDRINUSE. No-op if the old run already ended.
+    stopRun(old.id);
+
     const project = old.project;
     const run = await prisma.run.create({
       data: {
@@ -222,7 +230,10 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
       });
     } catch (err) {
       await prisma.run
-        .update({ where: { id: run.id }, data: { status: 'error', endedAt: new Date() } })
+        .update({
+          where: { id: run.id },
+          data: { status: 'error', endedAt: new Date(), dockOpen: false },
+        })
         .catch(() => undefined);
       return reply.code(500).send({ error: `Failed to restart: ${String(err)}` });
     }

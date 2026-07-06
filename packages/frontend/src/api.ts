@@ -45,8 +45,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (res.status === 204) return undefined as T;
 
+  // Parse defensively: a non-2xx response can carry a NON-JSON body (an HTML 500
+  // page, a proxy error). Parsing before the res.ok check, unguarded, threw a raw
+  // SyntaxError instead of the intended "Request failed (500)" message.
   const text = await res.text();
-  const body: unknown = text ? JSON.parse(text) : undefined;
+  let body: unknown;
+  try {
+    body = text ? JSON.parse(text) : undefined;
+  } catch {
+    body = undefined;
+  }
 
   if (!res.ok) {
     const message = (body as ErrorBody | undefined)?.error ?? `Request failed (${res.status})`;
@@ -134,10 +142,19 @@ export const api = {
       `/api/projects/${projectId}/file?path=${encodeURIComponent(filePath)}`,
     ),
 
-  saveFile: (projectId: string, filePath: string, content: string) =>
-    request<{ ok: boolean; bytes: number }>(`/api/projects/${projectId}/file`, {
+  // baseMtimeMs = the file's mtime when it was opened; the backend rejects the
+  // save with 409 if the file changed on disk since (last-write-wins guard).
+  // force=true overwrites regardless (used after the user acknowledges the conflict).
+  saveFile: (
+    projectId: string,
+    filePath: string,
+    content: string,
+    baseMtimeMs?: number,
+    force = false,
+  ) =>
+    request<{ ok: boolean; bytes: number; mtimeMs: number }>(`/api/projects/${projectId}/file`, {
       method: 'POST',
-      body: JSON.stringify({ path: filePath, content }),
+      body: JSON.stringify({ path: filePath, content, baseMtimeMs: force ? undefined : baseMtimeMs }),
     }),
 
   // Case-insensitive content search across the project's files.

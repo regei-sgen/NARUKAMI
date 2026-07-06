@@ -155,6 +155,11 @@ export function EodView({ project }: Props) {
                   <span className="eod-stat s-ok">
                     <b>{stats.ok}</b> ok
                   </span>
+                  {stats.killed > 0 && (
+                    <span className="eod-stat s-warn">
+                      <b>{stats.killed}</b> stopped
+                    </span>
+                  )}
                   <span className={`eod-stat ${stats.failed ? 's-err' : ''}`}>
                     <b>{stats.failed}</b> failed
                   </span>

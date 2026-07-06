@@ -8,6 +8,7 @@ interface Props {
   project: Project;
   initialFile?: string; // restore this file on mount (path re-read from disk)
   onOpenFile?: (path: string) => void; // report opens so the workspace can persist them
+  onDirtyChange?: (dirty: boolean) => void; // report unsaved-edits state to the parent
 }
 
 const LANG_BY_EXT: Record<string, string> = {
@@ -183,7 +184,7 @@ function TreeNodes({ nodes, depth, expanded, toggle, onOpen, currentPath }: Tree
   );
 }
 
-export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
+export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: Props) {
   const [tree, setTree] = useState<FileNode[]>([]);
   const [truncated, setTruncated] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -193,6 +194,8 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
   const [currentPath, setCurrentPath] = useState<string | null>(null);
   const [content, setContent] = useState('');
   const [original, setOriginal] = useState('');
+  const [originalMtime, setOriginalMtime] = useState<number | null>(null);
+  const [conflict, setConflict] = useState(false);
   const [fileErr, setFileErr] = useState<string | null>(null);
   const [loadingFile, setLoadingFile] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -212,6 +215,19 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
 
   const dirty = currentPath !== null && content !== original;
 
+  // Latest open path, readable from inside an in-flight async save so we don't
+  // apply a save's result to a DIFFERENT file the user switched to meanwhile
+  // (which corrupted dirty tracking).
+  const currentPathRef = useRef(currentPath);
+  currentPathRef.current = currentPath;
+
+  // Report unsaved-edits state upward so the parent can guard view/project
+  // switches; always clear it on unmount.
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
+
   // Load the file tree whenever the selected project changes.
   useEffect(() => {
     let cancelled = false;
@@ -220,6 +236,8 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
     setCurrentPath(null);
     setContent('');
     setOriginal('');
+    setOriginalMtime(null);
+    setConflict(false);
     api
       .getTree(project.id)
       .then((r) => {
@@ -260,6 +278,8 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
         setCurrentPath(filePath);
         setContent(r.content);
         setOriginal(r.content);
+        setOriginalMtime(r.mtimeMs);
+        setConflict(false);
         if (line && line > 0) setRevealLine(line);
         onOpenFile?.(filePath); // persist as the project's last-open file
       } catch (e) {
@@ -356,19 +376,38 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
   const saveRef = useRef<() => void>(() => undefined);
   const save = useCallback(async () => {
     if (currentPath === null || saving) return;
-    if (content === original) return;
+    // Snapshot the file + content at save time — the user may switch files while
+    // the request is in flight, and we must not write the results back to the
+    // wrong file's state. `conflict` means "the user already saw the on-disk
+    // conflict and clicked again" → force the overwrite.
+    const pathAtSave = currentPath;
+    const contentAtSave = content;
+    const forcing = conflict;
+    if (contentAtSave === original && !forcing) return;
     setSaving(true);
     setFileErr(null);
     try {
-      await api.saveFile(project.id, currentPath, content);
-      setOriginal(content);
+      const res = await api.saveFile(
+        project.id,
+        pathAtSave,
+        contentAtSave,
+        originalMtime ?? undefined,
+        forcing,
+      );
+      if (currentPathRef.current !== pathAtSave) return; // switched files mid-save
+      setOriginal(contentAtSave);
+      setOriginalMtime(res.mtimeMs);
+      setConflict(false);
       setSaved(true);
     } catch (e) {
-      setFileErr((e as Error).message);
+      if (currentPathRef.current !== pathAtSave) return;
+      const msg = (e as Error).message;
+      setFileErr(msg);
+      if (/changed on disk/i.test(msg)) setConflict(true); // arm force-overwrite
     } finally {
       setSaving(false);
     }
-  }, [project.id, currentPath, content, original, saving]);
+  }, [project.id, currentPath, content, original, saving, originalMtime, conflict]);
   saveRef.current = save;
 
   const handleMount: OnMount = (editor, monaco) => {
@@ -506,13 +545,14 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
             )}
           </span>
           {fileErr && <span className="editor-file-err">{fileErr}</span>}
-          {saved && !dirty && <span className="editor-saved">saved ✓</span>}
+          {saved && !dirty && !conflict && <span className="editor-saved">saved ✓</span>}
           <button
-            className="btn btn-primary editor-save"
+            className={`btn ${conflict ? 'btn-danger' : 'btn-primary'} editor-save`}
             onClick={() => void save()}
-            disabled={!dirty || saving}
+            disabled={(!dirty && !conflict) || saving}
+            title={conflict ? 'The file changed on disk — click to overwrite it' : undefined}
           >
-            {saving ? 'Saving…' : 'Save'}
+            {saving ? 'Saving…' : conflict ? 'Overwrite' : 'Save'}
           </button>
         </div>
 

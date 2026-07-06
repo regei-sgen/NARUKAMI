@@ -5,7 +5,7 @@ import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import { ALLOWED_ORIGINS, HOST, PORT } from './config';
-import { getToken, requireAuth } from './auth';
+import { getToken, isAllowedHost, requireAuth } from './auth';
 import { projectRoutes } from './routes/projects';
 import { runRoutes } from './routes/runs';
 import { fileRoutes } from './routes/files';
@@ -14,6 +14,8 @@ import { eodRoutes } from './routes/eod';
 import { terminalRoutes } from './routes/terminals';
 import { setupWebSocket } from './ws';
 import { reconcileStaleRuns } from './services/runner';
+import { sweepMcpConfigs } from './services/mcpConfig';
+import { anotherInstanceRunning, claimInstanceLock } from './services/instanceLock';
 import { setBaseUrl } from './services/serverInfo';
 import { disconnectDb } from './db';
 
@@ -41,10 +43,31 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
   const token = getToken();
 
   // Runs the previous process left as 'running' have dead ptys — reconcile them.
-  const reconciled = await reconcileStaleRuns().catch(() => 0);
-  if (reconciled > 0) {
-    process.stdout.write(`[narukami] reconciled ${reconciled} stale run(s) from a prior session\n`);
+  // BUT only if no other live instance is using this same database: otherwise we
+  // would mark THAT instance's genuinely-running runs 'exited' (shared-SQLite
+  // corruption). Single-instance guard is advisory/best-effort.
+  if (anotherInstanceRunning()) {
+    process.stderr.write(
+      '[narukami] another instance appears to be using this database — ' +
+        'skipping stale-run reconcile to avoid clobbering its live runs\n',
+    );
+  } else {
+    try {
+      const reconciled = await reconcileStaleRuns();
+      if (reconciled > 0) {
+        process.stdout.write(`[narukami] reconciled ${reconciled} stale run(s) from a prior session\n`);
+      }
+    } catch (err) {
+      // Don't swallow silently — a failed reconcile leaves prior-session runs
+      // wrongly marked 'running'.
+      process.stderr.write(`[narukami] stale-run reconcile failed: ${String(err)}\n`);
+    }
+    claimInstanceLock();
   }
+
+  // Remove any per-run MCP config files (which embed a bearer token) left in the
+  // temp dir by a prior session's now-dead Claude processes.
+  sweepMcpConfigs();
 
   const app = Fastify({
     logger: {
@@ -92,9 +115,18 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
     allowedHeaders: ['Authorization', 'Content-Type'],
   });
 
-  // Only the API surface is token-gated. Static SPA assets served below are
-  // public (loopback-bound server), and WS auth is handled in ws.ts.
+  // Host-header guard over the ENTIRE HTTP surface — not just /api. In packaged
+  // mode the bearer token is injected into the served index.html, so a
+  // DNS-rebinding page (evil.com rebound to 127.0.0.1) must never be able to
+  // read ANY response and lift the token. Mirror the WS upgrade check in ws.ts:
+  // loopback Host only. Legitimate clients always send a 127.0.0.1 / localhost /
+  // [::1] Host; a rebound origin sends its own hostname and is rejected here.
+  // Then: the /api surface is token-gated; static SPA assets remain public.
   app.addHook('onRequest', async (req, reply) => {
+    if (!isAllowedHost(req.headers.host)) {
+      await reply.code(403).send({ error: 'Forbidden: non-loopback Host header.' });
+      return;
+    }
     if (req.method === 'OPTIONS') return;
     if (!req.url.startsWith('/api')) return;
     await requireAuth(req, reply);

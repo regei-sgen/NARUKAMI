@@ -56,6 +56,7 @@ export interface FileContent {
   path: string;
   content: string;
   size: number;
+  mtimeMs: number; // file mtime at open; sent back on save for conflict detection
 }
 
 export type RunStatus = 'connecting' | 'running' | 'exited' | 'killed' | 'error';

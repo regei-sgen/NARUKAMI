@@ -19,12 +19,13 @@ afterEach(() => {
 });
 
 describe('shellFor', () => {
-  it('uses PowerShell -Command on Windows', () => {
+  it('uses a PowerShell -Command invocation on Windows (pwsh 7+ when available)', () => {
     setPlatform('win32');
-    expect(shellFor('npm run dev')).toEqual({
-      file: 'powershell.exe',
-      args: ['-NoLogo', '-NoProfile', '-Command', 'npm run dev'],
-    });
+    const r = shellFor('npm run dev');
+    // Args are always the -Command form; the file is pwsh (if PATH-resolvable) so
+    // `&&`/`||` chaining works, otherwise Windows PowerShell 5.1.
+    expect(r.args).toEqual(['-NoLogo', '-NoProfile', '-Command', 'npm run dev']);
+    expect(r.file).toMatch(/pwsh(\.exe)?$|powershell\.exe$/i);
   });
   it('uses $SHELL -lc on POSIX', () => {
     setPlatform('linux');
@@ -75,6 +76,33 @@ describe('cleanEnv', () => {
     expect(env.__NARUKAMI_TEST__).toBe('hi');
     expect(Object.values(env).every((v) => typeof v === 'string')).toBe(true);
     delete process.env.__NARUKAMI_TEST__;
+  });
+
+  it('strips NARUKAMI-internal / secret-bearing vars from the spawned child env', () => {
+    const added = {
+      DATABASE_URL: 'file:./dev.db',
+      RUNNER_TOKEN_FILE: '/tmp/.runner-token',
+      PORT: '4000',
+      NARUKAMI_TOKEN: 'super-secret',
+      NARUKAMI_BASE_URL: 'http://127.0.0.1:4000',
+      PRISMA_QUERY_ENGINE_LIBRARY: '/x/engine.node',
+      ORDINARY_VAR_XYZ: 'keepme',
+    };
+    Object.assign(process.env, added);
+    try {
+      const env = cleanEnv();
+      // Secrets / internal wiring must NOT leak into untrusted project commands.
+      expect(env.DATABASE_URL).toBeUndefined();
+      expect(env.RUNNER_TOKEN_FILE).toBeUndefined();
+      expect(env.PORT).toBeUndefined();
+      expect(env.NARUKAMI_TOKEN).toBeUndefined();
+      expect(env.NARUKAMI_BASE_URL).toBeUndefined();
+      expect(env.PRISMA_QUERY_ENGINE_LIBRARY).toBeUndefined();
+      // ...but ordinary vars still pass through.
+      expect(env.ORDINARY_VAR_XYZ).toBe('keepme');
+    } finally {
+      for (const k of Object.keys(added)) delete process.env[k];
+    }
   });
 });
 
