@@ -58,6 +58,33 @@ export interface FileContent {
   size: number;
 }
 
+// Working-tree state of a file relative to the last commit — added (green),
+// modified (amber), or deleted (red). Drives the editor's change highlighting.
+export type GitChange = 'added' | 'modified' | 'deleted';
+
+export interface GitFileStatus {
+  path: string; // project-relative, POSIX separators
+  status: GitChange;
+}
+
+export interface GitStatus {
+  isRepo: boolean;
+  files: GitFileStatus[];
+}
+
+// A contiguous run of changed lines (1-based, inclusive) on the working-tree side.
+export interface DiffRange {
+  start: number;
+  end: number;
+  type: GitChange;
+}
+
+export interface GitDiff {
+  isRepo: boolean;
+  tracked: boolean; // false → untracked; the whole open file is treated as added
+  ranges: DiffRange[];
+}
+
 export type RunStatus = 'connecting' | 'running' | 'exited' | 'killed' | 'error';
 
 export interface ActiveRun {

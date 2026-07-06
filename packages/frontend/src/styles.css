@@ -618,6 +618,70 @@ body {
   color: var(--yellow);
 }
 
+/* --- git change markers in the file tree --- */
+/* file name recolored by working-tree state; a folder that contains a change
+   gets a light-red tint so collapsed dirs still point at what's modified. */
+.ft-file.changed-added .ft-name {
+  color: var(--green);
+}
+.ft-file.changed-modified .ft-name {
+  color: var(--yellow);
+}
+.ft-file.changed-deleted .ft-name {
+  color: var(--red);
+  text-decoration: line-through;
+  opacity: 0.75;
+}
+.ft-dir.changed-dir .ft-name {
+  color: var(--accent-2);
+}
+/* trailing status dot (glows in its status color) */
+.ft-status-dot {
+  margin-left: auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  box-shadow: 0 0 6px currentColor;
+}
+.ft-status-dot.added {
+  color: var(--green);
+  background: var(--green);
+}
+.ft-status-dot.modified {
+  color: var(--yellow);
+  background: var(--yellow);
+}
+.ft-status-dot.deleted {
+  color: var(--red);
+  background: var(--red);
+}
+.ft-status-dot.dir {
+  color: var(--accent-2);
+  background: var(--accent-2);
+  opacity: 0.7;
+  box-shadow: none;
+}
+
+/* --- editor diff gutter (Monaco decorations, painted from git diff) --- */
+/* vertical stripe in the line-decorations margin, left of the code */
+.nk-diff-add-gutter {
+  border-left: 3px solid var(--green);
+}
+.nk-diff-modify-gutter {
+  border-left: 3px solid var(--yellow);
+}
+.nk-diff-del-gutter {
+  border-left: 3px solid var(--red);
+}
+/* subtle whole-line tint for added / modified lines */
+.nk-diff-add-line {
+  background: rgba(53, 224, 138, 0.07);
+}
+.nk-diff-modify-line {
+  background: rgba(255, 176, 32, 0.07);
+}
+
 .editor-main {
   flex: 1;
   min-width: 0;
