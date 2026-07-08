@@ -11,9 +11,13 @@ import { ProjectSidebar } from './components/ProjectSidebar';
 import { ProjectPanel } from './components/ProjectPanel';
 import { CodeEditor } from './components/CodeEditor';
 import { EodView } from './components/EodView';
+import { Dashboard } from './components/Dashboard';
 import { TerminalTab } from './components/TerminalTab';
 import { Toasts } from './components/Toasts';
+import { ThemePicker } from './components/ThemePicker';
+import { ActivityWave } from './components/ActivityWave';
 import { finishToastFor, fireNativeNotification, primeNotifications, taskToast } from './lib/notify';
+import { applyTheme, cacheThemeId, cachedThemeId, type ThemeId } from './lib/themes';
 
 export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -23,7 +27,7 @@ export default function App() {
   // mounted (see the term-stack below) so ptys survive project switches; this
   // only controls which one is visible for the currently selected project.
   const [activeTabByProject, setActiveTabByProject] = useState<Record<string, string>>({});
-  const [view, setView] = useState<'runner' | 'editor' | 'eod'>('runner');
+  const [view, setView] = useState<'runner' | 'editor' | 'eod' | 'dashboard'>('runner');
   // Terminal dock: docked bottom (resizable height) or right (resizable width),
   // plus minimize. All persisted server-side.
   const [dockPosition, setDockPosition] = useState<'bottom' | 'right'>('bottom');
@@ -31,6 +35,9 @@ export default function App() {
   const [dockWidth, setDockWidth] = useState<number>(480);
   const [dockMinimized, setDockMinimized] = useState<boolean>(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
+  // Active color theme. Seeded from the localStorage cache (already applied in
+  // main.tsx before paint); reconciled with the server-persisted value on boot.
+  const [themeId, setThemeId] = useState<ThemeId>(cachedThemeId);
   // Last-open editor file per project (restored on reopen).
   const [editorFileByProject, setEditorFileByProject] = useState<Record<string, string>>({});
   // Inline tab rename.
@@ -54,6 +61,9 @@ export default function App() {
   // Gate settings-persistence until after the initial workspace has been applied,
   // so restoring state doesn't immediately re-save (and clobber) it.
   const booted = useRef(false);
+  // Set once the user picks a theme, so a slow getWorkspace() resolving afterwards
+  // doesn't reconcile (clobber) their fresh selection with the stale server value.
+  const themeTouched = useRef(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -100,7 +110,8 @@ export default function App() {
         if (typeof ui.dockWidth === 'number' && ui.dockWidth >= 240) setDockWidth(ui.dockWidth);
         if (typeof ui.dockMinimized === 'boolean') setDockMinimized(ui.dockMinimized);
         if (typeof ui.sidebarCollapsed === 'boolean') setSidebarCollapsed(ui.sidebarCollapsed);
-        if (ui.view === 'runner' || ui.view === 'editor' || ui.view === 'eod') setView(ui.view);
+        if (ui.view === 'runner' || ui.view === 'editor' || ui.view === 'eod' || ui.view === 'dashboard')
+          setView(ui.view);
         if (ui.activeTabByProject) setActiveTabByProject(ui.activeTabByProject);
         if (ui.editorFileByProject) setEditorFileByProject(ui.editorFileByProject);
         const savedSel =
@@ -108,6 +119,15 @@ export default function App() {
             ? ui.selectedId
             : list[0]?.id ?? null;
         setSelectedId(savedSel);
+        // Reconcile the theme with the server (source of truth); the cached one
+        // was already painted in main.tsx. Skip if the user picked a theme while
+        // this request was in flight — their choice is newer than the snapshot.
+        const savedTheme = ws.settings.theme;
+        if (!themeTouched.current && typeof savedTheme === 'string') {
+          const applied = applyTheme(savedTheme);
+          setThemeId(applied);
+          cacheThemeId(applied);
+        }
       } catch {
         // No workspace yet (or backend hiccup) — fall back to first project.
         setSelectedId((cur) => cur ?? list[0]?.id ?? null);
@@ -466,6 +486,16 @@ export default function App() {
     });
   };
 
+  // Switch theme: apply CSS vars instantly, cache locally, and persist to the
+  // server under the AppSetting 'theme' key.
+  const changeTheme = (id: ThemeId): void => {
+    themeTouched.current = true;
+    const applied = applyTheme(id);
+    setThemeId(applied);
+    cacheThemeId(applied);
+    void api.saveSettings({ theme: applied }).catch(() => undefined);
+  };
+
   return (
     <div className="app">
       <header className="app-header">
@@ -481,6 +511,10 @@ export default function App() {
           </svg>
         </button>
         <h1>NARUKAMI</h1>
+        <div className="header-wave" title="Live activity — moves while any process is running">
+          <ActivityWave active={workingIds.size > 0} />
+        </div>
+        <ThemePicker themeId={themeId} onSelect={changeTheme} />
       </header>
 
       {!hasToken() && (
@@ -529,6 +563,12 @@ export default function App() {
                   >
                     EOD
                   </button>
+                  <button
+                    className={`vs-btn ${view === 'dashboard' ? 'active' : ''}`}
+                    onClick={() => setView('dashboard')}
+                  >
+                    Dashboard
+                  </button>
                 </div>
                 {view === 'runner' ? (
                   <div className="runner-scroll">
@@ -546,6 +586,10 @@ export default function App() {
                 ) : view === 'eod' ? (
                   <div className="runner-scroll">
                     <EodView key={selected.id} project={selected} />
+                  </div>
+                ) : view === 'dashboard' ? (
+                  <div className="runner-scroll">
+                    <Dashboard key={selected.id} project={selected} />
                   </div>
                 ) : (
                   <CodeEditor

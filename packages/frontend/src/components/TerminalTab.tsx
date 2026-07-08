@@ -3,6 +3,7 @@ import { Terminal, type IDisposable } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { api, runWsUrl } from '../api';
 import { normalizeStatus } from '../lib/runStatus';
+import { pulseActivity } from '../lib/activityBus';
 import type { ActiveRun, RunStatus } from '../types';
 
 interface Props {
@@ -147,6 +148,7 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity }
           if (msg.type === 'data' && typeof msg.chunk === 'string') {
             t.write(msg.chunk);
             bumpActivity();
+            pulseActivity(msg.chunk.length); // feed the global header activity wave
           } else if (msg.type === 'exit') {
             gotExit = true;
             if (idleTimer) clearTimeout(idleTimer);

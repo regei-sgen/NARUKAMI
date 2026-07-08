@@ -190,6 +190,29 @@ function psQuote(s: string): string {
   return `'${s.replace(/'/g, "''")}'`;
 }
 
+/**
+ * Build the (non-elevated) PowerShell command that UAC-elevates the broker agent.
+ *
+ * The elevated child MUST run the Electron binary AS Node (ELECTRON_RUN_AS_NODE=1)
+ * so it executes broker-agent.mjs instead of booting a second NARUKAMI window. UAC
+ * (Start-Process -Verb RunAs) hands the elevated process a FRESH environment and
+ * DROPS any var set in this (non-elevated) parent — so setting `$env:` out here is
+ * useless. We instead elevate a hidden PowerShell that exports the flag in its own
+ * context, then invokes the exe. (In dev the exe is node.exe, which ignores the
+ * flag and runs the .mjs regardless — so this is correct for both layouts.)
+ *
+ * Pure string builder so the quoting can be unit-tested without firing UAC.
+ */
+export function elevationPsCommand(exe: string, agentPath: string, cfgPath: string): string {
+  const elevCmd =
+    `$env:ELECTRON_RUN_AS_NODE='1'; ` +
+    `& ${psQuote(exe)} ${psQuote(agentPath)} ${psQuote(cfgPath)}`;
+  return (
+    `Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden ` +
+    `-ArgumentList @('-NoProfile','-NonInteractive','-Command', ${psQuote(elevCmd)})`
+  );
+}
+
 /** Launch the broker agent ELEVATED via UAC. Returns nothing; success is signalled
  *  by the agent connecting back. On a synchronous failure (UAC denied) the caller's
  *  pending timeout — or the err path here — surfaces the error. */
@@ -211,12 +234,10 @@ function launchElevated(agentPath: string, cfgPath: string, token: string): void
     return;
   }
 
-  // ELECTRON_RUN_AS_NODE lets a packaged Electron binary run the .mjs as plain
-  // Node; a real node.exe (dev) ignores it. -Verb RunAs triggers the UAC prompt.
-  const psCmd =
-    `$env:ELECTRON_RUN_AS_NODE='1'; ` +
-    `Start-Process -FilePath ${psQuote(exe)} -Verb RunAs -WindowStyle Hidden ` +
-    `-ArgumentList @(${psQuote(agentPath)}, ${psQuote(cfgPath)})`;
+  // -Verb RunAs triggers the UAC prompt. The flag that makes the elevated Electron
+  // binary run the agent as Node must be set INSIDE the elevated shell (UAC drops
+  // this parent's env) — see elevationPsCommand.
+  const psCmd = elevationPsCommand(exe, agentPath, cfgPath);
 
   execFile(
     'powershell.exe',

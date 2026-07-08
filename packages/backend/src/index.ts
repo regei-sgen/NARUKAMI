@@ -11,6 +11,7 @@ import { runRoutes } from './routes/runs';
 import { fileRoutes } from './routes/files';
 import { workspaceRoutes } from './routes/workspace';
 import { eodRoutes } from './routes/eod';
+import { telemetryRoutes } from './routes/telemetry';
 import { terminalRoutes } from './routes/terminals';
 import { setupWebSocket } from './ws';
 import { reconcileStaleRuns } from './services/runner';
@@ -105,6 +106,7 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
   await app.register(fileRoutes);
   await app.register(workspaceRoutes);
   await app.register(eodRoutes);
+  await app.register(telemetryRoutes);
   await app.register(terminalRoutes);
 
   // Packaged desktop mode: serve the built frontend from this same server so the
