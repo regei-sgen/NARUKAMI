@@ -9,6 +9,8 @@ import type {
   RestoredRun,
   RunCommand,
   UiSettings,
+  UsageReport,
+  UsageWindows,
   WorkspaceState,
 } from './types';
 
@@ -173,6 +175,13 @@ export const api = {
       method: 'POST',
       ...(resume ? { body: JSON.stringify({ continue: true }) } : {}),
     }),
+
+  // --- token-usage telemetry (Dashboard) ---
+  getTelemetry: (projectId: string) =>
+    request<UsageReport>(`/api/projects/${projectId}/telemetry`),
+
+  // account-wide rolling-window usage (5h / weekly / hourly) for the limit gauge.
+  getUsageWindows: () => request<UsageWindows>('/api/usage/windows'),
 
   // --- end-of-day snapshots ---
   listEod: (projectId: string) => request<EodEntry[]>(`/api/projects/${projectId}/eod`),

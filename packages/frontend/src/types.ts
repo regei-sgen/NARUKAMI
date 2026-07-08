@@ -162,10 +162,93 @@ export interface EodEntry {
   updatedAt: string;
 }
 
+// --- token-usage telemetry (Dashboard view), from the backend ---
+export interface UsageTotals {
+  input: number;
+  output: number;
+  cacheCreate: number;
+  cacheRead: number;
+  msgs: number;
+  total: number;
+}
+export interface DayUsage {
+  day: string;
+  input: number;
+  output: number;
+  cacheCreate: number;
+  cacheRead: number;
+  msgs: number;
+  total: number;
+}
+export interface SessionUsage {
+  id: string;
+  label: string;
+  day: string;
+  msgs: number;
+  dur: number;
+  input: number;
+  output: number;
+  cw: number;
+  cr: number;
+  total: number;
+}
+export interface UsageReport {
+  project: string;
+  found: boolean;
+  logDir: string;
+  model: string;
+  sessionsTotal: number;
+  sessionsActive: number;
+  rangeFirst: string | null;
+  rangeLast: string | null;
+  totals: UsageTotals;
+  counts: { userMsgs: number; assistantMsgs: number; toolResults: number };
+  byDay: DayUsage[];
+  sessions: SessionUsage[];
+}
+
+// Account-wide rolling-window usage (for the "almost full" limit gauge).
+export interface UsageWindow {
+  tokens: number;
+  input: number;
+  output: number;
+  cacheCreate: number;
+  cacheRead: number;
+  msgs: number;
+  earliestTs: number | null;
+}
+export interface HourBucket {
+  hourStart: number;
+  tokens: number;
+  msgs: number;
+}
+// Anthropic's real subscription usage (from ~/.claude/usage-live.json — the same
+// numbers claude.ai → Usage and /usage show).
+export interface LiveWindow {
+  usedPercentage: number;
+  resetsAt: number | null;
+}
+export interface LiveUsage {
+  available: boolean;
+  ts: number | null;
+  model: string | null;
+  fiveHour: LiveWindow | null;
+  sevenDay: LiveWindow | null;
+  stale: boolean;
+}
+export interface UsageWindows {
+  now: number;
+  projects: number;
+  fiveHour: UsageWindow;
+  weekly: UsageWindow;
+  perHour: HourBucket[];
+  live: LiveUsage;
+}
+
 // Persisted UI layout (stored server-side under the 'ui' settings key).
 export interface UiSettings {
   selectedId?: string | null;
-  view?: 'runner' | 'editor' | 'eod';
+  view?: 'runner' | 'editor' | 'eod' | 'dashboard';
   dockPosition?: 'bottom' | 'right';
   dockHeight?: number;
   dockWidth?: number;

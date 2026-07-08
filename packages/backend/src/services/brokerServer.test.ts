@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import type net from 'node:net';
-import { BrokerTransport } from './brokerServer';
+import { BrokerTransport, elevationPsCommand } from './brokerServer';
 
 function fakeSocket() {
   const writes: string[] = [];
@@ -78,5 +78,43 @@ describe('BrokerTransport', () => {
     sock.destroyed = true;
     const t = new BrokerTransport(sock as unknown as net.Socket, 1);
     expect(() => t.write('x')).not.toThrow();
+  });
+});
+
+describe('elevationPsCommand', () => {
+  const exe = 'C:\\Program Files\\NARUKAMI\\NARUKAMI.exe';
+  const agent = 'C:\\Program Files\\NARUKAMI\\resources\\broker-agent.mjs';
+  const cfg = 'C:\\Users\\me\\AppData\\Local\\Temp\\narukami-broker\\run.json';
+
+  it('elevates a hidden powershell (not the exe directly) via -Verb RunAs', () => {
+    const cmd = elevationPsCommand(exe, agent, cfg);
+    expect(cmd).toMatch(/^Start-Process -FilePath 'powershell\.exe' -Verb RunAs -WindowStyle Hidden/);
+    expect(cmd).toContain("'-NoProfile','-NonInteractive','-Command',");
+  });
+
+  it('sets ELECTRON_RUN_AS_NODE INSIDE the elevated command, not in this parent', () => {
+    const cmd = elevationPsCommand(exe, agent, cfg);
+    // The flag must live inside the -Command payload (elevated context)...
+    expect(cmd).toContain("$env:ELECTRON_RUN_AS_NODE=''1''");
+    // ...and NOT be set before Start-Process (which UAC would drop).
+    expect(cmd.startsWith('$env:')).toBe(false);
+    // The exe is invoked with the call operator inside that same payload.
+    expect(cmd).toContain('& ');
+  });
+
+  it('quotes the exe, agent, and cfg paths for the elevated shell', () => {
+    const cmd = elevationPsCommand(exe, agent, cfg);
+    // Paths are doubly single-quoted because they sit inside the outer -Command string.
+    expect(cmd).toContain(`''${exe}''`);
+    expect(cmd).toContain(`''${agent}''`);
+    expect(cmd).toContain(`''${cfg}''`);
+  });
+
+  it('escapes embedded single quotes in paths', () => {
+    const weird = "C:\\Users\\O'Brien\\app.exe";
+    const cmd = elevationPsCommand(weird, agent, cfg);
+    // psQuote doubles the quote, then the outer psQuote doubles again → four quotes.
+    expect(cmd).toContain("O''''Brien");
+    expect(cmd).not.toContain("O'Brien"); // no unescaped single quote survives
   });
 });
