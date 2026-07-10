@@ -3,73 +3,15 @@ import Editor, { type OnMount } from '@monaco-editor/react';
 import '../lib/monaco-setup'; // side-effect: offline workers + narukami theme + loader.config
 import { api } from '../api';
 import { changedFolders, diffDecorations } from '../lib/gitChanges';
+import { languageFor } from '../lib/language';
 import type { DiffRange, FileNode, GitChange, Project } from '../types';
 
 interface Props {
   project: Project;
-  initialFile?: string; // restore this file on mount (path re-read from disk)
-  onOpenFile?: (path: string) => void; // report opens so the workspace can persist them
-}
-
-const LANG_BY_EXT: Record<string, string> = {
-  ts: 'typescript',
-  tsx: 'typescript',
-  mts: 'typescript',
-  cts: 'typescript',
-  js: 'javascript',
-  jsx: 'javascript',
-  mjs: 'javascript',
-  cjs: 'javascript',
-  json: 'json',
-  css: 'css',
-  scss: 'scss',
-  less: 'less',
-  html: 'html',
-  htm: 'html',
-  xml: 'xml',
-  svg: 'xml',
-  vue: 'html',
-  md: 'markdown',
-  markdown: 'markdown',
-  py: 'python',
-  rb: 'ruby',
-  go: 'go',
-  rs: 'rust',
-  java: 'java',
-  kt: 'kotlin',
-  c: 'c',
-  h: 'c',
-  cpp: 'cpp',
-  cc: 'cpp',
-  hpp: 'cpp',
-  cs: 'csharp',
-  php: 'php',
-  phtml: 'php',
-  php4: 'php',
-  php5: 'php',
-  ctp: 'php',
-  sh: 'shell',
-  bash: 'shell',
-  zsh: 'shell',
-  ps1: 'powershell',
-  yml: 'yaml',
-  yaml: 'yaml',
-  toml: 'ini',
-  ini: 'ini',
-  env: 'ini',
-  sql: 'sql',
-  graphql: 'graphql',
-  gql: 'graphql',
-};
-
-function languageFor(filePath: string): string {
-  const base = filePath.split('/').pop() ?? '';
-  const lower = base.toLowerCase();
-  if (lower === 'dockerfile' || lower.startsWith('dockerfile.')) return 'dockerfile';
-  if (lower === '.gitignore' || lower === '.dockerignore' || lower === '.npmignore') return 'plaintext';
-  if (lower.startsWith('.env')) return 'ini';
-  const ext = base.includes('.') ? base.split('.').pop()!.toLowerCase() : '';
-  return LANG_BY_EXT[ext] ?? 'plaintext';
+  // Restore these open tabs on mount (paths are re-read from disk); `active` is focused.
+  initialTabs?: { open: string[]; active: string | null };
+  // Report the open-tab set + active tab so the workspace can persist them.
+  onTabsChange?: (open: string[], active: string | null) => void;
 }
 
 // --- inline SVG tree icons (no emoji; themed via currentColor) ---
@@ -148,11 +90,11 @@ interface TreeProps {
   changedDirs: Set<string>;
 }
 
-// Memoized: `content` state lives in CodeEditor, so without this the whole
-// visible tree would reconcile on every editor keystroke. All props are
-// referentially stable across a keystroke, so the shallow compare bails out.
-// (Recursion uses the outer `TreeNodes` const, not the inner name, so the
-// memoization applies at every level.)
+// Memoized: `tabs` state lives in CodeEditor, so without this the whole visible
+// tree would reconcile on every editor keystroke. All props are referentially
+// stable across a keystroke, so the shallow compare bails out. (Recursion uses
+// the outer `TreeNodes` const, not the inner name, so memoization applies at
+// every level.)
 const TreeNodes = memo(function TreeNodesInner({
   nodes,
   depth,
@@ -209,20 +151,29 @@ const TreeNodes = memo(function TreeNodesInner({
   );
 });
 
-export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
+// One open file. Each tab owns its own buffer, so switching tabs never loses
+// unsaved edits; it is also backed by its own Monaco model (undo history +
+// scroll/cursor preserved per file).
+interface OpenTab {
+  path: string;
+  content: string; // live buffer, kept in sync via Monaco onChange
+  original: string; // disk content at last read/save — drives the dirty flag
+  loading: boolean;
+  error: string | null;
+  saving: boolean;
+  saved: boolean; // transient "saved ✓" flash
+}
+
+export function CodeEditor({ project, initialTabs, onTabsChange }: Props) {
   const [tree, setTree] = useState<FileNode[]>([]);
   const [truncated, setTruncated] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [treeErr, setTreeErr] = useState<string | null>(null);
   const [loadingTree, setLoadingTree] = useState(true);
 
-  const [currentPath, setCurrentPath] = useState<string | null>(null);
-  const [content, setContent] = useState('');
-  const [original, setOriginal] = useState('');
-  const [fileErr, setFileErr] = useState<string | null>(null);
-  const [loadingFile, setLoadingFile] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
+  // Open files (tabs) + which one is focused.
+  const [tabs, setTabs] = useState<OpenTab[]>([]);
+  const [activePath, setActivePath] = useState<string | null>(null);
 
   // Search: by file name (client-side filter of the tree) or by code (backend grep).
   const [searchMode, setSearchMode] = useState<'name' | 'code'>('name');
@@ -234,13 +185,25 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
 
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
   const monacoRef = useRef<Parameters<OnMount>[1] | null>(null);
-  // Mirror of currentPath for stable async callbacks (poll/diff) + open sequencing
-  // so a slow read can't overwrite a newer file the user clicked.
-  const currentPathRef = useRef<string | null>(null);
-  const openSeqRef = useRef(0);
+  const activeTabRef = useRef<HTMLDivElement | null>(null);
+
+  // Mirrors for stable async callbacks (poll/save/decorations) so they never
+  // capture stale state.
+  const tabsRef = useRef<OpenTab[]>([]);
+  const activePathRef = useRef<string | null>(null);
+  // Files whose read completed but whose (initially-empty) Monaco model still
+  // needs the content pushed in once — see hydrateActiveModel.
+  const hydrateRef = useRef<Set<string>>(new Set());
+  // In-flight reads (dedupe a rapid double-open of the same file).
+  const openInFlightRef = useRef<Set<string>>(new Set());
+  // Models awaiting disposal after their tab closed — deferred until the model
+  // is no longer the one attached to the live editor (see the dispose effect).
+  const pendingDisposeRef = useRef<Set<string>>(new Set());
+  const restoredRef = useRef(false);
+
   // Line to reveal after a file opens (from a code-search hit). Held in a ref so
-  // the reveal survives the <Editor> remount and runs once the new editor mounts;
-  // the nonce re-triggers the effect even when the file content is identical.
+  // the reveal survives async load and runs once the target model is active; the
+  // nonce re-triggers the effect even when the file content is identical.
   const pendingRevealRef = useRef<number | null>(null);
   const [revealNonce, setRevealNonce] = useState(0);
 
@@ -251,21 +214,32 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
   const [changed, setChanged] = useState<Map<string, GitChange>>(new Map());
   const gitSigRef = useRef('');
   const gitBusyRef = useRef(false); // in-flight guard so slow polls don't stack
-  // Live diff decorations for the open file (Monaco decoration ids + source data).
-  const decorationsRef = useRef<string[]>([]);
+  // Live diff decorations for the ACTIVE file, tracked per model so switching
+  // tabs replaces (not duplicates) the right decoration set.
+  const decorationsByPathRef = useRef<Map<string, string[]>>(new Map());
   const diffRangesRef = useRef<DiffRange[]>([]);
   const untrackedRef = useRef(false);
 
-  const dirty = currentPath !== null && content !== original;
+  const activeTab = activePath ? tabs.find((t) => t.path === activePath) ?? null : null;
+  const dirty = !!activeTab && !activeTab.loading && activeTab.content !== activeTab.original;
 
-  // Load the file tree whenever the selected project changes.
+  // Monaco model URI, namespaced by project so two projects with the same
+  // relative path can't collide on one shared (stale) model.
+  const scopeOf = useCallback((p: string) => `${project.id}/${p}`, [project.id]);
+
+  useEffect(() => {
+    tabsRef.current = tabs;
+  }, [tabs]);
+  useEffect(() => {
+    activePathRef.current = activePath;
+  }, [activePath]);
+
+  // Load the file tree whenever the selected project changes. (This component is
+  // keyed by project id in App, so state is otherwise fresh per project.)
   useEffect(() => {
     let cancelled = false;
     setLoadingTree(true);
     setTreeErr(null);
-    setCurrentPath(null);
-    setContent('');
-    setOriginal('');
     api
       .getTree(project.id)
       .then((r) => {
@@ -296,35 +270,48 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
     });
   }, []);
 
+  // Open a file into a tab (or focus it if already open). New tabs appear
+  // immediately (loading) and are focused; the disk read fills them in.
   const openPath = useCallback(
     async (filePath: string, line?: number) => {
-      const seq = (openSeqRef.current += 1); // newest open wins if reads overlap
-      setLoadingFile(true);
-      setFileErr(null);
-      setSaved(false);
-      // Drop the previous file's diff so a remount can't paint its ranges here.
-      diffRangesRef.current = [];
-      untrackedRef.current = false;
-      try {
-        const r = await api.readFile(project.id, filePath);
-        if (openSeqRef.current !== seq) return; // superseded by a newer open
-        currentPathRef.current = filePath;
-        setCurrentPath(filePath);
-        setContent(r.content);
-        setOriginal(r.content);
-        // Set OR clear the pending reveal: a plain open (no line) must wipe any
-        // stale reveal so it can't fire on the wrong file when it mounts.
+      const already = tabsRef.current.some((t) => t.path === filePath);
+      if (already) {
+        setActivePath(filePath);
         pendingRevealRef.current = line && line > 0 ? line : null;
         if (line && line > 0) setRevealNonce((n) => n + 1);
-        onOpenFile?.(filePath); // persist as the project's last-open file
+        return;
+      }
+      if (openInFlightRef.current.has(filePath)) return; // dedupe rapid double-open
+      openInFlightRef.current.add(filePath);
+      setTabs((cur) =>
+        cur.some((t) => t.path === filePath)
+          ? cur
+          : [
+              ...cur,
+              { path: filePath, content: '', original: '', loading: true, error: null, saving: false, saved: false },
+            ],
+      );
+      setActivePath(filePath);
+      try {
+        const r = await api.readFile(project.id, filePath);
+        hydrateRef.current.add(filePath); // model needs the content pushed in once
+        setTabs((cur) =>
+          cur.map((t) =>
+            t.path === filePath ? { ...t, content: r.content, original: r.content, loading: false, error: null } : t,
+          ),
+        );
+        // Set OR clear the pending reveal so a plain open can't fire a stale jump.
+        pendingRevealRef.current = line && line > 0 ? line : null;
+        if (line && line > 0) setRevealNonce((n) => n + 1);
       } catch (e) {
-        if (openSeqRef.current !== seq) return;
-        setFileErr((e as Error).message);
+        setTabs((cur) =>
+          cur.map((t) => (t.path === filePath ? { ...t, loading: false, error: (e as Error).message } : t)),
+        );
       } finally {
-        if (openSeqRef.current === seq) setLoadingFile(false);
+        openInFlightRef.current.delete(filePath);
       }
     },
-    [project.id, onOpenFile],
+    [project.id],
   );
 
   // Flattened file paths for the name-search filter (rebuilt when the tree changes).
@@ -346,20 +333,23 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
   // Folders that (transitively) contain a change — collapsed dirs still get a marker.
   const changedDirs = useMemo(() => changedFolders(changed.keys()), [changed]);
 
-  // Paint the open file's changed lines: a colored gutter stripe + subtle line
+  // Paint the active file's changed lines: a colored gutter stripe + subtle line
   // tint (added/modified), or a gutter glyph for a deletion. Reads the latest
-  // diff/untracked from refs so it can be called from mount, poll, or edits.
+  // diff/untracked from refs, and stores the decoration ids per model path so a
+  // later repaint of the same model replaces rather than stacks them.
   const applyDecorations = useCallback(() => {
     const ed = editorRef.current;
     const mon = monacoRef.current;
     if (!ed || !mon) return;
     const model = ed.getModel();
     if (!model) return;
-    const specs = diffDecorations(
-      diffRangesRef.current,
-      model.getLineCount(),
-      untrackedRef.current,
-    );
+    const path = activePathRef.current;
+    // The mounted model must match the active path. During an error-then-open
+    // remount, handleMount (a child effect) can run before activePathRef is
+    // synced by its parent effect — bail rather than store ids under the wrong
+    // key (which would strand decorations on the wrong model).
+    if (!path || model.uri.toString() !== mon.Uri.parse(scopeOf(path)).toString()) return;
+    const specs = diffDecorations(diffRangesRef.current, model.getLineCount(), untrackedRef.current);
     const decos = specs.map((s) => ({
       range: new mon.Range(s.startLine, 1, s.endLine, 1),
       options: s.className
@@ -370,8 +360,40 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
           }
         : { linesDecorationsClassName: s.linesDecorationsClassName },
     }));
-    decorationsRef.current = ed.deltaDecorations(decorationsRef.current, decos);
+    const prev = decorationsByPathRef.current.get(path) ?? [];
+    const next = ed.deltaDecorations(prev, decos);
+    decorationsByPathRef.current.set(path, next);
+  }, [scopeOf]);
+
+  // Reveal + focus a pending line on the live editor. Guards on getModel() so a
+  // stale/disposed editor no-ops without clearing the pending line.
+  const doReveal = useCallback(() => {
+    const line = pendingRevealRef.current;
+    const ed = editorRef.current;
+    if (!line || !ed || !ed.getModel()) return;
+    ed.revealLineInCenter(line);
+    ed.setPosition({ lineNumber: line, column: 1 });
+    ed.focus();
+    pendingRevealRef.current = null;
   }, []);
+
+  // Push a freshly-read file's content into its Monaco model once. The model was
+  // created empty when we switched to the (still-loading) tab, and the library's
+  // defaultValue won't retro-fill an already-existing model — so we do it here.
+  const hydrateActiveModel = useCallback(() => {
+    const ed = editorRef.current;
+    if (!ed) return;
+    const path = activePathRef.current;
+    if (!path || !hydrateRef.current.has(path)) return;
+    const tab = tabsRef.current.find((t) => t.path === path);
+    if (!tab || tab.loading || tab.error) return;
+    const model = ed.getModel();
+    if (!model) return; // model not attached yet; onMount / the effect will retry
+    if (model.getValue() !== tab.content) model.setValue(tab.content);
+    hydrateRef.current.delete(path);
+    applyDecorations();
+    doReveal();
+  }, [applyDecorations, doReveal]);
 
   // Poll git working-tree status so edits (incl. Claude's, made outside the editor)
   // surface within a few seconds. The signature guard skips setState — and the
@@ -395,13 +417,13 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
     }
   }, [project.id]);
 
-  // Fetch changed line ranges for the OPEN file and repaint the gutter. Decoupled
-  // from `changed` on purpose: git collapses every edit to the same "modified"
-  // bucket, so re-editing an already-modified file leaves the status signature
-  // unchanged — the gutter has to refresh on its own cadence (poll + save + open),
-  // keyed on the file path rather than the coarse status set, or it would freeze.
+  // Fetch changed line ranges for the ACTIVE file and repaint its gutter.
+  // Decoupled from `changed` on purpose: git collapses every edit to the same
+  // "modified" bucket, so re-editing an already-modified file leaves the status
+  // signature unchanged — the gutter has to refresh on its own cadence (poll +
+  // save + tab switch), keyed on the file path rather than the coarse status set.
   const refreshOpenDiff = useCallback(async () => {
-    const fp = currentPathRef.current;
+    const fp = activePathRef.current;
     if (!fp) {
       diffRangesRef.current = [];
       untrackedRef.current = false;
@@ -410,16 +432,15 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
     }
     try {
       const r = await api.getGitDiff(project.id, fp);
-      if (currentPathRef.current !== fp) return; // file switched mid-flight
+      if (activePathRef.current !== fp) return; // file switched mid-flight
       untrackedRef.current = r.isRepo && !r.tracked;
       diffRangesRef.current = r.ranges;
     } catch {
-      if (currentPathRef.current !== fp) return;
+      if (activePathRef.current !== fp) return;
       diffRangesRef.current = [];
       untrackedRef.current = false;
     }
     applyDecorations();
-    // applyDecorations is stable; listed for lint completeness.
   }, [project.id, applyDecorations]);
 
   useEffect(() => {
@@ -434,16 +455,61 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
     return () => clearInterval(t);
   }, [refreshGit, refreshOpenDiff]);
 
-  // Refetch the gutter when the open file changes (independent of the poll).
+  // Refetch the gutter when the active file changes (independent of the poll).
+  // Drop the previous file's ranges first so they can't paint onto the new
+  // model in the window before the refetch resolves.
   useEffect(() => {
+    diffRangesRef.current = [];
+    untrackedRef.current = false;
     void refreshOpenDiff();
-  }, [currentPath, refreshOpenDiff]);
+  }, [activePath, refreshOpenDiff]);
 
-  // Re-apply decorations on edits so an untracked file's whole-file highlight
-  // tracks new lines and decorations survive buffer changes.
+  // Hydrate the active model once its content has loaded.
+  useEffect(() => {
+    hydrateActiveModel();
+  }, [tabs, activePath, hydrateActiveModel]);
+
+  // Re-apply decorations on edits / tab switch so an untracked file's whole-file
+  // highlight tracks new lines and decorations survive buffer changes.
   useEffect(() => {
     applyDecorations();
-  }, [content, applyDecorations]);
+  }, [activeTab?.content, activePath, applyDecorations]);
+
+  // Dispose models for closed tabs, but only once the model is no longer the one
+  // attached to the live editor (disposing the on-screen model would leave the
+  // editor pointed at a dead model until React swaps in the neighbour). Runs
+  // every render; cheap no-op when nothing is pending.
+  useEffect(() => {
+    const mon = monacoRef.current;
+    if (!mon || pendingDisposeRef.current.size === 0) return;
+    const activeUri = editorRef.current?.getModel()?.uri.toString();
+    for (const p of [...pendingDisposeRef.current]) {
+      const uri = mon.Uri.parse(scopeOf(p));
+      if (uri.toString() === activeUri) continue; // still on screen; wait for the swap
+      const m = mon.editor.getModel(uri);
+      if (m && !m.isDisposed()) m.dispose();
+      decorationsByPathRef.current.delete(p);
+      hydrateRef.current.delete(p);
+      pendingDisposeRef.current.delete(p);
+    }
+  });
+
+  // On unmount (project switch remounts this component), dispose every model we
+  // created — open tabs plus any still queued for disposal — so a namespaced
+  // path can't be reused with stale content next time. (With keepCurrentModel
+  // the library no longer disposes the active model for us.)
+  useEffect(
+    () => () => {
+      const mon = monacoRef.current;
+      if (!mon) return;
+      const paths = new Set<string>([...tabsRef.current.map((t) => t.path), ...pendingDisposeRef.current]);
+      for (const p of paths) {
+        const m = mon.editor.getModel(mon.Uri.parse(`${project.id}/${p}`));
+        if (m && !m.isDisposed()) m.dispose();
+      }
+    },
+    [project.id],
+  );
 
   const nameResults = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -485,23 +551,9 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
     };
   }, [project.id, query, searchMode]);
 
-  // Reveal + focus a pending line on the LIVE editor. Called both from the effect
-  // below (same-file jump: editor already mounted) and from onMount (cross-file
-  // jump remounts <Editor>, so the reveal must wait for the new editor). Guards on
-  // getModel() so a stale/disposed editor no-ops without clearing the pending line.
-  const doReveal = useCallback(() => {
-    const line = pendingRevealRef.current;
-    const ed = editorRef.current;
-    if (!line || !ed || !ed.getModel()) return;
-    ed.revealLineInCenter(line);
-    ed.setPosition({ lineNumber: line, column: 1 });
-    ed.focus();
-    pendingRevealRef.current = null;
-  }, []);
-
   useEffect(() => {
     doReveal();
-  }, [revealNonce, content, doReveal]);
+  }, [revealNonce, activeTab?.content, doReveal]);
 
   const openFile = useCallback(
     (node: FileNode) => {
@@ -511,44 +563,107 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
     [openPath],
   );
 
-  // Restore the last-open file once the tree has loaded (and nothing else is open).
+  // Restore the previously-open tab set once the tree has loaded (runs once).
   useEffect(() => {
-    if (loadingTree || !initialFile || currentPath) return;
-    void openPath(initialFile);
+    if (loadingTree || restoredRef.current) return;
+    restoredRef.current = true;
+    const it = initialTabs;
+    if (!it || it.open.length === 0) return;
+    void (async () => {
+      for (const p of it.open) await openPath(p);
+      if (it.active) setActivePath(it.active);
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loadingTree, initialFile]);
+  }, [loadingTree]);
+
+  // Report the open-tab set + active tab up for persistence. Keyed on the path
+  // signature (not tab objects) so keystrokes don't churn it. Gated on restore:
+  // on a fresh remount `tabs` is empty and `restored` is false, so without this
+  // guard the first run would report an empty set and clobber the persisted tabs
+  // before the (tree-gated) restore effect can read them.
+  const openSig = tabs.map((t) => t.path).join('\n');
+  useEffect(() => {
+    if (!restoredRef.current) return;
+    onTabsChange?.(openSig ? openSig.split('\n') : [], activePath);
+  }, [openSig, activePath, onTabsChange]);
+
+  // Keep the focused tab visible when the strip overflows horizontally.
+  useEffect(() => {
+    activeTabRef.current?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+  }, [activePath]);
+
+  // Save the active tab on Ctrl/Cmd+S from anywhere in the editor view (Monaco's
+  // own command only fires while the editor widget holds focus; this also stops
+  // the host's Save-page default when focus is in the tree/search).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 's' || e.key === 'S')) {
+        e.preventDefault();
+        saveRef.current();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   // Keep a ref to the latest save so Monaco's Ctrl+S command isn't a stale closure.
   const saveRef = useRef<() => void>(() => undefined);
   const save = useCallback(async () => {
-    if (currentPath === null || saving) return;
-    if (content === original) return;
-    setSaving(true);
-    setFileErr(null);
+    const path = activePathRef.current;
+    if (!path) return;
+    const tab = tabsRef.current.find((t) => t.path === path);
+    if (!tab || tab.saving || tab.loading || tab.content === tab.original) return;
+    const body = tab.content;
+    setTabs((cur) => cur.map((t) => (t.path === path ? { ...t, saving: true, error: null } : t)));
     try {
-      await api.saveFile(project.id, currentPath, content);
-      setOriginal(content);
-      setSaved(true);
-      // Reflect the save immediately: tree markers (refreshGit) + gutter for the
-      // saved file (refreshOpenDiff — needed because git keeps it in the same
-      // "modified" bucket, so the status signature alone wouldn't refresh it).
+      await api.saveFile(project.id, path, body);
+      setTabs((cur) => cur.map((t) => (t.path === path ? { ...t, original: body, saving: false, saved: true } : t)));
+      // Reflect the save immediately: tree markers (refreshGit) + the saved
+      // file's gutter (refreshOpenDiff — git keeps it in the same "modified"
+      // bucket, so the status signature alone wouldn't refresh it).
       void refreshGit();
       void refreshOpenDiff();
     } catch (e) {
-      setFileErr((e as Error).message);
-    } finally {
-      setSaving(false);
+      setTabs((cur) => cur.map((t) => (t.path === path ? { ...t, saving: false, error: (e as Error).message } : t)));
     }
-  }, [project.id, currentPath, content, original, saving, refreshGit, refreshOpenDiff]);
+  }, [project.id, refreshGit, refreshOpenDiff]);
   saveRef.current = save;
+
+  const handleChange = useCallback((v: string | undefined) => {
+    const path = activePathRef.current;
+    if (!path) return;
+    setTabs((cur) => cur.map((t) => (t.path === path && !t.loading ? { ...t, content: v ?? '', saved: false } : t)));
+  }, []);
+
+  const closeTab = useCallback((path: string) => {
+    const tab = tabsRef.current.find((t) => t.path === path);
+    if (tab && !tab.loading && tab.content !== tab.original) {
+      const name = path.split('/').pop() ?? path;
+      // Closing discards the buffer — confirm before losing unsaved edits.
+      if (!window.confirm(`Discard unsaved changes to ${name}?`)) return;
+    }
+    setActivePath((prev) => {
+      if (prev !== path) return prev; // closed a background tab; focus unchanged
+      const cur = tabsRef.current;
+      const idx = cur.findIndex((t) => t.path === path);
+      const remaining = cur.filter((t) => t.path !== path);
+      if (remaining.length === 0) return null;
+      return remaining[Math.min(idx, remaining.length - 1)].path;
+    });
+    setTabs((cur) => cur.filter((t) => t.path !== path));
+    // Clear the in-flight guard so closing a still-loading file doesn't block
+    // reopening it before its (now-orphaned) read resolves.
+    openInFlightRef.current.delete(path);
+    pendingDisposeRef.current.add(path); // model disposed by the dispose effect
+  }, []);
 
   const handleMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
     monacoRef.current = monaco;
-    decorationsRef.current = [];
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveRef.current());
+    hydrateActiveModel(); // fill content if the read resolved before mount
     applyDecorations(); // paint gutter for the freshly-mounted editor
-    doReveal(); // complete a pending cross-file jump-to-line on the new editor
+    doReveal(); // complete a pending jump-to-line on the new editor
   };
 
   return (
@@ -606,7 +721,7 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
                       return (
                         <div
                           key={p}
-                          className={`ft-row ft-file ${currentPath === p ? 'active' : ''} ${
+                          className={`ft-row ft-file ${activePath === p ? 'active' : ''} ${
                             st ? `changed changed-${st}` : ''
                           }`}
                           style={{ paddingLeft: 8 }}
@@ -660,7 +775,7 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
                     expanded={expanded}
                     toggle={toggle}
                     onOpen={openFile}
-                    currentPath={currentPath}
+                    currentPath={activePath}
                     changed={changed}
                     changedDirs={changedDirs}
                   />
@@ -677,54 +792,102 @@ export function CodeEditor({ project, initialFile, onOpenFile }: Props) {
       </aside>
 
       <div className="editor-main">
+        {tabs.length > 0 && (
+          <div className="editor-tabs" role="tablist">
+            {tabs.map((t) => {
+              const isActive = t.path === activePath;
+              const tdirty = !t.loading && t.content !== t.original;
+              const name = t.path.split('/').pop() ?? t.path;
+              return (
+                <div
+                  key={t.path}
+                  ref={isActive ? activeTabRef : undefined}
+                  className={`etab ${isActive ? 'active' : ''} ${tdirty ? 'dirty' : ''} ${t.error ? 'err' : ''}`}
+                  role="tab"
+                  aria-selected={isActive}
+                  title={t.path}
+                  onMouseDown={(e) => {
+                    if (e.button === 1) {
+                      e.preventDefault(); // middle-click closes
+                      closeTab(t.path);
+                    }
+                  }}
+                  onClick={() => setActivePath(t.path)}
+                >
+                  {tdirty ? <span className="etab-dot" title="Unsaved changes" /> : null}
+                  <span className="etab-name">{name}</span>
+                  <button
+                    className="etab-close"
+                    title="Close"
+                    aria-label={`Close ${name}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      closeTab(t.path);
+                    }}
+                  >
+                    ×
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
         <div className="editor-toolbar">
           <span className="editor-path">
-            {currentPath ? (
+            {activeTab ? (
               <>
                 {dirty && <span className="dirty-dot" title="Unsaved changes" />}
-                {currentPath}
+                {activeTab.path}
               </>
             ) : (
               <span className="muted">No file open</span>
             )}
           </span>
-          {fileErr && <span className="editor-file-err">{fileErr}</span>}
-          {saved && !dirty && <span className="editor-saved">saved ✓</span>}
+          {activeTab?.error && <span className="editor-file-err">{activeTab.error}</span>}
+          {activeTab?.saved && !dirty && <span className="editor-saved">saved ✓</span>}
           <button
             className="btn btn-primary editor-save"
             onClick={() => void save()}
-            disabled={!dirty || saving}
+            disabled={!dirty || !!activeTab?.saving}
           >
-            {saving ? 'Saving…' : 'Save'}
+            {activeTab?.saving ? 'Saving…' : 'Save'}
           </button>
         </div>
 
         <div className="editor-host">
-          {currentPath === null ? (
-            <div className="editor-empty">
-              {loadingFile ? 'Opening…' : 'Select a file from the tree to edit it.'}
-            </div>
+          {!activeTab ? (
+            <div className="editor-empty">Select a file from the tree to edit it.</div>
+          ) : activeTab.error ? (
+            <div className="editor-empty">Couldn’t open this file: {activeTab.error}</div>
           ) : (
-            <Editor
-              key={currentPath}
-              theme="narukami"
-              language={languageFor(currentPath)}
-              value={content}
-              onChange={(v) => setContent(v ?? '')}
-              onMount={handleMount}
-              options={{
-                fontFamily: "'JetBrains Mono', 'Fira Code', Consolas, monospace",
-                fontSize: 13,
-                minimap: { enabled: true },
-                smoothScrolling: true,
-                scrollBeyondLastLine: false,
-                automaticLayout: true,
-                tabSize: 2,
-                cursorBlinking: 'smooth',
-                renderWhitespace: 'selection',
-                padding: { top: 8 },
-              }}
-            />
+            <>
+              <Editor
+                path={scopeOf(activeTab.path)}
+                theme="narukami"
+                defaultLanguage={languageFor(activeTab.path)}
+                defaultValue={activeTab.content}
+                // Keep models across <Editor> unmount (e.g. switching to an error
+                // tab or the empty state) so undo history + edits survive; this
+                // component disposes models itself on close + on project switch.
+                keepCurrentModel
+                onChange={handleChange}
+                onMount={handleMount}
+                options={{
+                  fontFamily: "'JetBrains Mono', 'Fira Code', Consolas, monospace",
+                  fontSize: 13,
+                  minimap: { enabled: true },
+                  smoothScrolling: true,
+                  scrollBeyondLastLine: false,
+                  automaticLayout: true,
+                  tabSize: 2,
+                  cursorBlinking: 'smooth',
+                  renderWhitespace: 'selection',
+                  padding: { top: 8 },
+                }}
+              />
+              {activeTab.loading && <div className="editor-loading-overlay">Opening…</div>}
+            </>
           )}
         </div>
       </div>

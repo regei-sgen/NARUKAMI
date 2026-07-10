@@ -4,6 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { api, runWsUrl } from '../api';
 import { normalizeStatus } from '../lib/runStatus';
 import { pulseActivity } from '../lib/activityBus';
+import { clearRunActivity, feedRunOutput } from '../lib/runActivity';
 import type { ActiveRun, RunStatus } from '../types';
 
 interface Props {
@@ -48,6 +49,7 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity }
     let ro: ResizeObserver | null = null;
     let dataDisposable: IDisposable | null = null;
     let onWinResize: (() => void) | null = null;
+    let onCtxMenu: ((e: MouseEvent) => void) | null = null;
 
     // Output-activity tracking for the "working" indicator + "task done" toast.
     let working = false;
@@ -85,7 +87,14 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity }
         fontFamily: 'Menlo, Consolas, "DejaVu Sans Mono", monospace',
         fontSize: 13,
         scrollback: 5000,
-        theme: { background: '#050506', foreground: '#e8e8ee', cursor: '#ff2d3c' },
+        // rightClickSelectsWord makes a bare right-click grab the word under the
+        // cursor; we drive copy/paste from the context menu instead, so keep off.
+        theme: {
+          background: '#050506',
+          foreground: '#e8e8ee',
+          cursor: '#ff2d3c',
+          selectionBackground: '#ff2d3c55', // visible drag-selection highlight
+        },
       });
       const fit = new FitAddon();
       t.loadAddon(fit);
@@ -110,10 +119,85 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity }
         safeFit();
       }
 
+      // --- clipboard: copy the xterm selection (which is NOT a native DOM
+      // selection, so the browser's own Ctrl+C copies nothing) and paste. ---
+      const copySelection = (): boolean => {
+        const sel = t.getSelection();
+        if (!sel) return false;
+        void navigator.clipboard?.writeText(sel).catch(() => {
+          /* clipboard write blocked — nothing else we can do */
+        });
+        return true;
+      };
+      const pasteClipboard = () => {
+        navigator.clipboard
+          ?.readText()
+          .then((text) => {
+            if (text) t.paste(text);
+          })
+          .catch(() => {
+            /* read blocked (fall back to native Ctrl+V, which xterm handles) */
+          });
+      };
+
+      const isMac = navigator.userAgent.toLowerCase().includes('mac');
+      t.attachCustomKeyEventHandler((e) => {
+        if (e.type !== 'keydown') return true;
+        const k = e.key.toLowerCase();
+        // macOS: Cmd+C / Cmd+V are copy/paste unconditionally.
+        if (isMac && e.metaKey && !e.ctrlKey) {
+          if (k === 'c' && copySelection()) return false;
+          if (k === 'v') {
+            pasteClipboard();
+            return false;
+          }
+          return true;
+        }
+        if (e.ctrlKey) {
+          // Ctrl+Shift+C / Ctrl+Shift+V — explicit copy/paste (never SIGINT).
+          if (e.shiftKey && k === 'c') {
+            copySelection();
+            return false;
+          }
+          if (e.shiftKey && k === 'v') {
+            pasteClipboard();
+            return false;
+          }
+          // Ctrl+C — copy the selection if there is one, else let ^C (SIGINT)
+          // through to the process.
+          if (!e.shiftKey && k === 'c' && t.hasSelection()) {
+            copySelection();
+            t.clearSelection();
+            return false;
+          }
+          // Ctrl+V (no shift) — leave it to xterm's native paste event.
+        }
+        return true;
+      });
+
+      if (container) {
+        // Right-click: copy the selection if any, otherwise paste. Classic
+        // terminal behaviour, and the discoverable path for mouse-only users.
+        onCtxMenu = (e: MouseEvent) => {
+          e.preventDefault();
+          if (t.hasSelection()) {
+            copySelection();
+            t.clearSelection();
+          } else {
+            pasteClipboard();
+          }
+        };
+        container.addEventListener('contextmenu', onCtxMenu);
+      }
+
       const openSocket = () => {
         if (disposed) return;
         const socket = new WebSocket(runWsUrl(run.runId));
         ws = socket;
+        // The backend replays the whole scrollback as one data message on
+        // (re)connect. Don't parse that backlog as "current work" — it would
+        // flash a stale live-process card. Only live chunks after it count.
+        let sawBacklog = false;
 
         const sendResize = () => {
           if (socket.readyState === WebSocket.OPEN) {
@@ -149,8 +233,14 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity }
             t.write(msg.chunk);
             bumpActivity();
             pulseActivity(msg.chunk.length); // feed the global header activity wave
+            if (sawBacklog) {
+              feedRunOutput(run.runId, msg.chunk); // feed the dashboard live-process cards
+            } else {
+              sawBacklog = true; // first message = replayed history, skip it
+            }
           } else if (msg.type === 'exit') {
             gotExit = true;
+            clearRunActivity(run.runId); // process ended → drop its live card
             if (idleTimer) clearTimeout(idleTimer);
             idleTimer = null;
             working = false;
@@ -165,6 +255,7 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity }
             t.write(`\r\n\x1b[90m[process ${status}${code}]\x1b[0m\r\n`);
           } else if (msg.type === 'error') {
             gotExit = true;
+            clearRunActivity(run.runId); // process errored → drop its live card
             if (idleTimer) clearTimeout(idleTimer);
             idleTimer = null;
             working = false;
@@ -237,10 +328,12 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity }
     return () => {
       disposed = true;
       cancelAnimationFrame(raf);
+      clearRunActivity(run.runId); // tab removed (run closed) → drop its live card
       if (pollTimer) clearTimeout(pollTimer);
       if (idleTimer) clearTimeout(idleTimer);
       if (working) onActivity?.(run.runId, false, false); // tab unmounting → clear working
       if (onWinResize) window.removeEventListener('resize', onWinResize);
+      if (onCtxMenu && containerRef.current) containerRef.current.removeEventListener('contextmenu', onCtxMenu);
       if (ro) ro.disconnect();
       if (dataDisposable) dataDisposable.dispose();
       if (ws) {
