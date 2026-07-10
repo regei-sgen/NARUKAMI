@@ -248,14 +248,15 @@ export interface UsageWindows {
 // Persisted UI layout (stored server-side under the 'ui' settings key).
 export interface UiSettings {
   selectedId?: string | null;
-  view?: 'runner' | 'editor' | 'eod' | 'dashboard';
+  view?: 'runner' | 'editor' | 'eod' | 'dashboard' | 'live';
   dockPosition?: 'bottom' | 'right';
   dockHeight?: number;
   dockWidth?: number;
   dockMinimized?: boolean;
   sidebarCollapsed?: boolean;
   activeTabByProject?: Record<string, string>;
-  editorFileByProject?: Record<string, string>;
+  editorFileByProject?: Record<string, string>; // legacy: single last-open file per project
+  editorTabsByProject?: Record<string, { open: string[]; active: string | null }>;
 }
 
 export interface WorkspaceState {

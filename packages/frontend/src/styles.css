@@ -745,11 +745,112 @@ body {
 .editor-saved + .editor-save {
   margin-left: 12px;
 }
+/* Open-file tab strip (multi-file editor). */
+.editor-tabs {
+  display: flex;
+  align-items: stretch;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex-shrink: 0;
+  scrollbar-width: thin;
+}
+.editor-tabs::-webkit-scrollbar {
+  height: 6px;
+}
+.editor-tabs::-webkit-scrollbar-thumb {
+  background: #26262f88;
+  border-radius: 3px;
+}
+.etab {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px 6px 12px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--border);
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 220px;
+  user-select: none;
+}
+.etab:hover {
+  color: var(--text);
+  background: var(--bg-3);
+}
+.etab.active {
+  color: var(--text);
+  background: #050506;
+  border-bottom-color: var(--accent);
+}
+.etab.err .etab-name {
+  color: var(--red);
+}
+.etab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.etab.dirty .etab-name {
+  font-style: italic;
+}
+.etab-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--glow);
+  flex-shrink: 0;
+}
+.etab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  visibility: hidden;
+}
+.etab:hover .etab-close,
+.etab.active .etab-close,
+.etab.dirty .etab-close {
+  visibility: visible;
+}
+.etab-close:hover {
+  background: rgba(255, 45, 60, 0.22);
+  color: var(--text);
+}
 .editor-host {
   flex: 1;
   min-height: 0;
   position: relative;
   background: #050506;
+}
+.editor-loading-overlay {
+  position: absolute;
+  top: 8px;
+  right: 14px;
+  z-index: 5;
+  padding: 3px 10px;
+  border-radius: 6px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  pointer-events: none;
 }
 .editor-empty {
   color: var(--text-dim);
@@ -2124,6 +2225,654 @@ body.resizing-h * {
   color: var(--text-dim);
   word-break: break-all;
 }
+
+/* ===== Live processes — futuristic HUD cards ===== */
+@property --lp-a {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+.lp {
+  margin: 2px 0 18px;
+}
+/* alien-organism stage (three.js) — a dark "screen" that the living organism
+   fills as a backdrop, with the process cards floating ON TOP of it, each one
+   projected from the emitter core by a light tether. */
+.lp-stage {
+  position: relative;
+  min-height: 380px;
+  padding: 18px;
+  margin-bottom: 4px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+  isolation: isolate; /* own stacking context so the layers below stay ordered */
+  background: radial-gradient(120% 78% at 50% 26%, rgba(var(--accent-rgb), 0.13), transparent 60%), #050506;
+}
+.lp-stage::after {
+  /* faint HUD scanlines over the whole viewport */
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: repeating-linear-gradient(0deg, transparent 0 3px, rgba(0, 0, 0, 0.14) 3px 4px);
+  pointer-events: none;
+  opacity: 0.4;
+}
+.lp-alien {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+}
+/* the emitter core — the point the organism "shows" its processes from */
+.lp-core {
+  position: absolute;
+  top: 30%;
+  left: 50%;
+  width: 10px;
+  height: 10px;
+  transform: translate(-50%, -50%);
+  z-index: 3;
+  pointer-events: none;
+}
+.lp-core-dot {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--text-dim);
+  transition: background 0.4s ease, box-shadow 0.4s ease;
+}
+.lp-stage.on .lp-core-dot {
+  background: var(--accent);
+  box-shadow: 0 0 16px 4px rgba(var(--accent-rgb), 0.8);
+}
+.lp-core-ring {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid rgba(var(--accent-rgb), 0.5);
+  transform: translate(-50%, -50%) scale(0.5);
+  opacity: 0;
+}
+.lp-stage.on .lp-core-ring {
+  animation: lp-core-pulse 2.6s ease-out infinite;
+}
+/* tether beams: SVG overlay in stage-local pixels, between core and cards */
+.lp-tethers {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 2;
+  pointer-events: none;
+  overflow: visible;
+}
+.lp-beam-line {
+  stroke: rgba(var(--accent-rgb), 0.5);
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-dasharray: 4 11;
+  filter: drop-shadow(0 0 4px rgba(var(--accent-rgb), 0.7));
+  animation: lp-flow 0.9s linear infinite;
+}
+.lp-beam-node {
+  fill: var(--accent);
+  filter: drop-shadow(0 0 6px rgba(var(--accent-rgb), 0.9));
+  animation: lp-breathe 1.6s ease-in-out infinite;
+}
+.lp-hero-label {
+  position: absolute;
+  left: 16px;
+  top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  pointer-events: none;
+  z-index: 5;
+}
+.lp-hero-state {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 2px;
+  color: var(--text-dim);
+  transition: color 0.4s ease;
+}
+.lp-hero-state.on {
+  color: var(--accent);
+  text-shadow: 0 0 12px rgba(var(--accent-rgb), 0.6);
+}
+.lp-hero-sub {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: var(--text-dim);
+}
+.lp-hd {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 11px;
+}
+.lp-hd-glyph {
+  color: var(--accent);
+  filter: drop-shadow(0 0 6px var(--glow));
+  animation: lp-flicker 5s infinite;
+}
+.lp-hd-title {
+  color: var(--text);
+  letter-spacing: 3px;
+}
+.lp-hd-count {
+  margin-left: auto;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 10px;
+  letter-spacing: 1px;
+}
+.lp-hd-count.on {
+  color: var(--accent);
+  border-color: rgba(var(--accent-rgb), 0.4);
+  background: rgba(var(--accent-rgb), 0.08);
+  box-shadow: 0 0 16px rgba(var(--accent-rgb), 0.22);
+}
+
+.lp-grid {
+  position: relative;
+  z-index: 4;
+  margin-top: 138px; /* clear the top band where the organism + core live */
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
+  gap: 14px;
+  min-width: 0;
+}
+/* cards float as frosted glass over the living organism (theme-safe: a
+   translucent slice of the theme's own surface, so text stays readable in
+   both Light and Dark while the creature glows through the gaps) */
+.lp-stage .lp-card {
+  background: linear-gradient(180deg, rgba(var(--accent-rgb), 0.12), transparent),
+    color-mix(in srgb, var(--bg-2) 74%, transparent);
+  backdrop-filter: blur(9px) saturate(1.12);
+  -webkit-backdrop-filter: blur(9px) saturate(1.12);
+  border-color: rgba(var(--accent-rgb), 0.3);
+  box-shadow: 0 14px 42px -18px rgba(0, 0, 0, 0.72);
+}
+
+.lp-card {
+  --k: var(--accent); /* per-action-kind accent, set by .act-* below */
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px 10px;
+  /* theme-aware: accent tint over the theme's own surface (no hardcoded dark,
+     so the card stays readable in the Light theme too) */
+  background: linear-gradient(180deg, rgba(var(--accent-rgb), 0.06), transparent), var(--bg-2);
+  box-shadow: 0 10px 34px -20px rgba(0, 0, 0, 0.55);
+}
+/* rotating sheen that traces the border */
+.lp-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 12px;
+  padding: 1px;
+  background: conic-gradient(
+    from var(--lp-a),
+    transparent 0 58%,
+    rgba(var(--accent-rgb), 0.65) 72%,
+    rgba(var(--accent-rgb), 0.15) 80%,
+    transparent 88%
+  );
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: lp-orbit 4.5s linear infinite;
+  pointer-events: none;
+  z-index: 2;
+}
+/* drifting scanline for the "processing" feel */
+.lp-card::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 40%;
+  background: linear-gradient(180deg, transparent, rgba(var(--accent-rgb), 0.06), transparent);
+  animation: lp-scan 3.6s ease-in-out infinite;
+  pointer-events: none;
+  z-index: 0;
+}
+.lp-card > * {
+  position: relative;
+  z-index: 1;
+}
+.lp-card.act-edit {
+  --k: var(--yellow);
+}
+.lp-card.act-write {
+  --k: var(--green);
+}
+.lp-card.act-read {
+  --k: var(--purple);
+}
+.lp-card.act-search {
+  --k: var(--purple);
+}
+.lp-card.act-think {
+  --k: var(--accent);
+}
+.lp-card.act-output {
+  --k: var(--text-dim);
+}
+
+.lp-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 9px;
+}
+.lp-kind {
+  color: var(--k);
+  font-size: 13px;
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--k) 55%, transparent));
+  flex-shrink: 0;
+}
+.lp-title {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lp-badge {
+  font-size: 9px;
+  padding: 1px 7px;
+  flex-shrink: 0;
+}
+
+.lp-action {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: rgba(var(--accent-rgb), 0.05);
+  border: 1px solid rgba(var(--accent-rgb), 0.12);
+  margin-bottom: 9px;
+}
+.lp-glyph {
+  color: var(--k);
+  font-size: 13px;
+  line-height: 1;
+  flex-shrink: 0;
+  text-shadow: 0 0 8px color-mix(in srgb, var(--k) 60%, transparent);
+}
+.lp-verb {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--k);
+  flex-shrink: 0;
+}
+.lp-target {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lp-caret {
+  width: 8px;
+  height: 14px;
+  background: var(--k);
+  border-radius: 1px;
+  animation: lp-blink 1s steps(2, start) infinite;
+  align-self: center;
+}
+
+/* action trail — breadcrumb of recent operations */
+.lp-trail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 9px;
+}
+.lp-chip {
+  --k: var(--text-dim);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.4px;
+  color: var(--k);
+  background: color-mix(in srgb, var(--k) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--k) 30%, transparent);
+  white-space: nowrap;
+}
+.lp-chip.act-edit {
+  --k: var(--yellow);
+}
+.lp-chip.act-write {
+  --k: var(--green);
+}
+.lp-chip.act-read,
+.lp-chip.act-search {
+  --k: var(--purple);
+}
+.lp-chip.act-run,
+.lp-chip.act-think {
+  --k: var(--accent);
+}
+
+/* files touched this task */
+.lp-files {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 9px;
+}
+.lp-files-h {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 1.5px;
+  color: var(--text-dim);
+}
+.lp-file {
+  --k: var(--text-dim);
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--k) 12%, var(--bg-3));
+  border-left: 2px solid var(--k);
+}
+.lp-file.act-edit {
+  --k: var(--yellow);
+}
+.lp-file.act-write {
+  --k: var(--green);
+}
+.lp-file.act-read {
+  --k: var(--purple);
+}
+
+/* per-task stats */
+.lp-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  margin-bottom: 9px;
+}
+.lp-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px 7px;
+  border-radius: 7px;
+  background: rgba(var(--accent-rgb), 0.04);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.lp-stat-v {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lp-stat-l {
+  font-family: var(--mono);
+  font-size: 8.5px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.lp-tail {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  max-height: 92px;
+  overflow: hidden;
+  margin-bottom: 9px;
+  -webkit-mask-image: linear-gradient(180deg, transparent, #000 30%);
+  mask-image: linear-gradient(180deg, transparent, #000 30%);
+}
+.lp-line {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lp-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
+.lp-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent);
+  letter-spacing: 1.5px;
+}
+.lp-pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 0 var(--glow);
+  animation: lp-pulse 1.4s ease-out infinite;
+}
+.lp-ago {
+  margin-left: auto;
+}
+.lp-bytes {
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+}
+
+.lp-idle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: var(--bg-2);
+  color: var(--text-dim);
+  font-size: 12px;
+}
+/* dormant message floats in the lower band, clear of the sleeping organism */
+.lp-stage .lp-idle {
+  position: relative;
+  z-index: 4;
+  margin-top: 168px;
+  border-color: rgba(255, 255, 255, 0.12);
+  background: color-mix(in srgb, var(--bg-2) 60%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: rgba(255, 255, 255, 0.7);
+}
+.lp-stage .lp-idle b {
+  color: #fff;
+}
+
+/* ── dedicated "Live" tab ─────────────────────────────────────────────
+   The organism stage fills the whole panel; the creature is big + centered,
+   and the process cards dock to the lower band so it reads as looming above
+   them, projecting each one down. */
+.live-view {
+  display: flex;
+  flex-direction: column;
+}
+.live-view .lp {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+}
+.lp--full .lp-stage {
+  flex: 1;
+  min-height: 520px;
+  display: flex;
+  flex-direction: column;
+}
+/* organism centered ⇒ the emitter core sits dead-center of the stage */
+.lp--full .lp-core {
+  top: 50%;
+}
+/* cards drop to the bottom; the big centered creature owns the space above */
+.lp--full .lp-grid {
+  margin-top: auto;
+}
+.lp--full .lp-idle {
+  margin: auto;
+}
+.lp-idle b {
+  color: var(--text);
+  font-weight: 600;
+}
+.lp-idle-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  animation: lp-breathe 2.6s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+@keyframes lp-orbit {
+  to {
+    --lp-a: 360deg;
+  }
+}
+@keyframes lp-scan {
+  0% {
+    transform: translateY(-40%);
+    opacity: 0;
+  }
+  35% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(280%);
+    opacity: 0;
+  }
+}
+@keyframes lp-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0.5);
+  }
+  70% {
+    box-shadow: 0 0 0 7px rgba(var(--accent-rgb), 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0);
+  }
+}
+@keyframes lp-blink {
+  0%,
+  50% {
+    opacity: 1;
+  }
+  50.01%,
+  100% {
+    opacity: 0;
+  }
+}
+@keyframes lp-flicker {
+  0%,
+  92%,
+  100% {
+    opacity: 1;
+  }
+  94% {
+    opacity: 0.35;
+  }
+  96% {
+    opacity: 1;
+  }
+  98% {
+    opacity: 0.5;
+  }
+}
+@keyframes lp-breathe {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+/* energy flowing along a tether, from the core toward the card */
+@keyframes lp-flow {
+  to {
+    stroke-dashoffset: -15;
+  }
+}
+/* the emitter core's expanding pulse ring */
+@keyframes lp-core-pulse {
+  0% {
+    opacity: 0.7;
+    transform: translate(-50%, -50%) scale(0.5);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1.9);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lp-card::before,
+  .lp-card::after,
+  .lp-pulse,
+  .lp-caret,
+  .lp-hd-glyph,
+  .lp-idle-dot,
+  .lp-beam-line,
+  .lp-beam-node,
+  .lp-core-ring {
+    animation: none;
+  }
+}
+
 /* account-wide usage limits (gauges + hourly) */
 .dash-gauges {
   display: grid;

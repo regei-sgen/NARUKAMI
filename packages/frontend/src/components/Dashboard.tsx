@@ -264,27 +264,37 @@ export function Dashboard({ project }: { project: Project }): JSX.Element {
     };
   }, [rep]);
 
-  if (loading) return <div className="dash"><div className="muted dash-empty">Loading telemetry…</div></div>;
+  // Persistent dashboard chrome: the header + the live-process cards render in
+  // EVERY state (loading / error / empty / full) so a telemetry refetch (mount,
+  // project switch, or ↻ Refresh) never blinks out the real-time process cards,
+  // which are driven by an independent store.
+  const shell = (children: JSX.Element | null, subtitle?: JSX.Element | string): JSX.Element => (
+    <div className="dash">
+      <div className="dash-head">
+        <div>
+          <h2>Dashboard</h2>
+          <div className="muted">{subtitle ?? `${project.name} · token usage`}</div>
+        </div>
+        <button className="btn dash-refresh" onClick={() => void load()} title="Re-read Claude Code logs">↻ Refresh</button>
+      </div>
+      {children}
+    </div>
+  );
+
+  if (loading) return shell(<div className="muted dash-empty">Loading telemetry…</div>);
   if (err) {
-    return (
-      <div className="dash">
+    return shell(
+      <>
         <div className="banner banner-error" onClick={() => setErr(null)}>{err}</div>
         <button className="btn" onClick={() => void load()}>Retry</button>
-      </div>
+      </>,
     );
   }
-  if (!rep || !derived) return <div className="dash" />;
+  if (!rep || !derived) return shell(null);
 
   if (!rep.found || rep.sessionsActive === 0) {
-    return (
-      <div className="dash">
-        <div className="dash-head">
-          <div>
-            <h2>Dashboard</h2>
-            <div className="muted">{project.name} · token usage</div>
-          </div>
-          <button className="btn dash-refresh" onClick={() => void load()} title="Re-read Claude Code logs">↻ Refresh</button>
-        </div>
+    return shell(
+      <>
         {win && <UsageLimits win={win} caps={caps} onCap={onCap} />}
         <div className="muted dash-empty">
           {rep.found
@@ -294,7 +304,7 @@ export function Dashboard({ project }: { project: Project }): JSX.Element {
           Open a <b>Claude</b> tab and run something — this project's detail shows up here.
           <div className="dash-logdir">looked in <code>{rep.logDir}</code></div>
         </div>
-      </div>
+      </>,
     );
   }
 
@@ -353,18 +363,8 @@ export function Dashboard({ project }: { project: Project }): JSX.Element {
     setPage(0);
   };
 
-  return (
-    <div className="dash">
-      <div className="dash-head">
-        <div>
-          <h2>Dashboard</h2>
-          <div className="muted">
-            {project.name} · {rep.model} · {rep.rangeFirst} → {rep.rangeLast} · billed at Opus 4.8 rates
-          </div>
-        </div>
-        <button className="btn dash-refresh" onClick={() => void load()} title="Re-read Claude Code logs">↻ Refresh</button>
-      </div>
-
+  return shell(
+    <>
       {win && <UsageLimits win={win} caps={caps} onCap={onCap} />}
 
       {/* KPI row */}
@@ -529,6 +529,9 @@ export function Dashboard({ project }: { project: Project }): JSX.Element {
       <div className="dash-foot">
         Parsed from {rep.sessionsTotal} Claude Code session transcript{rep.sessionsTotal === 1 ? '' : 's'} in <code>{rep.logDir}</code>. Cost is an estimate from token counts at Opus 4.8 rates, not a billing statement.
       </div>
-    </div>
+    </>,
+    <>
+      {project.name} · {rep.model} · {rep.rangeFirst} → {rep.rangeLast} · billed at Opus 4.8 rates
+    </>,
   );
 }

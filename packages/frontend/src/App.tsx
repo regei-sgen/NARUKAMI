@@ -12,6 +12,7 @@ import { ProjectPanel } from './components/ProjectPanel';
 import { CodeEditor } from './components/CodeEditor';
 import { EodView } from './components/EodView';
 import { Dashboard } from './components/Dashboard';
+import { LiveProcesses } from './components/LiveProcesses';
 import { TerminalTab } from './components/TerminalTab';
 import { Toasts } from './components/Toasts';
 import { ThemePicker } from './components/ThemePicker';
@@ -27,7 +28,7 @@ export default function App() {
   // mounted (see the term-stack below) so ptys survive project switches; this
   // only controls which one is visible for the currently selected project.
   const [activeTabByProject, setActiveTabByProject] = useState<Record<string, string>>({});
-  const [view, setView] = useState<'runner' | 'editor' | 'eod' | 'dashboard'>('runner');
+  const [view, setView] = useState<'runner' | 'editor' | 'eod' | 'dashboard' | 'live'>('runner');
   // Terminal dock: docked bottom (resizable height) or right (resizable width),
   // plus minimize. All persisted server-side.
   const [dockPosition, setDockPosition] = useState<'bottom' | 'right'>('bottom');
@@ -38,8 +39,12 @@ export default function App() {
   // Active color theme. Seeded from the localStorage cache (already applied in
   // main.tsx before paint); reconciled with the server-persisted value on boot.
   const [themeId, setThemeId] = useState<ThemeId>(cachedThemeId);
-  // Last-open editor file per project (restored on reopen).
+  // Last-open editor file per project (legacy single-file restore key).
   const [editorFileByProject, setEditorFileByProject] = useState<Record<string, string>>({});
+  // Open editor tabs (+ focused) per project (restored on reopen).
+  const [editorTabsByProject, setEditorTabsByProject] = useState<
+    Record<string, { open: string[]; active: string | null }>
+  >({});
   // Inline tab rename.
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
@@ -110,10 +115,17 @@ export default function App() {
         if (typeof ui.dockWidth === 'number' && ui.dockWidth >= 240) setDockWidth(ui.dockWidth);
         if (typeof ui.dockMinimized === 'boolean') setDockMinimized(ui.dockMinimized);
         if (typeof ui.sidebarCollapsed === 'boolean') setSidebarCollapsed(ui.sidebarCollapsed);
-        if (ui.view === 'runner' || ui.view === 'editor' || ui.view === 'eod' || ui.view === 'dashboard')
+        if (
+          ui.view === 'runner' ||
+          ui.view === 'editor' ||
+          ui.view === 'eod' ||
+          ui.view === 'dashboard' ||
+          ui.view === 'live'
+        )
           setView(ui.view);
         if (ui.activeTabByProject) setActiveTabByProject(ui.activeTabByProject);
         if (ui.editorFileByProject) setEditorFileByProject(ui.editorFileByProject);
+        if (ui.editorTabsByProject) setEditorTabsByProject(ui.editorTabsByProject);
         const savedSel =
           ui.selectedId && list.some((p) => p.id === ui.selectedId)
             ? ui.selectedId
@@ -151,6 +163,7 @@ export default function App() {
       sidebarCollapsed,
       activeTabByProject,
       editorFileByProject,
+      editorTabsByProject,
     };
     const t = setTimeout(() => {
       void api.saveSettings({ ui }).catch(() => undefined);
@@ -166,6 +179,7 @@ export default function App() {
     sidebarCollapsed,
     activeTabByProject,
     editorFileByProject,
+    editorTabsByProject,
   ]);
 
   // Drag the dock's inner edge to resize it. Docked bottom → drag the top edge
@@ -250,6 +264,26 @@ export default function App() {
     setEditorFileByProject((m) => (m[projectId] === filePath ? m : { ...m, [projectId]: filePath }));
   }, []);
 
+  const setEditorTabs = useCallback(
+    (projectId: string, open: string[], active: string | null) => {
+      setEditorTabsByProject((m) => {
+        const prev = m[projectId];
+        if (
+          prev &&
+          prev.active === active &&
+          prev.open.length === open.length &&
+          prev.open.every((p, i) => p === open[i])
+        ) {
+          return m; // unchanged — skip the state churn (and the persist write)
+        }
+        return { ...m, [projectId]: { open, active } };
+      });
+      // Keep the legacy single-file key coherent for older clients / fallback.
+      if (active) setEditorFile(projectId, active);
+    },
+    [setEditorFile],
+  );
+
   const restartRun = async (oldRunId: string, resume = false) => {
     setError(null);
     try {
@@ -297,6 +331,17 @@ export default function App() {
     try {
       await api.deleteProject(id);
       setSelectedId((cur) => (cur === id ? null : cur));
+      // Drop the deleted project's per-project UI state so it doesn't linger in
+      // the persisted settings forever.
+      const prune = <T,>(m: Record<string, T>) => {
+        if (!(id in m)) return m;
+        const next = { ...m };
+        delete next[id];
+        return next;
+      };
+      setActiveTabByProject(prune);
+      setEditorFileByProject(prune);
+      setEditorTabsByProject(prune);
       await refresh();
     } catch (e) {
       setError((e as Error).message);
@@ -569,6 +614,12 @@ export default function App() {
                   >
                     Dashboard
                   </button>
+                  <button
+                    className={`vs-btn ${view === 'live' ? 'active' : ''}`}
+                    onClick={() => setView('live')}
+                  >
+                    Live
+                  </button>
                 </div>
                 {view === 'runner' ? (
                   <div className="runner-scroll">
@@ -591,12 +642,21 @@ export default function App() {
                   <div className="runner-scroll">
                     <Dashboard key={selected.id} project={selected} />
                   </div>
+                ) : view === 'live' ? (
+                  <div className="runner-scroll live-view">
+                    <LiveProcesses runs={projectRuns} workingIds={workingIds} />
+                  </div>
                 ) : (
                   <CodeEditor
                     key={selected.id}
                     project={selected}
-                    initialFile={editorFileByProject[selected.id]}
-                    onOpenFile={(p) => setEditorFile(selected.id, p)}
+                    initialTabs={
+                      editorTabsByProject[selected.id] ??
+                      (editorFileByProject[selected.id]
+                        ? { open: [editorFileByProject[selected.id]], active: editorFileByProject[selected.id] }
+                        : undefined)
+                    }
+                    onTabsChange={(open, active) => setEditorTabs(selected.id, open, active)}
                   />
                 )}
               </>
