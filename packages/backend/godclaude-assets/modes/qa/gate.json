@@ -1,0 +1,32 @@
+{
+  "_comment": "qa mode — additive + tightened. Adds QA claim words and run-and-report invocations (coverage, playwright/cypress), and sets reReadClears:false so re-reading a written test file does not clear a coverage/regression claim — a real test run is required.",
+  "extraClaim": [
+    "\\bcover(ed|age)\\b",
+    "\\bno\\s+regressions?\\b",
+    "\\ball\\s+green\\b",
+    "\\bmeets?\\s+spec\\b",
+    "\\bconforms?\\b",
+    "\\bacceptance\\s+criteria\\b",
+    "\\brepro(duced)?\\b",
+    "\\bflak(e|y)\\b",
+    "\\bdeterministic\\b",
+    "\\b(edge|boundary)\\s+cases?\\b"
+  ],
+  "extraTestCmd": [
+    "\\bpytest\\b",
+    "\\b(jest|vitest|mocha)\\b",
+    "\\b(nyc|c8|tarpaulin|jacoco)\\b",
+    "\\bgo\\s+(test|tool\\s+cover)\\b",
+    "\\b(playwright|cypress)\\s+(test|run)\\b",
+    "\\b(newman|schemathesis|pact)\\b",
+    "\\b(cargo\\s+llvm-cov|coverage\\s+(run|report|xml|html|json))\\b"
+  ],
+  "extraEvidence": [
+    "\\b\\d+\\s+(passed|failed|skipped|xfailed|errors?)\\b",
+    "\\bPASS(ED)?\\b",
+    "\\bcoverage[:=]?\\s*\\d+%",
+    "\\b\\d+%?\\s*(lines?|branch(es)?|stmts?)\\b",
+    "\\b\\d+\\s+of\\s+\\d+\\b"
+  ],
+  "reReadClears": false
+}

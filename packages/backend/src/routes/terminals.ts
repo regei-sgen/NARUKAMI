@@ -76,7 +76,14 @@ export async function terminalRoutes(app: FastifyInstance): Promise<void> {
 
       const live = getLiveTranscript(req.params.id);
       if (live !== null) {
-        return { live: true, text: tailLines(stripAnsi(live), lines) };
+        // Bound the work: only the tail can survive tailLines(), so don't run
+        // the ANSI-strip regexes over a potentially multi-MB transcript. Keep a
+        // generous raw window (~512 chars/line, 64KB floor) before stripping; a
+        // truncated escape at the slice edge can only dirty the first (dropped)
+        // line of the window.
+        const window = Math.max(64 * 1024, lines * 512);
+        const raw = live.length > window ? live.slice(-window) : live;
+        return { live: true, text: tailLines(stripAnsi(raw), lines) };
       }
 
       // Not live — hand back persisted history if the run exists at all.

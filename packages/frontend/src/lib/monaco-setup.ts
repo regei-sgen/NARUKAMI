@@ -69,24 +69,32 @@ for (const defaults of [
 monaco.editor.defineTheme('narukami', {
   base: 'vs-dark',
   inherit: true,
+  // Tempered Glass v2 syntax mapping: keywords wear the blade (--accent-2), comments
+  // take the chrome ink (--text-dim), and identifiers/types/strings/numbers borrow the
+  // graph families (--g-func/--g-file/--g-class/--g-project) on the --bg-well ground.
   rules: [
     { token: '', foreground: 'e8e8ee', background: '050506' },
-    { token: 'comment', foreground: '6a6a76', fontStyle: 'italic' },
+    { token: 'comment', foreground: '8a8a97', fontStyle: 'italic' },
     { token: 'keyword', foreground: 'ff5561' },
     { token: 'keyword.control', foreground: 'ff5561' },
-    { token: 'string', foreground: 'ff9aa6' },
-    { token: 'number', foreground: 'ffb020' },
-    { token: 'regexp', foreground: 'ffb020' },
-    { token: 'type', foreground: '35e08a' },
-    { token: 'type.identifier', foreground: '35e08a' },
-    { token: 'function', foreground: 'ffd0d5' },
+    { token: 'string', foreground: '3ed9a6' },
+    { token: 'number', foreground: 'f3c969' },
+    { token: 'regexp', foreground: 'f3c969' },
+    { token: 'type', foreground: '58b7ff' },
+    { token: 'type.identifier', foreground: '58b7ff' },
+    { token: 'function', foreground: 'b28dff' },
     { token: 'variable', foreground: 'e8e8ee' },
-    { token: 'variable.predefined', foreground: 'ff7a90' },
-    { token: 'constant', foreground: 'ffb020' },
+    { token: 'variable.predefined', foreground: '7d83ff' },
+    { token: 'constant', foreground: 'f3c969' },
     { token: 'tag', foreground: 'ff5561' },
-    { token: 'attribute.name', foreground: '35e08a' },
-    { token: 'attribute.value', foreground: 'ff9aa6' },
+    { token: 'attribute.name', foreground: 'b28dff' },
+    { token: 'attribute.value', foreground: '3ed9a6' },
     { token: 'delimiter', foreground: '8a8a97' },
+    // JSON emits language-specific tokens; vs-dark's own rules for these are more
+    // specific than the generic `string` rule above, so pin them to the v2 palette.
+    { token: 'string.key.json', foreground: 'b28dff' },
+    { token: 'string.value.json', foreground: '3ed9a6' },
+    { token: 'keyword.json', foreground: 'ff5561' },
   ],
   colors: {
     'editor.background': '#050506',

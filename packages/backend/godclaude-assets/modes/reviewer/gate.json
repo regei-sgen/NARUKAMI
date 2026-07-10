@@ -1,0 +1,38 @@
+{
+  "_comment": "reviewer/auditor mode (godreview) — additive + tightened. Adds 'sign-off' claim words (LGTM/clean/no issues/safe to merge/approved) and review/audit verification commands (linters, static analysis, security scanners, test runs, grep/diff). reReadClears:false so seeing your own edit is not proof — if you applied a fix and call it clean, a verification command must have RUN. Pure read-only reviews don't mutate files, so they're structurally gate-exempt; the contract still binds report quality (verify every finding, separate confirmed/suspected, refute before keeping).",
+  "extraClaim": [
+    "\\bno (issues?|bugs?|problems?|errors?|concerns?|findings?|defects?|vulnerabilit(y|ies))\\b",
+    "\\blooks good\\b",
+    "\\blgtm\\b",
+    "\\ball clear\\b",
+    "\\bship it\\b",
+    "\\bsafe to (merge|ship|deploy|land)\\b",
+    "\\bapproved?\\b",
+    "\\bsigned?[ -]?off\\b",
+    "\\bnothing (wrong|broken|to fix|to flag|concerning)\\b",
+    "\\bclean\\b",
+    "\\breviewed\\b",
+    "\\baudited\\b",
+    "\\bno regressions?\\b"
+  ],
+  "_testCmdNote": "Review verification: linters / typecheckers / static-analysis / security scanners / a test run, or a grep/rg/git-diff that demonstrates a finding (or that an applied fix took). Pure narration ('I reviewed it') is not a run — a command must have executed post-edit.",
+  "extraTestCmd": [
+    "\\b(eslint|ruff|flake8|pylint|mypy|clippy|shellcheck|staticcheck|tsc|golangci-lint)\\b",
+    "\\b(semgrep|bandit|gosec|codeql|sonar(-scanner|qube)?|trivy|grype|osv-scanner|gitleaks)\\b",
+    "\\b(npm|pnpm|yarn)\\s+(run\\s+)?(lint|typecheck|audit)\\b",
+    "\\b(npm|cargo)\\s+audit\\b",
+    "\\bpip-audit\\b",
+    "\\b(pytest|jest|vitest|mocha)\\b",
+    "\\bgo\\s+test\\b",
+    "\\bcargo\\s+(test|clippy)\\b",
+    "\\bgit\\s+(diff|show)\\b",
+    "\\b(grep|rg|ripgrep|Select-String)\\b"
+  ],
+  "extraEvidence": [
+    "\\bconfirmed (at|in|via)\\b",
+    "\\breproduced\\b",
+    "\\b\\d+\\s+(findings?|issues?|bugs?|defects?)\\b",
+    "\\b[\\w./-]+:\\d+\\b"
+  ],
+  "reReadClears": false
+}

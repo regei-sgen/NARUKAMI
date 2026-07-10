@@ -95,6 +95,10 @@ async function createWindow(): Promise<BrowserWindow> {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      // Never throttle the renderer when minimized/occluded: live terminals
+      // keep streaming, and a throttled renderer would stall xterm writes and
+      // idle/activity timers, then burst-replay them on restore (visible lag).
+      backgroundThrottling: false,
     },
   });
   win.setMenuBarVisibility(false);

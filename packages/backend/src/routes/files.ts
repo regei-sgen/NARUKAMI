@@ -3,6 +3,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../db';
+import { currentBranch, fileAtHead } from '../services/gitEditor';
 
 // Directories we never descend into when building the file tree — noise + size.
 const IGNORE_DIRS = new Set([
@@ -154,6 +155,36 @@ export interface SearchMatch {
 }
 
 export async function fileRoutes(app: FastifyInstance): Promise<void> {
+  // Current git branch of the project (real-time label in the editor). Read-only.
+  app.get<{ Params: { id: string } }>('/api/projects/:id/git/branch', async (req, reply) => {
+    const project = await prisma.project.findUnique({ where: { id: req.params.id } });
+    if (!project) return reply.code(404).send({ error: 'Project not found.' });
+    return currentBranch(project.path);
+  });
+
+  // Committed (HEAD) content of a file — the LEFT side of the committed-vs-working
+  // diff. `committed:false` means the file is new/untracked (diff against empty).
+  app.get<{ Params: { id: string }; Querystring: { path?: string } }>(
+    '/api/projects/:id/git/file-head',
+    async (req, reply) => {
+      const project = await prisma.project.findUnique({ where: { id: req.params.id } });
+      if (!project) return reply.code(404).send({ error: 'Project not found.' });
+      const rel = req.query.path;
+      if (typeof rel !== 'string' || !rel.trim()) {
+        return reply.code(400).send({ error: 'A file path is required.' });
+      }
+      let abs: string;
+      try {
+        abs = resolveInProject(project.path, rel); // reuse the editor's path-escape guard
+      } catch (err) {
+        return reply.code(400).send({ error: (err as Error).message });
+      }
+      const relPosix = path.relative(project.path, abs).split(path.sep).join('/');
+      const content = await fileAtHead(project.path, relPosix);
+      return { path: relPosix, committed: content !== null, content: content ?? '' };
+    },
+  );
+
   // Project file tree (bounded, ignore-filtered).
   app.get<{ Params: { id: string } }>('/api/projects/:id/tree', async (req, reply) => {
     const project = await prisma.project.findUnique({ where: { id: req.params.id } });
@@ -197,11 +228,14 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
       const matches: SearchMatch[] = [];
       let truncated = false;
 
+      // Async per-file I/O, deliberately: each await yields the event loop, so
+      // a search over thousands of files can't stall the pty→WebSocket fan-out
+      // of live terminals the way a readFileSync loop did.
       outer: for (const rel of files) {
         const abs = path.join(rootResolved, rel);
         let stat: fs.Stats;
         try {
-          stat = fs.statSync(abs);
+          stat = await fsp.stat(abs);
         } catch {
           continue;
         }
@@ -209,7 +243,7 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
 
         let buf: Buffer;
         try {
-          buf = fs.readFileSync(abs);
+          buf = await fsp.readFile(abs);
         } catch {
           continue;
         }

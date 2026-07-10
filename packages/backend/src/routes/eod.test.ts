@@ -1,5 +1,24 @@
 import { describe, it, expect } from 'vitest';
-import { dayKey, dayBounds, toItem, itemLine, parseItems, type EodItem } from './eod';
+import { dayKey, dayBounds, boundsForDayKey, prettyDate, toItem, itemLine, parseItems, type EodItem } from './eod';
+
+describe('boundsForDayKey (local timezone)', () => {
+  it('turns a day key into LOCAL midnight → next local midnight', () => {
+    const { start, end } = boundsForDayKey('2026-07-06');
+    expect(start.getFullYear()).toBe(2026);
+    expect(start.getMonth()).toBe(6);
+    expect(start.getDate()).toBe(6);
+    expect(start.getHours()).toBe(0); // local midnight, not UTC
+    expect(end.getDate()).toBe(7);
+    expect(end.getTime() - start.getTime()).toBe(24 * 60 * 60 * 1000);
+  });
+});
+
+describe('prettyDate', () => {
+  it('formats a local day key as "Month D, YYYY"', () => {
+    expect(prettyDate('2026-07-06')).toBe('July 6, 2026');
+    expect(prettyDate('2026-01-09')).toBe('January 9, 2026');
+  });
+});
 
 describe('dayKey', () => {
   it('formats a local date as YYYY-MM-DD (zero-padded)', () => {

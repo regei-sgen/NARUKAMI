@@ -1,9 +1,11 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import * as pty from 'node-pty';
 import { Prisma } from '../generated/prisma';
 import { prisma } from '../db';
 import { buildClaudeMcpArgs, cleanupMcpConfig } from './mcpConfig';
+import { godSpawnEnv } from './godclaude';
 import { resolveExecutable, wrapForWindows } from './exec';
 
 // Re-exported for callers/tests that import it from the runner module.
@@ -40,7 +42,10 @@ function ptyTransport(file: string, args: string[], cwd: string): RunTransport {
     cols: 80,
     rows: 30,
     cwd,
-    env: cleanEnv(),
+    // godSpawnEnv points the GODCLAUDE layer's state home at NARUKAMI's own
+    // embedded god home, so Claude sessions (and `godmode.mjs` invocations) in
+    // NARUKAMI terminals use NARUKAMI's godclaude — never the native ~/.claude.
+    env: { ...cleanEnv(), ...godSpawnEnv() },
   });
   return {
     pid: proc.pid,
@@ -61,9 +66,15 @@ interface ManagedRun {
   transport: RunTransport;
   subscribers: Set<Subscriber>;
   killedByUser: boolean;
+  /** A kill was already issued — never call transport.kill() twice (see stopRun). */
+  killIssued: boolean;
   /** Un-persisted chunks awaiting a DB flush. */
   logBuffer: string[];
   flushTimer: NodeJS.Timeout | null;
+  /** Pty chunks not yet fanned out — micro-batched (see BATCH_MS). */
+  pendingChunks: string[];
+  pendingChars: number;
+  batchTimer: NodeJS.Timeout | null;
   /** In-memory rolling transcript (capped) for gap-free live (re)connects. */
   transcript: string[];
   transcriptChars: number;
@@ -75,6 +86,14 @@ interface ManagedRun {
 const runs = new Map<string, ManagedRun>();
 
 const LOG_FLUSH_MS = 300;
+// Micro-batch pty output before fan-out. ConPTY emits a storm of small chunks
+// under load, and forwarding each one costs a JSON.stringify + ws frame on the
+// backend plus a parse + xterm write on the frontend — per chunk, per shell.
+// Coalescing for a few ms collapses that to a handful of larger messages while
+// staying well under a frame of added echo latency. The size cap bounds memory
+// and keeps a single message comfortably inside one ws frame.
+const BATCH_MS = 8;
+const BATCH_MAX_CHARS = 256 * 1024;
 // Cap the in-memory transcript so a chatty long-lived run can't grow unbounded.
 // The DB still holds the full history for post-mortem; live reconnects see the tail.
 const MAX_TRANSCRIPT_CHARS = 2_000_000;
@@ -104,6 +123,10 @@ const ENV_DENYLIST = new Set([
   'DATABASE_URL',
   'RUNNER_TOKEN_FILE',
   'PORT',
+  // A backend launched from INSIDE a Claude Code session inherits that session's
+  // id; NARUKAMI terminals are not part of that session, and a leaked id would
+  // silently re-scope godmode CLI calls to a phantom session overlay.
+  'CLAUDE_CODE_SESSION_ID',
 ]);
 const ENV_DENY_PREFIXES = ['NARUKAMI_', 'PRISMA_'];
 
@@ -141,6 +164,27 @@ export function capTranscript(
 
 function appendTranscript(m: ManagedRun, chunk: string): void {
   m.transcriptChars = capTranscript(m.transcript, m.transcriptChars, chunk);
+}
+
+/**
+ * Synchronously drain the micro-batch buffer: append to the transcript, fan out
+ * ONE coalesced data event to subscribers, and queue it for the DB flush.
+ * Because this is synchronous, callers that need an up-to-date transcript
+ * (attach, exit) flush first and see every byte exactly once.
+ */
+function flushPending(m: ManagedRun): void {
+  if (m.batchTimer) {
+    clearTimeout(m.batchTimer);
+    m.batchTimer = null;
+  }
+  if (m.pendingChunks.length === 0) return;
+  const chunk = m.pendingChunks.length === 1 ? m.pendingChunks[0] : m.pendingChunks.join('');
+  m.pendingChunks.length = 0;
+  m.pendingChars = 0;
+  appendTranscript(m, chunk);
+  for (const sub of m.subscribers) sub({ type: 'data', chunk });
+  m.logBuffer.push(chunk);
+  scheduleFlush(m);
 }
 
 function scheduleFlush(m: ManagedRun): void {
@@ -212,8 +256,12 @@ export function registerRun(runId: string, transport: RunTransport): void {
     transport,
     subscribers: new Set(),
     killedByUser: false,
+    killIssued: false,
     logBuffer: [],
     flushTimer: null,
+    pendingChunks: [],
+    pendingChars: 0,
+    batchTimer: null,
     transcript: [],
     transcriptChars: 0,
     exited: false,
@@ -223,14 +271,18 @@ export function registerRun(runId: string, transport: RunTransport): void {
   runs.set(runId, managed);
 
   transport.onData((chunk) => {
-    appendTranscript(managed, chunk);
-    for (const sub of managed.subscribers) sub({ type: 'data', chunk });
-    managed.logBuffer.push(chunk);
-    scheduleFlush(managed);
+    managed.pendingChunks.push(chunk);
+    managed.pendingChars += chunk.length;
+    if (managed.pendingChars >= BATCH_MAX_CHARS) {
+      flushPending(managed);
+    } else if (!managed.batchTimer) {
+      managed.batchTimer = setTimeout(() => flushPending(managed), BATCH_MS);
+    }
   });
 
   transport.onExit(({ exitCode }) => {
     if (managed.exited) return; // idempotent — a broker socket close + exit frame can race
+    flushPending(managed); // drain the batch buffer so no tail bytes are lost
     managed.exited = true;
     managed.finalStatus = managed.killedByUser ? 'killed' : 'exited';
     managed.finalExitCode = exitCode ?? null;
@@ -310,37 +362,69 @@ export function looksLikeTrustPrompt(text: string): boolean {
 }
 
 /**
+ * Build the argv for a managed `claude` launch AND the NARUKAMI-owned session id
+ * that identifies it. A fresh session gets a freshly minted `--session-id <uuid>`;
+ * a resume targets that exact id via `--resume <uuid>`.
+ *
+ * We deliberately NEVER use `claude --continue`: that reopens whatever
+ * conversation was last touched in the cwd — INCLUDING one a plain `claude`
+ * running in the same folder started — which would let a NARUKAMI tab silently
+ * hijack (or be hijacked by) a native-CLI session. Assigning our own id and only
+ * ever resuming by that id guarantees a NARUKAMI session has a stable identity
+ * and stays separate from any native-CLI session in the same directory.
+ *
+ * Pure aside from the injected `mcpArgs`; `newId` is injectable for tests.
+ */
+export function buildClaudeArgs(opts: {
+  mcpArgs: string[];
+  resumeSessionId?: string;
+  newId?: () => string;
+}): { rawArgs: string[]; sessionId: string } {
+  const sessionId = opts.resumeSessionId ?? (opts.newId ?? randomUUID)();
+  const idArgs = opts.resumeSessionId ? ['--resume', sessionId] : ['--session-id', sessionId];
+  return { rawArgs: [...idArgs, ...opts.mcpArgs], sessionId };
+}
+
+/**
  * Open an interactive Claude Code session (`claude`) in `cwd`. Optionally types
  * an initial slash command (e.g. "/effort ultracode") — but ONLY once the TUI
  * output has settled AND no folder-trust prompt is showing, so we never
  * auto-confirm the trust gate or fire into a still-booting UI.
  *
- * `resume: true` launches `claude --continue`, which reopens the most recent
- * conversation in `cwd` instead of starting a blank session.
+ * Every launch carries a NARUKAMI-assigned Claude `--session-id` (returned as
+ * `sessionId` so the caller can persist it on the Run). Pass `resumeSessionId`
+ * to reopen a specific prior NARUKAMI session (`claude --resume <id>`); omit it
+ * for a brand-new session. See {@link buildClaudeArgs} for why `--continue` is
+ * never used.
  */
 export function startClaude(opts: {
   runId: string;
   cwd: string;
   initInput?: string;
-  resume?: boolean;
+  resumeSessionId?: string;
+  embedCodeMap?: boolean;
   settleMs?: number;
   maxWaitMs?: number;
-}): { pid: number } {
+}): { pid: number; sessionId: string } {
   // node-pty won't PATH-resolve a bare "claude" on Windows — give it a full path,
   // and route a .cmd/.bat shim through cmd.exe (ConPTY can't launch it directly).
   const claudeBin = resolveExecutable('claude');
   // Attach the NARUKAMI MCP bridge so this session can read/drive other live
   // terminals (list_terminals / read_terminal / send_terminal). No-op (returns
   // []) if orchestration is disabled or the bridge script can't be located.
-  const mcpArgs = buildClaudeMcpArgs(opts.runId);
-  const rawArgs = [...(opts.resume ? ['--continue'] : []), ...mcpArgs];
+  // With embedCodeMap, also attach the Code Map (codebase-memory-mcp) server.
+  const mcpArgs = buildClaudeMcpArgs(opts.runId, { codeMap: opts.embedCodeMap });
+  const { rawArgs, sessionId } = buildClaudeArgs({
+    mcpArgs,
+    resumeSessionId: opts.resumeSessionId,
+  });
   const { file, args } = wrapForWindows(claudeBin, rawArgs);
   const res = spawnManaged(opts.runId, file, args, opts.cwd);
 
   if (opts.initInput) {
     scheduleClaudeInit(opts.runId, opts.initInput, opts.settleMs ?? 700, opts.maxWaitMs ?? 15000);
   }
-  return res;
+  return { pid: res.pid, sessionId };
 }
 
 function scheduleClaudeInit(
@@ -399,6 +483,7 @@ export interface Attachment {
 export function attach(runId: string, sub: Subscriber): Attachment | null {
   const m = runs.get(runId);
   if (!m || m.exited) return null;
+  flushPending(m); // fold any micro-batched bytes into the snapshot first
   const backlog = m.transcript.join('');
   m.subscribers.add(sub);
   return {
@@ -427,7 +512,9 @@ export function getFinalState(runId: string): { status: RunFinalStatus; exitCode
  */
 export function getFinalTranscript(runId: string): string | null {
   const m = runs.get(runId);
-  return m ? m.transcript.join('') : null;
+  if (!m) return null;
+  flushPending(m);
+  return m.transcript.join('');
 }
 
 export function writeToRun(runId: string, data: string): boolean {
@@ -452,6 +539,13 @@ export function stopRun(runId: string): boolean {
   const m = runs.get(runId);
   if (!m) return false;
   m.killedByUser = true;
+  // Kill AT MOST ONCE, and never a pty that already exited. A second kill() on
+  // a ConPTY mid-teardown (e.g. Stop immediately followed by closing the tab)
+  // aborts the whole process with a NATIVE libuv assertion — it never surfaces
+  // as a JS exception, so the try/catch below cannot contain it. Reproduced
+  // deterministically; the guard is the fix.
+  if (m.exited || m.killIssued) return true;
+  m.killIssued = true;
   try {
     m.transport.kill();
   } catch {
@@ -474,6 +568,15 @@ export function liveRunIds(): string[] {
   return ids;
 }
 
+/** PIDs of every live pty (roots for the header vitals sampler). */
+export function livePids(): number[] {
+  const pids: number[] = [];
+  for (const m of runs.values()) {
+    if (!m.exited && m.transport.pid > 0) pids.push(m.transport.pid);
+  }
+  return pids;
+}
+
 /**
  * Snapshot the in-memory transcript of a live run WITHOUT subscribing. Returns
  * null if the run isn't live (its full history still lives in the DB). Used by
@@ -482,6 +585,7 @@ export function liveRunIds(): string[] {
 export function getLiveTranscript(runId: string): string | null {
   const m = runs.get(runId);
   if (!m || m.exited) return null;
+  flushPending(m);
   return m.transcript.join('');
 }
 
@@ -506,6 +610,20 @@ export async function reconcileStaleRuns(): Promise<number> {
   const res = await prisma.run.updateMany({
     where: { status: 'running' },
     data: { status: 'exited', endedAt: new Date() },
+  });
+  return res.count;
+}
+
+/**
+ * Boot-time retention sweep: RunLog otherwise grows without bound (one row per
+ * 300ms flush per live run, forever), which slowly taxes every replay query and
+ * bloats the DB file. Deleting logs of runs that ENDED more than `days` ago
+ * keeps recent history (EOD, restored-tab replay) fully intact.
+ */
+export async function pruneOldRunLogs(days = 14): Promise<number> {
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const res = await prisma.runLog.deleteMany({
+    where: { run: { endedAt: { lt: cutoff } } },
   });
   return res.count;
 }

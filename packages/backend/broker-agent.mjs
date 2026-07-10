@@ -47,12 +47,14 @@ import { pathToFileURL } from 'node:url';
   if (typeof spawn !== 'function') process.exit(3);
 
   // Elevated because THIS process is elevated. This is the whole point.
+  // cfg.env carries NARUKAMI's per-spawn extras (e.g. DET_HOOKS_HOME for the
+  // embedded godclaude) — merged over this process's own env.
   const proc = spawn('powershell.exe', ['-NoLogo'], {
     name: 'xterm-color',
     cols: cfg.cols || 80,
     rows: cfg.rows || 30,
     cwd: cfg.cwd,
-    env: process.env,
+    env: { ...process.env, ...(cfg.env || {}) },
   });
 
   const socket = net.connect(cfg.port, '127.0.0.1', () => {
@@ -85,8 +87,32 @@ import { pathToFileURL } from 'node:url';
     process.exit(code);
   }
 
-  proc.onData((d) => send({ t: 'data', d: Buffer.from(d, 'utf8').toString('base64') }));
+  // Micro-batch pty output (mirrors the backend runner): ConPTY emits many
+  // small chunks under load, and each frame costs a base64 encode + JSON parse
+  // on both ends. Coalescing for a few ms collapses the frame count without
+  // perceptible echo latency. The size cap bounds buffered memory.
+  let pendChunks = [];
+  let pendChars = 0;
+  let pendTimer = null;
+  function flushData() {
+    if (pendTimer) {
+      clearTimeout(pendTimer);
+      pendTimer = null;
+    }
+    if (pendChunks.length === 0) return;
+    const joined = pendChunks.length === 1 ? pendChunks[0] : pendChunks.join('');
+    pendChunks = [];
+    pendChars = 0;
+    send({ t: 'data', d: Buffer.from(joined, 'utf8').toString('base64') });
+  }
+  proc.onData((d) => {
+    pendChunks.push(d);
+    pendChars += d.length;
+    if (pendChars >= 256 * 1024) flushData();
+    else if (!pendTimer) pendTimer = setTimeout(flushData, 8);
+  });
   proc.onExit(({ exitCode }) => {
+    flushData(); // drain buffered output before the exit frame
     send({ t: 'exit', code: exitCode ?? null });
     setTimeout(() => die(0), 50); // let the exit frame flush
   });

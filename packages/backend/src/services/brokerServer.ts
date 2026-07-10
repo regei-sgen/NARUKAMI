@@ -6,6 +6,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { REPO_ROOT } from '../config';
 import { prisma } from '../db';
+import { godSpawnEnv } from './godclaude';
 import { registerRun, type RunTransport } from './runner';
 
 // An admin shell works around the Windows integrity wall like this: NARUKAMI
@@ -271,6 +272,10 @@ export async function startAdminShell(opts: { runId: string; cwd: string }): Pro
     cols: 80,
     rows: 30,
     nodePty: nodePtyPath(),
+    // Extra env for the elevated shell (the agent merges it over its own env):
+    // points the GODCLAUDE layer at NARUKAMI's embedded god home, same as the
+    // unelevated ptys.
+    env: godSpawnEnv(),
   };
 
   fs.mkdirSync(CFG_DIR, { recursive: true });

@@ -2,6 +2,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
@@ -11,9 +12,26 @@ import { ProjectSidebar } from './components/ProjectSidebar';
 import { ProjectPanel } from './components/ProjectPanel';
 import { CodeEditor } from './components/CodeEditor';
 import { EodView } from './components/EodView';
+import { ArgusPanoptes } from './components/argus/ArgusPanoptes';
+import { CodeMap } from './components/CodeMap';
+import { Armory } from './components/Armory';
 import { TerminalTab } from './components/TerminalTab';
+import { ThemeSelector } from './components/ThemeSelector';
+import { HeaderCluster } from './components/HeaderCluster';
 import { Toasts } from './components/Toasts';
-import { finishToastFor, fireNativeNotification, primeNotifications, taskToast } from './lib/notify';
+import { Ic } from './components/icons';
+import { finishToastFor, fireNativeNotification, primeNotifications, shouldShowInAppToast, taskToast } from './lib/notify';
+
+/** Theme variants — '' is Beni, the default blade-red. Values map to [data-theme];
+ *  each accent mirrors the variant's --accent token for the picker swatch. */
+const THEMES: ReadonlyArray<{ value: string; label: string; accent: string }> = [
+  { value: '', label: 'Beni', accent: '#ff2d3c' },
+  { value: 'raiden', label: 'Raiden', accent: '#7c5cff' },
+  { value: 'kitsune', label: 'Kitsune', accent: '#ff7a2d' },
+  { value: 'jade', label: 'Jade', accent: '#2fd9a0' },
+  { value: 'yuki', label: 'Yuki', accent: '#4db8ff' },
+  { value: 'sakura', label: 'Sakura', accent: '#ff5c8a' },
+];
 
 export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -23,7 +41,9 @@ export default function App() {
   // mounted (see the term-stack below) so ptys survive project switches; this
   // only controls which one is visible for the currently selected project.
   const [activeTabByProject, setActiveTabByProject] = useState<Record<string, string>>({});
-  const [view, setView] = useState<'runner' | 'editor' | 'eod'>('runner');
+  // Views are peer tabs (Runner / Editor / EOD / Argus / Code Map). Argus is a
+  // global read-only monitor; the rest are scoped to the selected project.
+  const [view, setView] = useState<'runner' | 'editor' | 'eod' | 'argus' | 'codemap' | 'armory'>('runner');
   // Terminal dock: docked bottom (resizable height) or right (resizable width),
   // plus minimize. All persisted server-side.
   const [dockPosition, setDockPosition] = useState<'bottom' | 'right'>('bottom');
@@ -31,6 +51,13 @@ export default function App() {
   const [dockWidth, setDockWidth] = useState<number>(480);
   const [dockMinimized, setDockMinimized] = useState<boolean>(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
+  // Theme variant ('' = Beni, the default blade-red). Persisted per device.
+  const [theme, setTheme] = useState<string>(() => localStorage.getItem('narukami-theme') ?? '');
+  useEffect(() => {
+    if (theme) document.documentElement.dataset.theme = theme;
+    else delete document.documentElement.dataset.theme;
+    localStorage.setItem('narukami-theme', theme);
+  }, [theme]);
   // Last-open editor file per project (restored on reopen).
   const [editorFileByProject, setEditorFileByProject] = useState<Record<string, string>>({});
   // Inline tab rename.
@@ -46,6 +73,9 @@ export default function App() {
   const [workingIds, setWorkingIds] = useState<Set<string>>(new Set());
   // Mirror of activeRuns for stable callbacks (activity/toast handlers).
   const activeRunsRef = useRef<ActiveRun[]>([]);
+  // Mirror of selectedId so the stable pushToast callback can tell whether the
+  // finishing run belongs to the project the user is currently viewing.
+  const selectedIdRef = useRef<string | null>(null);
   const taskSeqRef = useRef(0);
   // Runs the user started THIS session — only these get a finish notification,
   // so restored (and already-dead-on-reconnect) tabs don't spam toasts on boot.
@@ -102,7 +132,15 @@ export default function App() {
         if (typeof ui.dockWidth === 'number' && ui.dockWidth >= 240) setDockWidth(ui.dockWidth);
         if (typeof ui.dockMinimized === 'boolean') setDockMinimized(ui.dockMinimized);
         if (typeof ui.sidebarCollapsed === 'boolean') setSidebarCollapsed(ui.sidebarCollapsed);
-        if (ui.view === 'runner' || ui.view === 'editor' || ui.view === 'eod') setView(ui.view);
+        if (
+          ui.view === 'runner' ||
+          ui.view === 'editor' ||
+          ui.view === 'eod' ||
+          ui.view === 'argus' ||
+          ui.view === 'codemap' ||
+          ui.view === 'armory'
+        )
+          setView(ui.view);
         if (ui.activeTabByProject) setActiveTabByProject(ui.activeTabByProject);
         if (ui.editorFileByProject) setEditorFileByProject(ui.editorFileByProject);
         const savedSel =
@@ -161,18 +199,31 @@ export default function App() {
     const start = horizontal ? e.clientX : e.clientY;
     const startSize = horizontal ? dockWidth : dockHeight;
     const cursorClass = horizontal ? 'resizing-h' : 'resizing-v';
-    const onMove = (ev: PointerEvent) => {
+    // Coalesce to one setState per frame: pointermove can fire faster than the
+    // display refreshes (120Hz+ mice), and each set re-renders the whole app.
+    let dragRaf = 0;
+    let lastPos = start;
+    const applyDrag = () => {
+      dragRaf = 0;
       if (horizontal) {
-        const dx = start - ev.clientX;
+        const dx = start - lastPos;
         const max = Math.round(window.innerWidth * 0.85);
         setDockWidth(Math.min(max, Math.max(240, startSize + dx)));
       } else {
-        const dy = start - ev.clientY;
+        const dy = start - lastPos;
         const max = Math.round(window.innerHeight * 0.85);
         setDockHeight(Math.min(max, Math.max(140, startSize + dy)));
       }
     };
+    const onMove = (ev: PointerEvent) => {
+      lastPos = horizontal ? ev.clientX : ev.clientY;
+      if (!dragRaf) dragRaf = requestAnimationFrame(applyDrag);
+    };
     const onUp = () => {
+      if (dragRaf) {
+        cancelAnimationFrame(dragRaf);
+        applyDrag(); // commit the final position
+      }
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
       document.body.classList.remove(cursorClass);
@@ -183,6 +234,14 @@ export default function App() {
   };
 
   const selected = projects.find((p) => p.id === selectedId) ?? null;
+
+  // Primitive per-tab lookup so memoized TerminalTabs get a stable prop instead
+  // of a fresh projects.find() per tab per App render.
+  const codeMapEmbedByProject = useMemo(() => {
+    const m = new Map<string, boolean>();
+    for (const p of projects) m.set(p.id, p.codeMapEmbed ?? false);
+    return m;
+  }, [projects]);
 
   // Leaving the editor (switching view or project) unmounts it and would silently
   // drop unsaved edits — confirm first when the editor is dirty.
@@ -196,18 +255,25 @@ export default function App() {
   // Sidebar indicator, two states:
   //  - workingProjectIds: a run in this project is actively producing output → bright pulse.
   //  - claudeIdleProjectIds: a Claude session is open but idle (alive, not working) → dim steady.
-  const workingProjectIds = new Set(
-    activeRuns.filter((r) => workingIds.has(r.runId)).map((r) => r.projectId),
+  // Memoized so their identity only changes with runs/working state, not on
+  // every unrelated App render.
+  const workingProjectIds = useMemo(
+    () => new Set(activeRuns.filter((r) => workingIds.has(r.runId)).map((r) => r.projectId)),
+    [activeRuns, workingIds],
   );
-  const claudeIdleProjectIds = new Set(
-    activeRuns
-      .filter(
-        (r) =>
-          r.kind === 'claude' &&
-          (r.status === 'running' || r.status === 'connecting') &&
-          !workingIds.has(r.runId),
-      )
-      .map((r) => r.projectId),
+  const claudeIdleProjectIds = useMemo(
+    () =>
+      new Set(
+        activeRuns
+          .filter(
+            (r) =>
+              r.kind === 'claude' &&
+              (r.status === 'running' || r.status === 'connecting') &&
+              !workingIds.has(r.runId),
+          )
+          .map((r) => r.projectId),
+      ),
+    [activeRuns, workingIds],
   );
 
   // Terminals scoped to the selected project. The dock only ever shows these;
@@ -241,7 +307,9 @@ export default function App() {
     setEditorFileByProject((m) => (m[projectId] === filePath ? m : { ...m, [projectId]: filePath }));
   }, []);
 
-  const restartRun = async (oldRunId: string, resume = false) => {
+  // Stable (useCallback, setters/refs only) so memoized TerminalTabs don't
+  // re-render every time App does.
+  const restartRun = useCallback(async (oldRunId: string, resume = false) => {
     setError(null);
     try {
       const r: RestoredRun = await api.restartRun(oldRunId, resume);
@@ -270,7 +338,9 @@ export default function App() {
     } catch (e) {
       setError((e as Error).message);
     }
-  };
+  }, []);
+
+  const continueRun = useCallback((runId: string) => void restartRun(runId, true), [restartRun]);
 
   const addProject = async (path: string) => {
     setError(null);
@@ -375,6 +445,16 @@ export default function App() {
     }
   }, []);
 
+  // Header cluster: jump to a run's tab from its pulse segment. Reads runs via
+  // the ref so the callback stays identity-stable (memoized HeaderCluster).
+  const focusRunById = useCallback((runId: string) => {
+    const run = activeRunsRef.current.find((r) => r.runId === runId);
+    if (!run) return;
+    setSelectedId(run.projectId);
+    setActiveTabByProject((m) => ({ ...m, [run.projectId]: runId }));
+    setDockMinimized(false);
+  }, []);
+
   // Route to a finished run's tab: select its project, focus the tab, and make
   // sure the terminal dock is visible.
   const focusRun = useCallback(
@@ -389,10 +469,21 @@ export default function App() {
 
   const pushToast = useCallback(
     (t: Toast) => {
-      setToasts((cur) => [...cur.filter((x) => x.id !== t.id), t].slice(-4));
-      const prev = toastTimers.current[t.id];
-      if (prev) clearTimeout(prev);
-      toastTimers.current[t.id] = setTimeout(() => dismissToast(t.id), 10000);
+      // Don't pop an in-app toast for a run in the project you're already
+      // looking at (focused window) — you can see it finish. The native
+      // notification below still fires; it self-gates on window focus, so a
+      // backgrounded finish in the selected project isn't lost.
+      const inApp = shouldShowInAppToast(t, {
+        selectedProjectId: selectedIdRef.current,
+        focused: typeof document === 'undefined' ? true : document.hasFocus(),
+        visible: typeof document === 'undefined' ? true : document.visibilityState === 'visible',
+      });
+      if (inApp) {
+        setToasts((cur) => [...cur.filter((x) => x.id !== t.id), t].slice(-4));
+        const prev = toastTimers.current[t.id];
+        if (prev) clearTimeout(prev);
+        toastTimers.current[t.id] = setTimeout(() => dismissToast(t.id), 10000);
+      }
       fireNativeNotification(t, () => focusRun(t));
     },
     [dismissToast, focusRun],
@@ -425,6 +516,11 @@ export default function App() {
   useEffect(() => {
     activeRunsRef.current = activeRuns;
   }, [activeRuns]);
+
+  // Keep a ref of the selected project for the stable pushToast callback.
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
 
   // Output-activity from a terminal: toggle the "working" set (sidebar pulse),
   // and on a working→idle edge that completed a user task, raise a "task done"
@@ -477,21 +573,28 @@ export default function App() {
     });
   };
 
+  // Lives in the view-switch strip (beside Runner); also rendered in the
+  // no-project state so a collapsed sidebar can always be reopened.
+  const sidebarToggle = (
+    <button
+      className="sidebar-toggle"
+      title={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
+      aria-label="Toggle sidebar"
+      onClick={() => setSidebarCollapsed((c) => !c)}
+    >
+      <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true">
+        <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
+        <line x1="6" y1="2.5" x2="6" y2="13.5" stroke="currentColor" strokeWidth="1.3" />
+      </svg>
+    </button>
+  );
+
   return (
     <div className="app">
       <header className="app-header">
-        <button
-          className="sidebar-toggle"
-          title={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
-          aria-label="Toggle sidebar"
-          onClick={() => setSidebarCollapsed((c) => !c)}
-        >
-          <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true">
-            <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
-            <line x1="6" y1="2.5" x2="6" y2="13.5" stroke="currentColor" strokeWidth="1.3" />
-          </svg>
-        </button>
         <h1>NARUKAMI</h1>
+        <HeaderCluster runs={activeRuns} workingIds={workingIds} onFocusRun={focusRunById} />
+        <ThemeSelector themes={THEMES} value={theme} onChange={setTheme} />
       </header>
 
       {!hasToken() && (
@@ -514,7 +617,10 @@ export default function App() {
             collapsed={sidebarCollapsed}
             workingProjectIds={workingProjectIds}
             claudeIdleProjectIds={claudeIdleProjectIds}
-            onSelect={(id) => confirmLeaveEditor() && setSelectedId(id)}
+            onSelect={(id) => {
+              if (!confirmLeaveEditor()) return;
+              setSelectedId(id);
+            }}
             onAdd={addProject}
             onDelete={deleteProject}
           />
@@ -522,6 +628,7 @@ export default function App() {
             {selected ? (
               <>
                 <div className="view-switch">
+                  {sidebarToggle}
                   <button
                     className={`vs-btn ${view === 'runner' ? 'active' : ''}`}
                     onClick={() => confirmLeaveEditor() && setView('runner')}
@@ -540,6 +647,24 @@ export default function App() {
                   >
                     EOD
                   </button>
+                  <button
+                    className={`vs-btn ${view === 'argus' ? 'active' : ''}`}
+                    onClick={() => confirmLeaveEditor() && setView('argus')}
+                  >
+                    GODCLAUDE
+                  </button>
+                  <button
+                    className={`vs-btn ${view === 'codemap' ? 'active' : ''}`}
+                    onClick={() => confirmLeaveEditor() && setView('codemap')}
+                  >
+                    Code Map
+                  </button>
+                  <button
+                    className={`vs-btn ${view === 'armory' ? 'active' : ''}`}
+                    onClick={() => confirmLeaveEditor() && setView('armory')}
+                  >
+                    Arsenal
+                  </button>
                 </div>
                 {view === 'runner' ? (
                   <div className="runner-scroll">
@@ -556,7 +681,25 @@ export default function App() {
                   </div>
                 ) : view === 'eod' ? (
                   <div className="runner-scroll">
-                    <EodView key={selected.id} project={selected} />
+                    <EodView />
+                  </div>
+                ) : view === 'argus' ? (
+                  // Argus is global (no project key) — it stays mounted across
+                  // project switches. The relative-positioned pane is the
+                  // containing block for `.argus` (position:absolute; inset:0),
+                  // so it fills this content region instead of the whole window.
+                  <div className="argus-pane">
+                    <ArgusPanoptes selectedPath={selected.path} />
+                  </div>
+                ) : view === 'codemap' ? (
+                  <div className="runner-scroll">
+                    <CodeMap key={selected.id} project={selected} onChanged={refresh} />
+                  </div>
+                ) : view === 'armory' ? (
+                  // Armory is global (no project key) — an inventory of all skills,
+                  // hooks, memory pins, agents and commands, not project-filtered.
+                  <div className="runner-scroll">
+                    <Armory />
                   </div>
                 ) : (
                   <CodeEditor
@@ -569,7 +712,10 @@ export default function App() {
                 )}
               </>
             ) : (
-              <div className="empty">Select or add a project to get started.</div>
+              <>
+                <div className="view-switch">{sidebarToggle}</div>
+                <div className="empty">Select or add a project to get started.</div>
+              </>
             )}
           </main>
         </div>
@@ -598,7 +744,46 @@ export default function App() {
                   title="Drag to resize · double-click to reset"
                 />
               )}
-              {projectRuns.length > 0 && (
+              {projectRuns.length > 0 && dockPosition === 'right' && dockMinimized ? (
+                // Side dock, minimized → collapse to an ultra-slim full-height
+                // icon rail: one status dot per terminal + a restore control.
+                // No clipped tabs, no empty void.
+                <div className="term-rail">
+                  <button
+                    className="term-rail-restore"
+                    title="Restore terminal"
+                    aria-label="Restore terminal"
+                    onClick={() => setDockMinimized(false)}
+                  >
+                    <svg viewBox="0 0 16 16" aria-hidden="true">
+                      <path
+                        d="M10 4L6 8l4 4"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.6"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                  </button>
+                  <div className="term-rail-dots">
+                    {projectRuns.map((r) => (
+                      <button
+                        key={r.runId}
+                        className={`term-rail-dot ${activeTab === r.runId ? 'active' : ''}`}
+                        title={r.customLabel ?? r.label}
+                        aria-label={r.customLabel ?? r.label}
+                        onClick={() => {
+                          selectTab(r.runId);
+                          setDockMinimized(false);
+                        }}
+                      >
+                        <span className={`dot dot-${r.status}`} />
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : projectRuns.length > 0 ? (
                 <div className="tabbar">
                   <div className="tabbar-tabs">
                     {projectRuns.map((r) => (
@@ -636,8 +821,8 @@ export default function App() {
                             title="Double-click to rename"
                           >
                             <span className={`dot dot-${r.status}`} />
-                            {r.elevated ? '🛡 ' : ''}
-                            {r.kind === 'shell' ? '⌨ ' : r.kind === 'claude' ? '✦ ' : ''}
+                            {r.elevated ? <><Ic name="shield" /> </> : null}
+                            {r.kind === 'shell' ? <><Ic name="shell" /> </> : r.kind === 'claude' ? <><Ic name="spark" /> </> : null}
                             {r.customLabel ?? r.label}
                           </button>
                         )}
@@ -691,7 +876,7 @@ export default function App() {
                     </button>
                   </div>
                 </div>
-              )}
+              ) : null}
               {/* Every run stays mounted regardless of the selected project so its
                   pty/websocket survives project switches; only the selected
                   project's active tab is displayed. */}
@@ -706,8 +891,9 @@ export default function App() {
                       run={r}
                       onStatus={onRunStatus}
                       onRestart={restartRun}
-                      onContinue={(id) => restartRun(id, true)}
+                      onContinue={continueRun}
                       onActivity={onActivity}
+                      codeMapEmbed={codeMapEmbedByProject.get(r.projectId) ?? false}
                     />
                   </div>
                 ))}

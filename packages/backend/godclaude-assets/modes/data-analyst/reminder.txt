@@ -1,0 +1,1 @@
+[GODCLAUDE · goddata · Tsukuyomi] Proof = the query/computation actually RAN this turn and printed its result (row count, .shape/.describe, the SELECT output) — re-reading the .sql/.py is NOT proof. State the grain + filters before aggregating; reconcile counts across joins/filters; joins are guilty of fan-out until shown otherwise. No recalled numbers, no eyeballed %.

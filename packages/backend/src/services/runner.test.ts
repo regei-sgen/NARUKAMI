@@ -8,6 +8,7 @@ import {
   capTranscript,
   stripAnsi,
   looksLikeTrustPrompt,
+  buildClaudeArgs,
 } from './runner';
 
 const realPlatform = process.platform;
@@ -66,6 +67,53 @@ describe('resolveExecutable', () => {
     expect(resolveExecutable('definitely-not-a-real-exe-xyz-123')).toBe(
       'definitely-not-a-real-exe-xyz-123',
     );
+  });
+});
+
+describe('buildClaudeArgs', () => {
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  it('mints a fresh --session-id for a new session (never --continue)', () => {
+    const { rawArgs, sessionId } = buildClaudeArgs({
+      mcpArgs: ['--mcp-config', 'x.json'],
+      newId: () => 'fixed-id',
+    });
+    expect(sessionId).toBe('fixed-id');
+    expect(rawArgs).toEqual(['--session-id', 'fixed-id', '--mcp-config', 'x.json']);
+    expect(rawArgs).not.toContain('--continue');
+    expect(rawArgs).not.toContain('--resume');
+  });
+
+  it('resumes by explicit id with --resume (never --continue or --session-id)', () => {
+    const newId = () => {
+      throw new Error('newId must NOT be called when resuming');
+    };
+    const { rawArgs, sessionId } = buildClaudeArgs({
+      mcpArgs: [],
+      resumeSessionId: 'abc-123',
+      newId,
+    });
+    expect(sessionId).toBe('abc-123');
+    expect(rawArgs).toEqual(['--resume', 'abc-123']);
+    expect(rawArgs).not.toContain('--continue');
+    expect(rawArgs).not.toContain('--session-id');
+  });
+
+  it('appends mcpArgs AFTER the id args', () => {
+    const { rawArgs } = buildClaudeArgs({
+      mcpArgs: ['--mcp-config', '/tmp/run.json'],
+      resumeSessionId: 'sid',
+    });
+    expect(rawArgs).toEqual(['--resume', 'sid', '--mcp-config', '/tmp/run.json']);
+  });
+
+  it('defaults to a real UUID and gives each fresh session a distinct id', () => {
+    const a = buildClaudeArgs({ mcpArgs: [] });
+    const b = buildClaudeArgs({ mcpArgs: [] });
+    expect(a.sessionId).toMatch(UUID_RE);
+    expect(b.sessionId).toMatch(UUID_RE);
+    expect(a.sessionId).not.toBe(b.sessionId); // separate sessions → separate ids
+    expect(a.rawArgs[0]).toBe('--session-id');
   });
 });
 

@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import Editor, { type OnMount } from '@monaco-editor/react';
+import Editor, { DiffEditor, type OnMount } from '@monaco-editor/react';
 import '../lib/monaco-setup'; // side-effect: offline workers + narukami theme + loader.config
 import { api } from '../api';
-import type { FileNode, Project } from '../types';
+import type { FileNode, GitBranch, Project } from '../types';
+import { Ic } from './icons';
 
 interface Props {
   project: Project;
@@ -213,6 +214,13 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
   const [revealLine, setRevealLine] = useState<number | null>(null);
 
+  // Git integration (read-only): live branch label + committed-vs-working diff.
+  const [branch, setBranch] = useState<GitBranch | null>(null);
+  const [showDiff, setShowDiff] = useState(false);
+  const [headContent, setHeadContent] = useState('');
+  const [headCommitted, setHeadCommitted] = useState(true);
+  const [headLoading, setHeadLoading] = useState(false);
+
   const dirty = currentPath !== null && content !== original;
 
   // Latest open path, readable from inside an in-flight async save so we don't
@@ -227,6 +235,58 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
     onDirtyChange?.(dirty);
   }, [dirty, onDirtyChange]);
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
+
+  // Poll the current git branch (~3.5s) so the label tracks external switches.
+  useEffect(() => {
+    let alive = true;
+    const tick = () => {
+      api
+        .getGitBranch(project.id)
+        .then((b) => {
+          // Identity-bail when unchanged so the poll doesn't re-render the
+          // whole editor subtree (tree + Monaco wrapper) every 3.5s.
+          if (alive)
+            setBranch((prev) =>
+              prev && b && prev.branch === b.branch && prev.detached === b.detached ? prev : b,
+            );
+        })
+        .catch(() => {
+          if (alive) setBranch(null);
+        });
+    };
+    tick();
+    const id = setInterval(tick, 3500);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [project.id]);
+
+  // Lazily load the committed (HEAD) version when the diff is shown / file changes.
+  useEffect(() => {
+    if (!showDiff || !currentPath) return;
+    let cancelled = false;
+    setHeadLoading(true);
+    api
+      .getFileHead(project.id, currentPath)
+      .then((r) => {
+        if (cancelled) return;
+        setHeadContent(r.content);
+        setHeadCommitted(r.committed);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setHeadContent('');
+          setHeadCommitted(false);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setHeadLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showDiff, currentPath, project.id]);
 
   // Load the file tree whenever the selected project changes.
   useEffect(() => {
@@ -442,6 +502,7 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
                 </button>
               </div>
               <div className="ft-search-box">
+                <Ic name="search" className="ft-glass" />
                 <input
                   className="ft-search-input"
                   placeholder={searchMode === 'name' ? 'Search file name…' : 'Search in files…'}
@@ -538,18 +599,53 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
             {currentPath ? (
               <>
                 {dirty && <span className="dirty-dot" title="Unsaved changes" />}
-                {currentPath}
+                <span title={currentPath}>
+                  {currentPath.split('/').map((seg, i, arr) =>
+                    i < arr.length - 1 ? (
+                      <span key={i} className="crumb-seg">
+                        {seg}
+                        <span className="crumb-sep">›</span>
+                      </span>
+                    ) : (
+                      <span key={i} className="crumb-leaf">
+                        {seg}
+                      </span>
+                    ),
+                  )}
+                </span>
               </>
             ) : (
               <span className="muted">No file open</span>
             )}
           </span>
+          {branch?.branch && (
+            <span
+              className={`editor-branch${branch.detached ? ' detached' : ''}`}
+              title={branch.detached ? 'detached HEAD (short SHA)' : `on branch ${branch.branch}`}
+            >
+              <Ic name="branch" /> {branch.branch}
+            </span>
+          )}
           {fileErr && <span className="editor-file-err">{fileErr}</span>}
           {saved && !dirty && !conflict && <span className="editor-saved">saved ✓</span>}
+          {showDiff && (
+            <span className="editor-diff-note">
+              {headLoading ? 'loading…' : headCommitted ? '‹ committed · working ›' : 'new file — nothing committed yet'}
+            </span>
+          )}
+          {currentPath && (
+            <button
+              className={`btn btn-ghost editor-diff${showDiff ? ' active' : ''}`}
+              onClick={() => setShowDiff((v) => !v)}
+              title={showDiff ? 'Back to editing' : 'Diff working copy vs last commit (side by side)'}
+            >
+              {showDiff ? <><Ic name="pen" /> Edit</> : '± Diff'}
+            </button>
+          )}
           <button
             className={`btn ${conflict ? 'btn-danger' : 'btn-primary'} editor-save`}
             onClick={() => void save()}
-            disabled={(!dirty && !conflict) || saving}
+            disabled={(!dirty && !conflict) || saving || showDiff}
             title={conflict ? 'The file changed on disk — click to overwrite it' : undefined}
           >
             {saving ? 'Saving…' : conflict ? 'Overwrite' : 'Save'}
@@ -561,6 +657,23 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
             <div className="editor-empty">
               {loadingFile ? 'Opening…' : 'Select a file from the tree to edit it.'}
             </div>
+          ) : showDiff ? (
+            <DiffEditor
+              key={`diff-${currentPath}`}
+              theme="narukami"
+              language={languageFor(currentPath)}
+              original={headContent}
+              modified={content}
+              options={{
+                readOnly: true,
+                renderSideBySide: true,
+                automaticLayout: true,
+                fontFamily: "'JetBrains Mono', 'Fira Code', Consolas, monospace",
+                fontSize: 13,
+                minimap: { enabled: false },
+                scrollBeyondLastLine: false,
+              }}
+            />
           ) : (
             <Editor
               key={currentPath}

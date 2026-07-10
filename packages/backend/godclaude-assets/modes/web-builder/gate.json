@@ -1,0 +1,62 @@
+{
+  "_comment": "web-builder mode (godsite) — additive + tightened. Claiming 'deployment-ready' is gated like developer (which since v1.5 carries the merged-in ui-ux render proof): a readiness claim needs a production build that RAN (extraTestCmd) OR a browser-rendered artifact (extraVerifyTools — chrome-devtools screenshot/Lighthouse/console/network, the render-capture proof now living in developer). reReadClears:false so a bare re-read of page source never clears 'renders/responsive/accessible/ready' — 'looks right in the code' is not proof it renders or scores. extraClaim treats deployment-ready vocabulary as completion claims. confirmCommands keeps godsite PROPOSE-ONLY: shipping belongs to godship, so push/deploy/publish/secret-touch force an explicit confirm. Every key is additive over the general gate; the general floor is never weakened.",
+  "extraClaim": [
+    "\\bdeployment[- ]ready\\b",
+    "\\bdeploy[- ]?ready\\b",
+    "\\bproduction[- ]ready\\b",
+    "\\bready\\s+to\\s+(deploy|ship|launch|go\\s+live)\\b",
+    "\\bevery\\s+(page|route)\\b[^.\\n]{0,30}\\b(renders?|works?|loads?)\\b",
+    "\\ball\\s+(pages?|routes?|links?)\\b[^.\\n]{0,30}\\b(render|work|resolve|pass)\\b",
+    "\\brenders?\\s+(correctly|without\\s+errors?|cleanly)\\b",
+    "\\bresponsive\\b",
+    "\\bworks?\\s+on\\s+(mobile|tablet|desktop|all\\s+screens?)\\b",
+    "\\bno\\s+(console\\s+)?(errors?|warnings?)\\b",
+    "\\b(accessible|a11y|wcag)\\b",
+    "\\b(sufficient\\s+)?contrast\\b",
+    "\\b(seo|meta\\s+tags?|open\\s+graph|og\\s+tags?)\\b[^.\\n]{0,24}\\b(complete|set|done|added)\\b",
+    "\\blighthouse\\b[^.\\n]{0,24}\\b(pass(ed|es|ing)?|green|100|no\\s+failing)\\b",
+    "\\b(assets?\\s+)?optimi[sz]ed\\b",
+    "\\b(production\\s+)?build\\s+(passed|passes|succeeded|green|clean)\\b",
+    "\\bsite\\s+is\\s+(done|complete|finished|ready|live[- ]ready)\\b"
+  ],
+  "_verifyToolsNote": "Mirrors developer's render proof (the former ui-ux standard, folded into developer in v1.5): ONLY chrome-devtools capture/inspect tools count as a render proof. navigate_page/resize_page/emulate are SETUP (no artifact captured) and are deliberately excluded — a readiness claim needs a screenshot / Lighthouse audit / console read / network read.",
+  "extraVerifyTools": [
+    "mcp__chrome-devtools__take_screenshot",
+    "mcp__chrome-devtools__lighthouse_audit",
+    "mcp__chrome-devtools__take_snapshot",
+    "mcp__chrome-devtools__list_console_messages",
+    "mcp__chrome-devtools__list_network_requests",
+    "mcp__chrome-devtools__performance_"
+  ],
+  "extraTestCmd": [
+    "\\b(npm|pnpm|yarn|bun)\\s+(run\\s+)?build\\b",
+    "\\b(vite|astro|next|nuxt|eleventy|11ty|hugo|gatsby|parcel|webpack)\\s+build\\b",
+    "\\bnpx\\s+(astro|eleventy|@11ty|vite)\\b[^\\n]*\\bbuild\\b",
+    "\\bjekyll\\s+build\\b",
+    "\\b(npm|pnpm|yarn|bun)\\s+(run\\s+)?(preview|serve|start|dev)\\b",
+    "\\b(http-server|live-server|serve|sirv|vite\\s+preview|wrangler\\s+pages\\s+dev)\\b",
+    "\\b(lighthouse|lhci|unlighthouse|pa11y|axe)\\b",
+    "\\bcurl\\b[^\\n]*\\bhttps?://(localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0)"
+  ],
+  "extraEvidence": [
+    "HTTP\\/[12][^\\n]*\\b(200|301|304)\\b",
+    "\\b200\\s+OK\\b",
+    "\\bbuild\\s+success(ful)?\\b",
+    "\\b0\\s+errors?\\b",
+    "\\blighthouse\\b[^\\n]*\\b(score|performance|accessibility|seo|best[- ]practices)\\b",
+    "\\b(LCP|CLS|INP|TBT|FCP)\\b",
+    "\\bscreenshot (saved|captured|at)\\b",
+    "\\bbuilt\\s+in\\s+\\d",
+    "\\b\\d+\\s+(pages?|routes?)\\s+built\\b"
+  ],
+  "reReadClears": false,
+  "confirmCommands": [
+    { "label": "git push", "pattern": "\\bgit\\s+(?:-\\S+(?:\\s+(?:\"[^\"]*\"|'[^']*'|[^\\s\"'])+)?\\s+)*push\\b" },
+    { "label": "publish via gh (PR / release / repo / workflow)", "pattern": "\\bgh\\s+(pr|release|repo|workflow)\\s+(create|merge|edit|delete|run)\\b" },
+    { "label": "deploy (shipping is godship's job)", "pattern": "\\brun\\s+(?:[\\w-]+:)?deploy\\b|\\bmake\\s+(?:[\\w-]+:)?deploy\\b|\\b(vercel|netlify|firebase|fly|flyctl|serverless|sls|surge|wrangler|heroku|render|railway|gh-pages)\\s+(deploy|publish|pages\\s+(deploy|publish)|--prod)\\b|\\bgcloud\\s+\\w+\\s+deploy\\b|\\bnpx\\s+gh-pages\\b|(\\.[\\\\/]|\\b(?:bash|sh|node|python3?|ruby|pwsh|powershell)\\s+(?:\\.[\\\\/])?)deploy\\.(sh|ps1|py|js|rb)\\b" },
+    { "label": "infra apply / destroy", "pattern": "\\b(kubectl\\b[\\s\\S]*?\\b(apply|delete|replace|patch|rollout|scale|drain|cordon)|terraform\\b[\\s\\S]*?\\b(apply|destroy)|helm\\b[\\s\\S]*?\\b(install|upgrade|uninstall|rollback)|pulumi\\s+(up|destroy)|ansible-playbook)\\b" },
+    { "label": "publish a package or image", "pattern": "\\b((npm|pnpm|yarn|bun)\\s+publish|docker\\b[\\s\\S]*?\\bpush|podman\\b[\\s\\S]*?\\bpush)\\b" },
+    { "label": "mutate live cloud infra", "pattern": "\\b(aws\\s+(s3\\s+(rm|sync|cp)|ecs|lambda\\s+(update|invoke|publish)|cloudformation\\s+(deploy|create-stack|update-stack|delete-stack)|elasticbeanstalk)|gcloud\\b[\\s\\S]*?\\b(deploy|delete)|az\\b[\\s\\S]*?\\b(deploy|delete))\\b" },
+    { "label": "read or move a secret / credential file", "pattern": "(\\.env\\b(?!\\.(?:example|sample|template|dist))|\\bid_(rsa|ed25519|ecdsa|dsa)\\b|\\.(pem|pfx|p12|key|keystore|jks)\\b|\\.ssh[\\\\/]|\\.aws[\\\\/]credentials\\b|\\.npmrc\\b|\\bGOOGLE_APPLICATION_CREDENTIALS\\b|service[_-]?account[\\w.-]*\\.json\\b)" }
+  ]
+}

@@ -1,0 +1,1 @@
+[GODCLAUDE · godqa · Enma] Proof = the test RUN output this turn (pass/fail/skip counts, coverage %) — re-reading the test file is NOT proof. New assertions must be seen to FAIL for the right reason before they pass (red-green). Skipped/xfail/flaky = FAILURES for claim purposes; name them. Re-run after the last edit; don't recall an earlier green.

@@ -12,12 +12,19 @@ import { fileRoutes } from './routes/files';
 import { workspaceRoutes } from './routes/workspace';
 import { eodRoutes } from './routes/eod';
 import { terminalRoutes } from './routes/terminals';
+import { argusRoutes } from './routes/argus';
+import { godclaudeRoutes } from './routes/godclaude';
+import { vitalsRoutes } from './routes/vitals';
+import { codeGraphRoutes } from './routes/codeGraph';
+import { armoryRoutes } from './routes/armory';
 import { setupWebSocket } from './ws';
-import { reconcileStaleRuns } from './services/runner';
+import { pruneOldRunLogs, reconcileStaleRuns } from './services/runner';
+import { startVitalsSampler } from './services/vitals';
 import { sweepMcpConfigs } from './services/mcpConfig';
+import { refreshIfProvisioned } from './services/godclaude';
 import { anotherInstanceRunning, claimInstanceLock } from './services/instanceLock';
 import { setBaseUrl } from './services/serverInfo';
-import { disconnectDb } from './db';
+import { disconnectDb, ensureSchema } from './db';
 
 export interface StartOptions {
   port?: number;
@@ -42,6 +49,12 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
   const desiredPort = opts.port ?? PORT;
   const token = getToken();
 
+  // Self-heal the schema for installs seeded by an older app version BEFORE any
+  // query runs — the packaged app never migrates its copied SQLite DB, so a newly
+  // added column (e.g. Run.claudeSessionId) would otherwise be missing and every
+  // query that references it (Argus polls it ~2s) would fail with "no such column".
+  await ensureSchema();
+
   // Runs the previous process left as 'running' have dead ptys — reconcile them.
   // BUT only if no other live instance is using this same database: otherwise we
   // would mark THAT instance's genuinely-running runs 'exited' (shared-SQLite
@@ -62,12 +75,25 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
       // wrongly marked 'running'.
       process.stderr.write(`[narukami] stale-run reconcile failed: ${String(err)}\n`);
     }
+    // Retention: drop terminal logs of runs that ended >14 days ago (best-effort).
+    try {
+      const pruned = await pruneOldRunLogs();
+      if (pruned > 0) {
+        process.stdout.write(`[narukami] pruned ${pruned} run-log row(s) past retention\n`);
+      }
+    } catch (err) {
+      process.stderr.write(`[narukami] run-log retention sweep failed: ${String(err)}\n`);
+    }
     claimInstanceLock();
   }
 
   // Remove any per-run MCP config files (which embed a bearer token) left in the
   // temp dir by a prior session's now-dead Claude processes.
   sweepMcpConfigs();
+
+  // If the embedded godclaude is installed, refresh its assets when this build
+  // ships a newer vendored version (never auto-installs; best-effort).
+  await refreshIfProvisioned();
 
   const app = Fastify({
     logger: {
@@ -138,6 +164,11 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
   await app.register(workspaceRoutes);
   await app.register(eodRoutes);
   await app.register(terminalRoutes);
+  await app.register(argusRoutes);
+  await app.register(godclaudeRoutes);
+  await app.register(vitalsRoutes);
+  await app.register(codeGraphRoutes);
+  await app.register(armoryRoutes);
 
   // Packaged desktop mode: serve the built frontend from this same server so the
   // renderer is same-origin. The bearer token is injected into index.html so the
@@ -171,6 +202,9 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
   // Record our own reachable URL so Claude runs can be handed an MCP bridge that
   // calls back in to read/drive other terminals.
   setBaseUrl(`http://${host}:${boundPort}`);
+
+  // Header vitals: sample whole-machine CPU/MEM in the background.
+  startVitalsSampler();
 
   return { app, token, host, port: boundPort };
 }

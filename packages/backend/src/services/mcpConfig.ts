@@ -4,6 +4,7 @@ import path from 'node:path';
 import { REPO_ROOT } from '../config';
 import { getToken } from '../auth';
 import { getBaseUrl } from './serverInfo';
+import { codeGraphBin, codeGraphBinInstalled } from './codeGraph';
 
 // Cross-terminal orchestration is on by default; set NARUKAMI_ORCHESTRATION=0 to
 // disable (Claude sessions then launch without the terminal-control MCP tools).
@@ -33,51 +34,89 @@ export function locateBridge(): string | null {
 
 const CONFIG_DIR = path.join(os.tmpdir(), 'narukami-mcp');
 
+interface McpServerEntry {
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+}
+
 /**
- * Write a per-run MCP config pointing Claude at the NARUKAMI bridge, and return
- * the `--mcp-config <path>` args to pass to `claude`. Returns [] (launch Claude
- * unchanged) when orchestration is disabled, the server URL isn't known yet, or
- * the bridge script can't be found — orchestration is best-effort, never fatal.
+ * Assemble the `mcpServers` map from its already-resolved inputs. Pure (no I/O)
+ * so the server-selection logic is directly unit-testable.
+ *   - `narukami` (cross-terminal orchestration bridge) is added when its bridge
+ *     script, server URL, and token are all present.
+ *   - `codebase-memory` (the Code Map engine, run as a stdio MCP server — see
+ *     `codebase-memory-mcp --help`) is added when `codeMapBin` is provided, so the
+ *     session can query the project's structural graph on demand.
+ */
+export function assembleMcpServers(input: {
+  execPath: string;
+  bridge: string | null;
+  baseUrl: string | null;
+  token: string | null;
+  selfRunId: string;
+  codeMapBin: string | null;
+}): Record<string, McpServerEntry> {
+  const servers: Record<string, McpServerEntry> = {};
+  if (input.bridge && input.baseUrl && input.token) {
+    servers.narukami = {
+      command: input.execPath,
+      args: [input.bridge],
+      env: {
+        NARUKAMI_BASE_URL: input.baseUrl,
+        NARUKAMI_TOKEN: input.token,
+        NARUKAMI_SELF_RUN_ID: input.selfRunId,
+        ELECTRON_RUN_AS_NODE: '1',
+      },
+    };
+  }
+  if (input.codeMapBin) {
+    servers['codebase-memory'] = { command: input.codeMapBin, args: [] };
+  }
+  return servers;
+}
+
+/**
+ * Write a per-run MCP config for `claude` and return the `--mcp-config <path>`
+ * args. Returns [] (launch Claude unchanged) when there is nothing to attach.
+ * Best-effort, never fatal.
  *
  * The config is NOT strict: the user's own MCP servers still load alongside it.
- * `command` is this process's own binary; ELECTRON_RUN_AS_NODE makes a packaged
- * Electron binary behave as plain Node when it runs the bridge.
+ * `opts.codeMap` attaches the Code Map engine (codebase-memory-mcp) so this
+ * session can inspect the project's codebase graph on demand — enabled per
+ * project via the CodeMap "Embed in Claude" toggle.
  */
-export function buildClaudeMcpArgs(selfRunId: string): string[] {
-  if (!orchestrationEnabled()) return [];
-
-  const baseUrl = getBaseUrl();
-  if (!baseUrl) return [];
-
-  const bridge = locateBridge();
-  if (!bridge) return [];
-
-  let token: string;
-  try {
-    token = getToken();
-  } catch {
-    return [];
+export function buildClaudeMcpArgs(selfRunId: string, opts: { codeMap?: boolean } = {}): string[] {
+  const wantNarukami = orchestrationEnabled();
+  const bridge = wantNarukami ? locateBridge() : null;
+  const baseUrl = wantNarukami ? getBaseUrl() : null;
+  let token: string | null = null;
+  if (wantNarukami) {
+    try {
+      token = getToken();
+    } catch {
+      token = null;
+    }
   }
 
-  const config = {
-    mcpServers: {
-      narukami: {
-        command: process.execPath,
-        args: [bridge],
-        env: {
-          NARUKAMI_BASE_URL: baseUrl,
-          NARUKAMI_TOKEN: token,
-          NARUKAMI_SELF_RUN_ID: selfRunId,
-          ELECTRON_RUN_AS_NODE: '1',
-        },
-      },
-    },
-  };
+  // Only attach the Code Map server when embed is requested AND the engine binary
+  // is actually installed — otherwise Claude would get a server that can't start.
+  const codeMapBin = opts.codeMap && codeGraphBinInstalled() ? codeGraphBin() : null;
+
+  const servers = assembleMcpServers({
+    execPath: process.execPath,
+    bridge,
+    baseUrl,
+    token,
+    selfRunId,
+    codeMapBin,
+  });
+  if (Object.keys(servers).length === 0) return [];
 
   try {
     fs.mkdirSync(CONFIG_DIR, { recursive: true });
     const file = path.join(CONFIG_DIR, `${selfRunId}.json`);
-    fs.writeFileSync(file, JSON.stringify(config), { encoding: 'utf8', mode: 0o600 });
+    fs.writeFileSync(file, JSON.stringify({ mcpServers: servers }), { encoding: 'utf8', mode: 0o600 });
     return ['--mcp-config', file];
   } catch {
     return [];

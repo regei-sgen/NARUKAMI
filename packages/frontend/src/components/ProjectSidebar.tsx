@@ -1,5 +1,6 @@
 import { useState, type FormEvent, type MouseEvent } from 'react';
 import type { Project } from '../types';
+import { Ic } from './icons';
 
 interface Props {
   projects: Project[];
@@ -65,12 +66,12 @@ export function ProjectSidebar({
               <span className="project-namewrap">
                 {workingProjectIds.has(p.id) ? (
                   <span className="claude-live working" title="A task is running in this project">
-                    ✦
-                  </span>
+                    <Ic name="spark" />
+</span>
                 ) : claudeIdleProjectIds.has(p.id) ? (
                   <span className="claude-live idle" title="Claude session open (idle)">
-                    ✦
-                  </span>
+                    <Ic name="spark" />
+</span>
                 ) : null}
                 <span className="project-name">{p.name}</span>
               </span>

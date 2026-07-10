@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { AnalyzerCommand, AnalyzerResult } from '../types';
+import { godSpawnEnv } from './godclaude';
 import { resolveExecutable, wrapForWindows } from './exec';
 
 const execFileAsync = promisify(execFile);
@@ -182,6 +183,9 @@ async function runClaude(prompt: string, cwd: string): Promise<string> {
       windowsHide: true,
       timeout: CLAUDE_TIMEOUT_MS,
       killSignal: 'SIGKILL',
+      // Headless analysis sessions are NARUKAMI sessions too — same embedded
+      // godclaude home as the interactive terminals.
+      env: { ...process.env, ...godSpawnEnv() },
     });
     return stdout;
   } catch (err) {
@@ -336,4 +340,71 @@ Write a concise, factual end-of-day summary (2-5 sentences, plain text, no markd
 
   const stdout = await runClaude(prompt, projectPath);
   return unwrapEnvelope(stdout).trim();
+}
+
+export interface EodProjectInput {
+  name: string;
+  commitsText: string;
+  runsText: string;
+  sessions: number;
+  sessionContext: string; // the developer's actual prompts/tasks from that day's Claude sessions
+}
+
+/**
+ * Generate a cross-project End-of-Day report for `prettyDate` in the FIXED
+ * template format (## EOD -- date → ### Project bullets → ### Summary). One
+ * `claude -p` call over every selected project's git commits + runs + session
+ * activity. Returns markdown with any surrounding code fence stripped.
+ */
+export async function generateEodReport(
+  cwd: string,
+  prettyDate: string,
+  projects: EodProjectInput[],
+  note: string,
+): Promise<string> {
+  const blocks = projects
+    .map(
+      (p) => `## PROJECT: ${p.name}  (${p.sessions} Claude session(s) active today)
+Git commits today (subject + details):
+"""
+${p.commitsText.slice(-4000) || '(no commits today)'}
+"""
+Runs that finished today:
+"""
+${p.runsText.slice(-1500) || '(none recorded)'}
+"""
+What the developer actually worked on in Claude sessions today (their own prompts/tasks — use this to describe the work when commits are thin):
+"""
+${p.sessionContext.slice(-3000) || '(no session context captured)'}
+"""`,
+    )
+    .join('\n\n');
+
+  const prompt = `You are writing a developer's End-of-Day report for ${prettyDate}, in a FIXED markdown format.
+
+Output EXACTLY this structure and NOTHING else (no preamble, no explanation, no code fences):
+
+## EOD -- ${prettyDate}
+
+### <Project Name>
+-   <2-4 concise, past-tense bullets of what was accomplished>
+
+(repeat one "### <Project Name>" section for EACH project listed below, in the given order)
+
+### Summary
+-   <1-2 bullets summarizing the whole day across the projects>
+
+Rules:
+- Use each project's name EXACTLY as given (the text after "## PROJECT:", before the parenthetical).
+- Base every bullet on the git commits / runs / session tasks provided. Condense related work into readable outcomes ("Built X", "Added Y", "Fixed Z"). Do NOT invent specifics or numbers not present.
+- Bullets are short, factual, past tense — 2-4 per project.
+- If a project has NO commits, write real bullets from "What the developer actually worked on" (their session tasks) — describe the actual work. Do NOT emit filler like "Worked on <name> across N sessions"; only fall back to that if there is genuinely no commit AND no session context.
+${note ? `- Weave in the developer's own note where relevant:\n"""\n${note.slice(0, 1500)}\n"""` : ''}
+
+Projects (in order):
+
+${blocks}`;
+
+  const stdout = await runClaude(prompt, cwd);
+  return stripFences(unwrapEnvelope(stdout)).trim();
 }

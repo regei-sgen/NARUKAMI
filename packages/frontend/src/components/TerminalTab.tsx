@@ -1,9 +1,12 @@
-import { useEffect, useRef } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { Terminal, type IDisposable } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { WebglAddon } from '@xterm/addon-webgl';
 import { api, runWsUrl } from '../api';
 import { normalizeStatus } from '../lib/runStatus';
+import { detectDevUrl, pushWindow } from '../lib/devUrl';
 import type { ActiveRun, RunStatus } from '../types';
+import { Ic } from './icons';
 
 interface Props {
   run: ActiveRun;
@@ -15,6 +18,101 @@ interface Props {
   // output; `taskDone` is true on the working→idle edge IF the user had sent
   // input since the last idle (so booting/replay doesn't count as a task).
   onActivity?: (runId: string, working: boolean, taskDone: boolean) => void;
+  // Claude tabs only: this project's Code Map embed flag (for the map toggle).
+  codeMapEmbed?: boolean;
+}
+
+/**
+ * Claude-tab toolbar toggles: per-session embedded-godclaude activation ("god",
+ * default ON — a session with no overlay inherits the globally armed layer) and
+ * the project's Code Map embed ("map", default OFF; attaches at launch, so a
+ * flip applies on the next Restart/Continue). The session id comes from the Run
+ * row (fetched once — restored tabs don't carry it in props).
+ */
+function ClaudeToggles({ run, codeMapEmbed }: { run: ActiveRun; codeMapEmbed: boolean }) {
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [godInstalled, setGodInstalled] = useState(false);
+  const [godOn, setGodOn] = useState(false);
+  const [mapOn, setMapOn] = useState(codeMapEmbed);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let gone = false;
+    void (async () => {
+      try {
+        const info = await api.getRun(run.runId);
+        const sid = (info as { claudeSessionId?: string | null }).claudeSessionId;
+        if (gone || !sid) return;
+        setSessionId(sid);
+        const state = await api.godSessionState(sid);
+        if (gone) return;
+        setGodInstalled(state.installed);
+        setGodOn(state.active);
+      } catch {
+        /* toggles stay hidden/off */
+      }
+    })();
+    return () => {
+      gone = true;
+    };
+  }, [run.runId]);
+
+  const toggleGod = useCallback(async () => {
+    if (!sessionId) return;
+    setBusy(true);
+    try {
+      const res = await api.godArmSession(sessionId, !godOn);
+      setGodOn(res.active);
+    } catch {
+      /* keep prior state */
+    } finally {
+      setBusy(false);
+    }
+  }, [sessionId, godOn]);
+
+  const toggleMap = useCallback(async () => {
+    setBusy(true);
+    try {
+      const res = await api.setCodeMapEmbed(run.projectId, !mapOn);
+      setMapOn(res.codeMapEmbed);
+    } catch {
+      /* keep prior state */
+    } finally {
+      setBusy(false);
+    }
+  }, [run.projectId, mapOn]);
+
+  return (
+    <span className="term-toggles">
+      {godInstalled && sessionId && (
+        <button
+          className={`term-toggle ${godOn ? 'on' : ''}`}
+          disabled={busy}
+          title={
+            godOn
+              ? 'GODCLAUDE active for this session (embedded layer) — click to switch this session off; takes effect next turn'
+              : 'GODCLAUDE off for this session — click to activate; takes effect next turn'
+          }
+          onClick={() => void toggleGod()}
+        >
+          <Ic name="bolt" /> god
+        </button>
+      )}
+      <button
+        className={`term-toggle ${mapOn ? 'on' : ''}`}
+        disabled={busy}
+        title={
+          (mapOn
+            ? 'Code Map embedded in this project\'s Claude sessions — click to disable'
+            : 'Code Map not embedded — click to enable') +
+          ' (attaches at launch: applies on next Restart/Continue)'
+        }
+        onClick={() => void toggleMap()}
+      >
+        <Ic name="hex" /> map
+      </button>
+    </span>
+  );
 }
 
 // Quiet period after the last output byte before we call the run "idle"/done.
@@ -31,10 +129,17 @@ interface ServerMessage {
   message?: string;
 }
 
-export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity }: Props) {
+// Memoized: App re-renders on every activity edge / status flip / dock drag
+// frame, and every open terminal would re-render with it. All props are stable
+// (primitives, per-run object identity, useCallback handlers), so memo cuts
+// that churn to the tabs whose run actually changed.
+export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity, codeMapEmbed }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  // Detected local dev-server URL (command/shell runs) → the "Open" button.
+  const urlWindowRef = useRef('');
+  const [devUrl, setDevUrl] = useState<string | null>(null);
 
   useEffect(() => {
     let disposed = false;
@@ -52,9 +157,21 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity }
     let working = false;
     let pendingTask = false; // user sent input since the last idle → next idle is a task
     let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastOutputAt = 0;
+    // rAF handle coalescing refit work (see scheduleFit below).
+    let fitRaf = 0;
     // For elevated shells: the liveness poll timer while awaiting UAC + broker.
     let pollTimer: ReturnType<typeof setTimeout> | null = null;
+    // Idle detection without per-chunk timer churn: output only stamps
+    // lastOutputAt; ONE timer re-arms itself for the remaining quiet gap when it
+    // wakes early. Under heavy streaming this replaces a clearTimeout+setTimeout
+    // pair per message with a plain assignment.
     const goIdle = () => {
+      const remaining = lastOutputAt + IDLE_MS - Date.now();
+      if (remaining > 0) {
+        idleTimer = setTimeout(goIdle, remaining);
+        return;
+      }
       idleTimer = null;
       if (!working) return;
       working = false;
@@ -63,12 +180,12 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity }
       if (!disposed) onActivity?.(run.runId, false, wasTask);
     };
     const bumpActivity = () => {
+      lastOutputAt = Date.now();
       if (!working) {
         working = true;
         if (!disposed) onActivity?.(run.runId, true, false);
       }
-      if (idleTimer) clearTimeout(idleTimer);
-      idleTimer = setTimeout(goIdle, IDLE_MS);
+      if (!idleTimer) idleTimer = setTimeout(goIdle, IDLE_MS);
     };
 
     // Defer creation one frame. Under React StrictMode the effect is mounted,
@@ -81,8 +198,9 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity }
 
       const t = new Terminal({
         cursorBlink: true,
-        fontFamily: 'Menlo, Consolas, "DejaVu Sans Mono", monospace',
-        fontSize: 13,
+        // The Windows Terminal face (Cascadia Mono ships with Windows 10/11).
+        fontFamily: '"Cascadia Mono", Consolas, monospace',
+        fontSize: 14,
         scrollback: 5000,
         theme: { background: '#050506', foreground: '#e8e8ee', cursor: '#ff2d3c' },
       });
@@ -106,6 +224,18 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity }
 
       if (container) {
         t.open(container);
+        // GPU renderer: the default DOM renderer re-lays-out entire rows on
+        // every write and is what makes several busy shells stutter. WebGL must
+        // load after open(); if the context can't be created (GPU blocklist) or
+        // is later evicted (browser context-limit pressure with many tabs),
+        // dispose() falls back to the DOM renderer transparently.
+        try {
+          const webgl = new WebglAddon();
+          webgl.onContextLoss(() => webgl.dispose());
+          t.loadAddon(webgl);
+        } catch {
+          /* DOM renderer fallback */
+        }
         safeFit();
       }
 
@@ -114,10 +244,17 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity }
         const socket = new WebSocket(runWsUrl(run.runId));
         ws = socket;
 
+        // Only tell the pty about a resize when the grid actually changed:
+        // ConPTY re-lays-out its whole buffer on every resize, so the
+        // pixel-level ResizeObserver storm during a dock drag must not reach it.
+        let lastCols = 0;
+        let lastRows = 0;
         const sendResize = () => {
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ type: 'resize', cols: t.cols, rows: t.rows }));
-          }
+          if (socket.readyState !== WebSocket.OPEN) return;
+          if (t.cols === lastCols && t.rows === lastRows) return;
+          lastCols = t.cols;
+          lastRows = t.rows;
+          socket.send(JSON.stringify({ type: 'resize', cols: t.cols, rows: t.rows }));
         };
 
         socket.onopen = () => {
@@ -150,6 +287,14 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity }
           if (msg.type === 'data' && typeof msg.chunk === 'string') {
             t.write(msg.chunk);
             bumpActivity();
+            // Cheap dev-server URL sniffing (claude output is not a server's).
+            if (run.kind !== 'claude') {
+              urlWindowRef.current = pushWindow(urlWindowRef.current, msg.chunk);
+              if (msg.chunk.includes('http')) {
+                const found = detectDevUrl(urlWindowRef.current);
+                if (found) setDevUrl((prev) => (prev === found ? prev : found));
+              }
+            }
           } else if (msg.type === 'ready') {
             // Server confirmed the run is live — safe to show 'running'.
             onStatus(run.runId, 'running', null);
@@ -188,17 +333,23 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity }
           if (!disposed && !gotExit) onStatus(run.runId, 'error', null);
         };
 
-        onWinResize = () => {
-          safeFit();
-          sendResize();
+        // Coalesce refits to one per frame: during a dock-resize drag the
+        // ResizeObserver and window listener each fire per pointer move, and
+        // every fit() forces a synchronous DOM measure. One rAF absorbs the
+        // whole burst (sendResize above already ignores no-op grid sizes).
+        const scheduleFit = () => {
+          if (fitRaf) return;
+          fitRaf = requestAnimationFrame(() => {
+            fitRaf = 0;
+            safeFit();
+            sendResize();
+          });
         };
+        onWinResize = scheduleFit;
         window.addEventListener('resize', onWinResize);
 
         // Refit when the container becomes visible / changes size (tab switch).
-        ro = new ResizeObserver(() => {
-          safeFit();
-          sendResize();
-        });
+        ro = new ResizeObserver(scheduleFit);
         if (container) ro.observe(container);
       };
 
@@ -241,6 +392,7 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity }
     return () => {
       disposed = true;
       cancelAnimationFrame(raf);
+      if (fitRaf) cancelAnimationFrame(fitRaf);
       if (pollTimer) clearTimeout(pollTimer);
       if (idleTimer) clearTimeout(idleTimer);
       if (working) onActivity?.(run.runId, false, false); // tab unmounting → clear working
@@ -274,18 +426,49 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity }
     <div className="terminal-tab">
       <div className="terminal-toolbar">
         <span className="term-title">
-          {run.elevated ? '🛡 ' : ''}
-          {run.kind === 'shell' ? '⌨ ' : run.kind === 'claude' ? '✦ ' : ''}
+          {run.elevated ? <><Ic name="shield" />{' '}</> : null}
+          {run.kind === 'shell' ? (
+            <>
+              <Ic name="shell" />{' '}
+            </>
+          ) : run.kind === 'claude' ? (
+            <>
+              <Ic name="spark" />{' '}
+            </>
+          ) : null}
           {run.projectName} · {run.customLabel ?? run.label}
         </span>
         <span className={`badge badge-${run.status}`}>
           {run.status}
           {run.exitCode != null ? ` (${run.exitCode})` : ''}
         </span>
+        {run.kind === 'claude' && (
+          <ClaudeToggles run={run} codeMapEmbed={codeMapEmbed ?? false} />
+        )}
         {stoppable ? (
-          <button className="btn btn-danger term-action" onClick={stop}>
-            Stop
-          </button>
+          <>
+            {run.kind !== 'claude' && devUrl && (
+              <button
+                className="btn term-action"
+                title={`Open ${devUrl} in your default browser`}
+                onClick={() => void api.openUrl(devUrl).catch(() => undefined)}
+              >
+                <Ic name="external" /> Open
+              </button>
+            )}
+            {run.kind !== 'claude' && (
+              <button
+                className="btn btn-run term-action"
+                title="Restart this process (stops it first — a dev server picks up config/code changes)"
+                onClick={() => onRestart(run.runId)}
+              >
+                <Ic name="refresh" /> Restart
+              </button>
+            )}
+            <button className="btn btn-danger term-action" onClick={stop}>
+              Stop
+            </button>
+          </>
         ) : (
           <>
             {run.kind === 'claude' && onContinue && (
@@ -294,7 +477,7 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity }
                 title="Resume the last Claude conversation in this project (claude --continue)"
                 onClick={() => onContinue(run.runId)}
               >
-                ✦ Continue
+                <Ic name="spark" /> Continue
               </button>
             )}
             <button
@@ -310,4 +493,4 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity }
       <div className="terminal-surface" ref={containerRef} />
     </div>
   );
-}
+});

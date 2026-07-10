@@ -59,6 +59,22 @@ export function taskToast(run: ActiveRun, seq: number): Toast {
   };
 }
 
+/**
+ * Whether an in-app toast should actually be shown, given where the user is.
+ * Suppressed when they're actively viewing the run's OWN project in a focused,
+ * visible window — they can already see it finish, so a toast is just noise.
+ * Kept pure so App can unit-test the gate; the native OS notification is a
+ * separate path that self-gates on window focus, so a backgrounded finish in
+ * the selected project still surfaces there.
+ */
+export function shouldShowInAppToast(
+  t: Toast,
+  ctx: { selectedProjectId: string | null; focused: boolean; visible: boolean },
+): boolean {
+  const viewingHere = ctx.selectedProjectId === t.projectId && ctx.focused && ctx.visible;
+  return !viewingHere;
+}
+
 /** Title + body text for a toast / native notification, based on its event. */
 export function toastText(t: Toast): { title: string; body: string } {
   const title = `${t.projectName} · ${t.label}`;
