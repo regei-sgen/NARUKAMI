@@ -19,6 +19,7 @@ import { ThemePicker } from './components/ThemePicker';
 import { ActivityWave } from './components/ActivityWave';
 import { finishToastFor, fireNativeNotification, primeNotifications, taskToast } from './lib/notify';
 import { applyTheme, cacheThemeId, cachedThemeId, type ThemeId } from './lib/themes';
+import { desktop } from './lib/desktop';
 
 export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -36,6 +37,10 @@ export default function App() {
   const [dockWidth, setDockWidth] = useState<number>(480);
   const [dockMinimized, setDockMinimized] = useState<boolean>(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
+  // The terminal dock element + a highlight flag, for dragging a torn-off window
+  // back over it to re-dock (desktop shell only).
+  const dockRef = useRef<HTMLElement>(null);
+  const [dockHint, setDockHint] = useState<boolean>(false);
   // Active color theme. Seeded from the localStorage cache (already applied in
   // main.tsx before paint); reconciled with the server-persisted value on boot.
   const [themeId, setThemeId] = useState<ThemeId>(cachedThemeId);
@@ -531,6 +536,124 @@ export default function App() {
     });
   };
 
+  // Tear a terminal off into its own desktop window (move semantics): ask the
+  // shell to open it — spawned at the cursor when `pos` is given — and drop the
+  // tab from THIS window. The pty keeps running server-side; the window owns the
+  // live view until it's re-docked (dragged back or closed) via reclaimRun.
+  const popOut = (runId: string, pos?: { x: number; y: number }) => {
+    const bridge = desktop();
+    if (!bridge) return;
+    const run = activeRuns.find((r) => r.runId === runId);
+    if (!run) return;
+    bridge.popOut(runId, pos);
+    setActiveRuns((cur) => {
+      const remaining = cur.filter((r) => r.runId !== runId);
+      setActiveTabByProject((m) => {
+        if (m[run.projectId] !== runId) return m;
+        const sibling = [...remaining].reverse().find((r) => r.projectId === run.projectId);
+        const next = { ...m };
+        if (sibling) next[run.projectId] = sibling.runId;
+        else delete next[run.projectId];
+        return next;
+      });
+      return remaining;
+    });
+  };
+
+  // Re-dock a torn-off terminal (its window was dragged back over the dock, or
+  // closed). Read current metadata from the workspace by runId — not a stale
+  // snapshot — so a restart done in the torn-off window is reflected here.
+  const reclaimRun = useCallback(async (runId: string) => {
+    try {
+      const ws = await api.getWorkspace();
+      const r = ws.runs.find((x) => x.runId === runId);
+      if (!r) return; // ended while detached — nothing to re-dock
+      setActiveRuns((cur) =>
+        cur.some((x) => x.runId === runId)
+          ? cur
+          : [
+              ...cur,
+              {
+                runId: r.runId,
+                projectId: r.projectId,
+                projectName: r.projectName,
+                label: r.label,
+                customLabel: r.name ?? undefined,
+                kind: r.kind,
+                status: 'connecting',
+                exitCode: null,
+              },
+            ],
+      );
+      setActiveTabByProject((m) => ({ ...m, [r.projectId]: runId }));
+    } catch {
+      /* transient — the run stays live server-side and restores on reopen */
+    }
+  }, []);
+
+  useEffect(() => {
+    const bridge = desktop();
+    if (!bridge) return;
+    return bridge.onReclaim((runId) => void reclaimRun(runId));
+  }, [reclaimRun]);
+
+  // Highlight the dock while a torn-off window is dragged back over it.
+  useEffect(() => {
+    const bridge = desktop();
+    if (!bridge) return;
+    return bridge.onDockHint((active) => setDockHint(active));
+  }, []);
+
+  // Report the dock's on-screen rectangle to the shell so it can tell when a
+  // torn-off window is dragged back over it. Re-measured whenever the layout that
+  // affects the dock's size/position changes, and on window resize.
+  useEffect(() => {
+    const bridge = desktop();
+    if (!bridge) return;
+    const report = () => {
+      const el = dockRef.current;
+      const r = el?.getBoundingClientRect();
+      bridge.reportDockRect(
+        r && r.width > 0 && r.height > 0
+          ? { x: r.left, y: r.top, width: r.width, height: r.height }
+          : null,
+      );
+    };
+    report();
+    window.addEventListener('resize', report);
+    return () => window.removeEventListener('resize', report);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dockPosition, dockHeight, dockWidth, dockMinimized, sidebarCollapsed, view, selectedId, activeRuns.length]);
+
+  // Drag a terminal tab out of the strip to tear it off. We don't hijack the
+  // click: only a press that travels a real distance AND is released outside the
+  // dock detaches (at the cursor). A plain click still just selects the tab.
+  const beginTabDrag = (e: ReactPointerEvent, runId: string) => {
+    if (e.button !== 0 || !desktop()) return;
+    const start = { x: e.clientX, y: e.clientY };
+    const onMove = (ev: PointerEvent) => {
+      if (Math.hypot(ev.clientX - start.x, ev.clientY - start.y) > 8) {
+        document.body.classList.add('tab-tearing');
+      }
+    };
+    const onUp = (ev: PointerEvent) => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      document.body.classList.remove('tab-tearing');
+      const dist = Math.hypot(ev.clientX - start.x, ev.clientY - start.y);
+      const rect = dockRef.current?.getBoundingClientRect();
+      const outside =
+        !rect ||
+        ev.clientX < rect.left ||
+        ev.clientX > rect.right ||
+        ev.clientY < rect.top ||
+        ev.clientY > rect.bottom;
+      if (dist > 30 && outside) popOut(runId, { x: ev.screenX, y: ev.screenY });
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
+
   // Switch theme: apply CSS vars instantly, cache locally, and persist to the
   // server under the AppSetting 'theme' key.
   const changeTheme = (id: ThemeId): void => {
@@ -667,9 +790,10 @@ export default function App() {
         </div>
 
         <section
+          ref={dockRef}
           className={`terminals dock-${dockPosition} ${projectRuns.length ? 'open' : ''} ${
             dockMinimized ? 'minimized' : ''
-          }`}
+          } ${dockHint ? 'dock-hint' : ''}`}
           style={
             projectRuns.length && !dockMinimized
               ? dockPosition === 'right'
@@ -678,6 +802,7 @@ export default function App() {
               : undefined
           }
         >
+          {dockHint && <div className="dock-drop-hint">Drop to dock terminal</div>}
           {activeRuns.length > 0 && (
             <>
               {projectRuns.length > 0 && !dockMinimized && (
@@ -720,12 +845,13 @@ export default function App() {
                         ) : (
                           <button
                             className="tab-btn"
+                            onPointerDown={(e) => beginTabDrag(e, r.runId)}
                             onClick={() => {
                               selectTab(r.runId);
                               if (dockMinimized) setDockMinimized(false);
                             }}
                             onDoubleClick={() => startRename(r)}
-                            title="Double-click to rename"
+                            title="Drag out to a window · double-click to rename"
                           >
                             <span className={`dot dot-${r.status}`} />
                             {r.elevated ? '🛡 ' : ''}
@@ -800,6 +926,7 @@ export default function App() {
                       onRestart={restartRun}
                       onContinue={(id) => restartRun(id, true)}
                       onActivity={onActivity}
+                      onPopOut={desktop() ? popOut : undefined}
                     />
                   </div>
                 ))}

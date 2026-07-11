@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, screen, shell } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -82,6 +82,54 @@ async function startBackend(): Promise<string> {
 }
 
 let appUrl = '';
+let mainWindow: BrowserWindow | null = null;
+// runId → the window it was torn off into (dedupe: a repeat tear-off just focuses
+// the existing window).
+const popouts = new Map<string, BrowserWindow>();
+// win.id → the runId a torn-off window currently shows. Kept current across a
+// restart (which re-keys the run) so the right runId is re-docked.
+const windowRunId = new Map<number, string>();
+// The main window's terminal dock, in its own content-viewport coordinates (the
+// renderer reports it). Converted to screen space on demand for drop detection.
+let dockViewportRect: { x: number; y: number; width: number; height: number } | null = null;
+
+const PRELOAD = path.join(__dirname, 'preload.js');
+
+// The main window's terminal dock in screen coordinates, or null if there's no
+// dock / no main window. Recomputed fresh each check so it tracks a moved window.
+function screenDockRect(): { x: number; y: number; width: number; height: number } | null {
+  if (!dockViewportRect || !mainWindow || mainWindow.isDestroyed()) return null;
+  const content = mainWindow.getContentBounds();
+  return {
+    x: content.x + dockViewportRect.x,
+    y: content.y + dockViewportRect.y,
+    width: dockViewportRect.width,
+    height: dockViewportRect.height,
+  };
+}
+
+// Is the OS cursor currently over the main window's dock? Drives the drop hint
+// and the re-dock decision while a torn-off window is dragged.
+function cursorOverDock(): boolean {
+  const r = screenDockRect();
+  if (!r) return false;
+  const p = screen.getCursorScreenPoint();
+  return p.x >= r.x && p.x <= r.x + r.width && p.y >= r.y && p.y <= r.y + r.height;
+}
+
+function setDockHint(active: boolean): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('narukami:dockhint', active);
+  }
+}
+
+// Hand a torn-off terminal back to the main window (re-dock). Idempotent on the
+// renderer side, so calling it from both the drop and the close path is safe.
+function reclaim(runId: string): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('narukami:reclaim', runId);
+  }
+}
 
 async function createWindow(): Promise<BrowserWindow> {
   const win = new BrowserWindow({
@@ -93,6 +141,7 @@ async function createWindow(): Promise<BrowserWindow> {
     title: 'NARUKAMI',
     autoHideMenuBar: true,
     webPreferences: {
+      preload: PRELOAD,
       contextIsolation: true,
       nodeIntegration: false,
     },
@@ -105,6 +154,71 @@ async function createWindow(): Promise<BrowserWindow> {
   });
   await win.loadURL(appUrl);
   return win;
+}
+
+/**
+ * Tear a terminal off into its own window. The pty lives in the backend keyed by
+ * runId, so the window just loads the same SPA with `?popout=<runId>`, which
+ * renders that one terminal full-window and reconnects its websocket. The tab is
+ * removed from the main window (move semantics); dragging this window's title bar
+ * back over the dock — or simply closing it — re-docks the terminal.
+ */
+function createTerminalWindow(runId: string, pos?: { x: number; y: number }): void {
+  const existing = popouts.get(runId);
+  if (existing && !existing.isDestroyed()) {
+    existing.focus();
+    return;
+  }
+
+  const win = new BrowserWindow({
+    width: 900,
+    height: 600,
+    minWidth: 480,
+    minHeight: 320,
+    // Spawn under the cursor (offset so the title bar lands near the pointer),
+    // so a drag-out feels like the terminal followed the mouse.
+    ...(pos ? { x: Math.round(pos.x - 80), y: Math.round(pos.y - 12) } : {}),
+    backgroundColor: '#050506',
+    title: 'NARUKAMI — terminal',
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: PRELOAD,
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  win.setMenuBarVisibility(false);
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    void shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  popouts.set(runId, win);
+  windowRunId.set(win.id, runId);
+
+  // A torn-off window has a normal OS title bar. As the user drags it, light up
+  // the dock's drop hint while the cursor is over it; on release there, re-dock.
+  let redocked = false;
+  win.on('move', () => setDockHint(cursorOverDock()));
+  win.on('moved', () => {
+    if (cursorOverDock()) {
+      redocked = true;
+      setDockHint(false);
+      reclaim(windowRunId.get(win.id) ?? runId);
+      win.close();
+    } else {
+      setDockHint(false);
+    }
+  });
+  win.on('closed', () => {
+    const current = windowRunId.get(win.id) ?? runId;
+    windowRunId.delete(win.id);
+    for (const [id, w] of popouts) if (w === win) popouts.delete(id);
+    // Closing without a drop still returns the terminal (never strand a live pty).
+    if (!redocked) reclaim(current);
+    setDockHint(false);
+  });
+
+  void win.loadURL(`${appUrl}?popout=${encodeURIComponent(runId)}`);
 }
 
 /**
@@ -154,10 +268,50 @@ function setupAutoUpdate(win: BrowserWindow): void {
   setInterval(check, 15 * 60 * 1000);
 }
 
+// Renderer → main: tear a terminal off into its own window, spawned at the
+// cursor when a screen position accompanies the drag-out.
+ipcMain.on('narukami:popout', (_e, runId: unknown, pos: unknown) => {
+  if (typeof runId !== 'string' || !runId) return;
+  const p =
+    pos && typeof pos === 'object' && 'x' in pos && 'y' in pos
+      ? { x: Number((pos as { x: number }).x), y: Number((pos as { y: number }).y) }
+      : undefined;
+  createTerminalWindow(runId, p && Number.isFinite(p.x) && Number.isFinite(p.y) ? p : undefined);
+});
+
+// The main window reports its terminal dock's rectangle (viewport coordinates)
+// whenever the layout changes, so drag-back drop detection knows the target.
+ipcMain.on('narukami:dockrect', (_e, rect: unknown) => {
+  if (rect && typeof rect === 'object' && 'width' in rect) {
+    const r = rect as { x: number; y: number; width: number; height: number };
+    dockViewportRect =
+      r.width > 0 && r.height > 0
+        ? { x: Number(r.x), y: Number(r.y), width: Number(r.width), height: Number(r.height) }
+        : null;
+  } else {
+    dockViewportRect = null;
+  }
+});
+
+// A torn-off window restarted its run (restart re-keys it). Keep the current-runId
+// mapping in sync so the right runId is re-docked on drop/close.
+ipcMain.on('narukami:runchanged', (_e, oldRunId: unknown, newRunId: unknown) => {
+  if (typeof oldRunId !== 'string' || typeof newRunId !== 'string' || !newRunId) return;
+  const win = popouts.get(oldRunId);
+  if (!win) return;
+  popouts.delete(oldRunId);
+  popouts.set(newRunId, win);
+  windowRunId.set(win.id, newRunId);
+});
+
 app.whenReady().then(async () => {
   try {
     appUrl = await startBackend();
     const win = await createWindow();
+    mainWindow = win;
+    win.on('closed', () => {
+      if (mainWindow === win) mainWindow = null;
+    });
     setupAutoUpdate(win);
   } catch (err) {
     dialog.showErrorBox('NARUKAMI failed to start', String((err as Error)?.stack ?? err));
@@ -165,7 +319,14 @@ app.whenReady().then(async () => {
   }
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) void createWindow();
+    if (BrowserWindow.getAllWindows().length === 0) {
+      void createWindow().then((win) => {
+        mainWindow = win;
+        win.on('closed', () => {
+          if (mainWindow === win) mainWindow = null;
+        });
+      });
+    }
   });
 });
 

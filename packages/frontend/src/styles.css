@@ -1172,6 +1172,7 @@ body {
   flex-direction: column;
   flex-shrink: 0;
   min-height: 0;
+  position: relative; /* anchor the re-dock drop-hint overlay */
 }
 /* right dock: full-height vertical panel; the resize handle lives in the gutter. */
 .terminals.dock-right {
@@ -1458,13 +1459,79 @@ body.resizing-h * {
   border-color: var(--border-red);
 }
 .terminal-toolbar .term-action {
-  margin-left: auto;
   padding: 4px 10px;
+}
+/* Push the button cluster to the right; siblings then sit together (toolbar gap
+   spaces them) instead of each absorbing free space and drifting apart. */
+.terminal-toolbar .term-action:first-of-type {
+  margin-left: auto;
+}
+.term-popout {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-dim);
+}
+.term-popout:hover {
+  color: var(--text);
+}
+.term-popout svg {
+  display: block;
 }
 .terminal-surface {
   flex: 1;
   min-height: 0;
   padding: 6px 8px;
+  background: #050506;
+}
+
+/* While a tab is being torn out, show a grabbing cursor everywhere so the drag
+   reads as a drag (the tab strip itself keeps native text off during it). */
+body.tab-tearing,
+body.tab-tearing * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+
+/* Dock drop target highlight while a torn-off window is dragged back over it. */
+.terminals.dock-hint {
+  outline: 2px dashed var(--accent, #ff2d3c);
+  outline-offset: -2px;
+}
+.dock-drop-hint {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background: rgba(255, 45, 60, 0.08);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  letter-spacing: 0.3px;
+}
+
+/* --- pop-out window: a single detached terminal, full-window --- */
+.popout-app {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: #050506;
+}
+.popout-app .terminal-tab {
+  flex: 1;
+  min-height: 0;
+}
+.popout-empty {
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 13px;
   background: #050506;
 }
 

@@ -17,6 +17,10 @@ interface Props {
   // output; `taskDone` is true on the working→idle edge IF the user had sent
   // input since the last idle (so booting/replay doesn't count as a task).
   onActivity?: (runId: string, working: boolean, taskDone: boolean) => void;
+  // Detach this terminal into its own desktop window. Only supplied by the main
+  // app window when running under the Electron shell — omitted in a pop-out
+  // window (no re-detaching) and in the browser (no window to open).
+  onPopOut?: (runId: string) => void;
 }
 
 // Quiet period after the last output byte before we call the run "idle"/done.
@@ -33,7 +37,7 @@ interface ServerMessage {
   message?: string;
 }
 
-export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity }: Props) {
+export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity, onPopOut }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -371,6 +375,33 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity }
           {run.status}
           {run.exitCode != null ? ` (${run.exitCode})` : ''}
         </span>
+        {onPopOut && (
+          <button
+            className="btn term-action term-popout"
+            title="Open this terminal in its own window (drag it back to re-dock)"
+            aria-label="Pop terminal out to its own window"
+            onClick={() => onPopOut(run.runId)}
+          >
+            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+              <path
+                d="M6.5 3.5H3.5A1 1 0 0 0 2.5 4.5V12.5A1 1 0 0 0 3.5 13.5H11.5A1 1 0 0 0 12.5 12.5V9.5"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.3"
+                strokeLinecap="round"
+              />
+              <path
+                d="M9.5 2.5H13.5V6.5M13.5 2.5L8 8"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            Pop out
+          </button>
+        )}
         {stoppable ? (
           <button className="btn btn-danger term-action" onClick={stop}>
             Stop

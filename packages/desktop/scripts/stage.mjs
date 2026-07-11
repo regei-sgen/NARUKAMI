@@ -17,6 +17,7 @@ fs.rmSync(stage, { recursive: true, force: true });
 fs.mkdirSync(stage, { recursive: true });
 
 fs.copyFileSync(path.join(desktop, 'dist-main', 'main.js'), path.join(stage, 'main.js'));
+fs.copyFileSync(path.join(desktop, 'dist-main', 'preload.js'), path.join(stage, 'preload.js'));
 fs.writeFileSync(
   path.join(stage, 'package.json'),
   JSON.stringify({ name: 'narukami-app', version: '1.0.0', main: 'main.js', private: true }, null, 2),
