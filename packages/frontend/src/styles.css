@@ -1875,6 +1875,10 @@ body.resizing-h * {
   margin: 8px 0 0;
   font-size: 13px;
   line-height: 1.55;
+  /* The /eod skill emits a multi-line plain-text report — keep its line breaks
+     and group spacing, wrap long lines, and never force the page to scroll. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* --- theme picker (header) --- */

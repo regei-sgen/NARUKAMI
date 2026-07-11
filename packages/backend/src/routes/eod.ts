@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../db';
-import { AnalyzerError, summarizeDay } from '../services/analyzer';
-import { commitsToText, gitCommitsForDay, type Commit } from '../services/gitLog';
+import { AnalyzerError, runEodSkill } from '../services/analyzer';
+import { gitCommitsForDay, type Commit } from '../services/gitLog';
 
 // Keep the newest N days of EOD entries per project; older ones are pruned.
 const RETENTION_DAYS = 10;
@@ -191,7 +191,10 @@ export async function eodRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  // Generate an AI narrative summary of an EOD entry via `claude -p`.
+  // Generate the day's EOD report by invoking the user's own `/eod` skill via
+  // `claude -p`. The skill gathers its own git/GitHub/prior-EOD context; NARUKAMI
+  // hands it the day's tracked runs and the note (offline work not in the session
+  // or commits) as appended context. Result is stored as the entry's `summary`.
   app.post<{ Params: { eodId: string } }>('/api/eod/:eodId/summarize', async (req, reply) => {
     const entry = await prisma.eodEntry.findUnique({
       where: { id: req.params.eodId },
@@ -203,16 +206,15 @@ export async function eodRoutes(app: FastifyInstance): Promise<void> {
     const runsText = items.map(itemLine).join('\n');
     const { start, end } = boundsForDayKey(entry.day);
     const commits = await gitCommitsForDay(entry.project.path, start, end);
-    const commitsText = commitsToText(commits);
 
     try {
-      const summary = await summarizeDay(
-        entry.project.path,
-        entry.day,
+      const summary = await runEodSkill({
+        projectPath: entry.project.path,
+        projectName: entry.project.name,
+        day: entry.day,
         runsText,
-        commitsText,
-        entry.note ?? '',
-      );
+        note: entry.note ?? '',
+      });
       const updated = await prisma.eodEntry.update({
         where: { id: entry.id },
         data: { summary: summary || null },
