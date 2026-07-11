@@ -43,7 +43,22 @@ processes seconds after it returns, so the server would die immediately.
 
 ## Setup & run
 
-From the repo root:
+**Fastest path — one command** (installs deps, creates the local env, migrates
+the SQLite DB, generates the token, and builds). See
+[`deploy/DEPLOY.md`](deploy/DEPLOY.md) for the full portable/deploy guide,
+including how to reproduce the Claude Code layer (`/narukami`, "Narukami God") on
+any device.
+
+```powershell
+# Windows
+powershell -ExecutionPolicy Bypass -File deploy\bootstrap.ps1
+```
+```bash
+# macOS / Linux
+./deploy/bootstrap.sh
+```
+
+Or do it by hand, from the repo root:
 
 ```bash
 # 1. Install all workspaces
