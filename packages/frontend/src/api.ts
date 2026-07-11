@@ -17,7 +17,10 @@ import type {
 // In the packaged desktop app the backend serves this SPA and injects the token
 // (window.__NARUKAMI__) — so we talk to it same-origin. In dev (Vite on :5173)
 // we fall back to the loopback backend on :4000 + the build-time env token.
-const injected = (window as unknown as { __NARUKAMI__?: { token?: string } }).__NARUKAMI__;
+const injected =
+  typeof window !== 'undefined'
+    ? (window as unknown as { __NARUKAMI__?: { token?: string } }).__NARUKAMI__
+    : undefined;
 const SAME_ORIGIN = injected ? window.location.origin : null;
 
 const API_BASE = SAME_ORIGIN ?? 'http://127.0.0.1:4000';

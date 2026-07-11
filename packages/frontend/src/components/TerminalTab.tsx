@@ -3,6 +3,7 @@ import { Terminal, type IDisposable } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { api, runWsUrl } from '../api';
 import { normalizeStatus } from '../lib/runStatus';
+import { nextReconnectAction, type ReconnectAction } from '../lib/reconnect';
 import { pulseActivity } from '../lib/activityBus';
 import { clearRunActivity, feedRunOutput } from '../lib/runActivity';
 import type { ActiveRun, RunStatus } from '../types';
@@ -60,7 +61,14 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity, 
     let pendingTask = false; // user sent input since the last idle → next idle is a task
     let idleTimer: ReturnType<typeof setTimeout> | null = null;
     // For elevated shells: the liveness poll timer while awaiting UAC + broker.
+    // Also reused to schedule reconnect attempts after a dropped socket.
     let pollTimer: ReturnType<typeof setTimeout> | null = null;
+    // Auto-reconnect: a dropped websocket does NOT kill the server-side pty, so
+    // rather than stranding the tab in 'error' we poll liveness and reattach.
+    // `isReconnect` makes the next open reset the terminal before the backend
+    // replays scrollback, so history isn't printed twice.
+    let reconnectAttempts = 0;
+    let isReconnect = false;
     const goIdle = () => {
       idleTimer = null;
       if (!working) return;
@@ -196,6 +204,20 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity, 
 
       const openSocket = () => {
         if (disposed) return;
+        // Tear down the previous connection's per-socket listeners so reconnects
+        // don't stack duplicate handlers/observers.
+        if (dataDisposable) {
+          dataDisposable.dispose();
+          dataDisposable = null;
+        }
+        if (onWinResize) {
+          window.removeEventListener('resize', onWinResize);
+          onWinResize = null;
+        }
+        if (ro) {
+          ro.disconnect();
+          ro = null;
+        }
         const socket = new WebSocket(runWsUrl(run.runId));
         ws = socket;
         // The backend replays the whole scrollback as one data message on
@@ -210,6 +232,13 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity, 
         };
 
         socket.onopen = () => {
+          // On a reconnect the backend replays the full scrollback as the first
+          // message — clear first so it repaints instead of duplicating.
+          if (isReconnect) {
+            t.reset();
+            isReconnect = false;
+          }
+          reconnectAttempts = 0;
           onStatus(run.runId, 'running', null);
           sendResize();
         };
@@ -269,14 +298,15 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity, 
           }
         };
 
-        socket.onerror = () => {
-          if (!disposed) t.write('\r\n\x1b[31m[websocket error — is the backend running?]\x1b[0m\r\n');
-        };
+        // Let onclose drive recovery — errors are always followed by a close.
+        socket.onerror = () => {};
 
-        // An abnormal close (backend crash/restart) never sends an exit message —
-        // surface it so the tab doesn't stay stuck 'running' forever.
+        // An abnormal close (backend hiccup/restart, transient network) never
+        // sends an exit message. The pty is still alive server-side, so try to
+        // reconnect instead of stranding the tab in 'error'.
         socket.onclose = () => {
-          if (!disposed && !gotExit) onStatus(run.runId, 'error', null);
+          if (disposed || gotExit) return;
+          scheduleReconnect();
         };
 
         onWinResize = () => {
@@ -291,6 +321,57 @@ export function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity, 
           sendResize();
         });
         if (container) ro.observe(container);
+      };
+
+      // Backoff schedule for reconnect attempts (ms). Caps out, then keeps
+      // retrying at the last interval so a long backend restart still recovers.
+      const RECONNECT_DELAYS = [250, 500, 1000, 1500, 2500, 4000];
+      // After this many consecutive failures we assume the backend is really gone
+      // and surface an error (the user can still Restart). Generous so ordinary
+      // hiccups always self-heal silently.
+      const MAX_RECONNECT = 40;
+
+      const scheduleReconnect = () => {
+        if (disposed || gotExit) return;
+        onStatus(run.runId, 'connecting', null);
+        const delay = RECONNECT_DELAYS[Math.min(reconnectAttempts, RECONNECT_DELAYS.length - 1)];
+        reconnectAttempts += 1;
+        if (pollTimer) clearTimeout(pollTimer);
+        pollTimer = setTimeout(() => void tryReconnect(), delay);
+      };
+
+      const tryReconnect = async () => {
+        if (disposed || gotExit) return;
+        let action: ReconnectAction;
+        try {
+          const info = await api.getRun(run.runId);
+          if (disposed || gotExit) return;
+          action = nextReconnectAction(info, reconnectAttempts, MAX_RECONNECT);
+          if (action.kind === 'reconnect') {
+            isReconnect = true; // reset + repaint on the next open
+            openSocket();
+            return;
+          }
+          if (action.kind === 'settle') {
+            // The process ended while we were disconnected — replay its final
+            // history and settle on the real status (don't reconnect to a corpse).
+            const hist = (info.logs ?? []).map((l) => l.chunk).join('');
+            t.reset();
+            if (hist) t.write(hist);
+            gotExit = true;
+            onStatus(run.runId, action.status, action.exitCode);
+            return;
+          }
+        } catch {
+          // Backend momentarily unreachable — retry until the cap, then give up.
+          action = reconnectAttempts >= MAX_RECONNECT ? { kind: 'giveup' } : { kind: 'retry' };
+        }
+        if (action.kind === 'giveup') {
+          onStatus(run.runId, 'error', null);
+          t.write('\r\n\x1b[31m[disconnected — Restart to reconnect]\x1b[0m\r\n');
+          return;
+        }
+        scheduleReconnect();
       };
 
       // An elevated (admin) shell isn't live until the broker connects back after
