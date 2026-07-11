@@ -3,7 +3,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../db';
-import { gitStatus, gitDiffRanges } from '../services/gitStatus';
+import { currentBranch, fileAtHead } from '../services/gitEditor';
 
 // Directories we never descend into when building the file tree — noise + size.
 const IGNORE_DIRS = new Set([
@@ -54,7 +54,7 @@ class PathError extends Error {}
  * the target already exists — verifies its realpath so a symlink can't point
  * outside the root either. Throws PathError on any violation.
  */
-function resolveInProject(root: string, rel: string): string {
+export function resolveInProject(root: string, rel: string): string {
   const rootResolved = path.resolve(root);
   // Strip any leading slash/backslash so an "absolute-looking" input is still
   // treated as relative to the project root rather than the filesystem root.
@@ -155,6 +155,36 @@ export interface SearchMatch {
 }
 
 export async function fileRoutes(app: FastifyInstance): Promise<void> {
+  // Current git branch of the project (real-time label in the editor). Read-only.
+  app.get<{ Params: { id: string } }>('/api/projects/:id/git/branch', async (req, reply) => {
+    const project = await prisma.project.findUnique({ where: { id: req.params.id } });
+    if (!project) return reply.code(404).send({ error: 'Project not found.' });
+    return currentBranch(project.path);
+  });
+
+  // Committed (HEAD) content of a file — the LEFT side of the committed-vs-working
+  // diff. `committed:false` means the file is new/untracked (diff against empty).
+  app.get<{ Params: { id: string }; Querystring: { path?: string } }>(
+    '/api/projects/:id/git/file-head',
+    async (req, reply) => {
+      const project = await prisma.project.findUnique({ where: { id: req.params.id } });
+      if (!project) return reply.code(404).send({ error: 'Project not found.' });
+      const rel = req.query.path;
+      if (typeof rel !== 'string' || !rel.trim()) {
+        return reply.code(400).send({ error: 'A file path is required.' });
+      }
+      let abs: string;
+      try {
+        abs = resolveInProject(project.path, rel); // reuse the editor's path-escape guard
+      } catch (err) {
+        return reply.code(400).send({ error: (err as Error).message });
+      }
+      const relPosix = path.relative(project.path, abs).split(path.sep).join('/');
+      const content = await fileAtHead(project.path, relPosix);
+      return { path: relPosix, committed: content !== null, content: content ?? '' };
+    },
+  );
+
   // Project file tree (bounded, ignore-filtered).
   app.get<{ Params: { id: string } }>('/api/projects/:id/tree', async (req, reply) => {
     const project = await prisma.project.findUnique({ where: { id: req.params.id } });
@@ -198,11 +228,14 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
       const matches: SearchMatch[] = [];
       let truncated = false;
 
+      // Async per-file I/O, deliberately: each await yields the event loop, so
+      // a search over thousands of files can't stall the pty→WebSocket fan-out
+      // of live terminals the way a readFileSync loop did.
       outer: for (const rel of files) {
         const abs = path.join(rootResolved, rel);
         let stat: fs.Stats;
         try {
-          stat = fs.statSync(abs);
+          stat = await fsp.stat(abs);
         } catch {
           continue;
         }
@@ -210,7 +243,7 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
 
         let buf: Buffer;
         try {
-          buf = fs.readFileSync(abs);
+          buf = await fsp.readFile(abs);
         } catch {
           continue;
         }
@@ -230,38 +263,6 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
       }
 
       return { matches, truncated };
-    },
-  );
-
-  // Git working-tree status for the whole project — which files changed since the
-  // last commit (drives the file-tree change markers). Non-repo → isRepo:false.
-  app.get<{ Params: { id: string } }>('/api/projects/:id/git/status', async (req, reply) => {
-    const project = await prisma.project.findUnique({ where: { id: req.params.id } });
-    if (!project) return reply.code(404).send({ error: 'Project not found.' });
-    return gitStatus(project.path);
-  });
-
-  // Changed line ranges for one file (drives the editor's diff gutter). The path
-  // is lexically validated here (rejects `..`/symlink escapes) and git itself runs
-  // with GIT_LITERAL_PATHSPECS so pathspec magic (`:/`, `:(top)`) can't escape.
-  app.get<{ Params: { id: string }; Querystring: { path?: string } }>(
-    '/api/projects/:id/git/diff',
-    async (req, reply) => {
-      const project = await prisma.project.findUnique({ where: { id: req.params.id } });
-      if (!project) return reply.code(404).send({ error: 'Project not found.' });
-
-      const rel = req.query.path;
-      if (typeof rel !== 'string' || !rel.trim()) {
-        return reply.code(400).send({ error: 'A file path is required.' });
-      }
-      try {
-        resolveInProject(project.path, rel); // reject `..` / symlink escapes
-      } catch (err) {
-        return reply.code(400).send({ error: (err as Error).message });
-      }
-
-      const normalized = rel.replace(/^[\\/]+/, '').split('\\').join('/');
-      return gitDiffRanges(project.path, normalized);
     },
   );
 
@@ -307,12 +308,15 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
         path: rel.replace(/^[\\/]+/, '').split('\\').join('/'),
         content: buf.toString('utf8'),
         size: stat.size,
+        // The client sends this back on save so we can detect an on-disk change
+        // made since the file was opened (conflict / last-write-wins guard).
+        mtimeMs: stat.mtimeMs,
       };
     },
   );
 
   // Write a file back to disk (create-or-overwrite within the project root).
-  app.post<{ Params: { id: string }; Body: { path?: string; content?: string } }>(
+  app.post<{ Params: { id: string }; Body: { path?: string; content?: string; baseMtimeMs?: number } }>(
     '/api/projects/:id/file',
     async (req, reply) => {
       const project = await prisma.project.findUnique({ where: { id: req.params.id } });
@@ -320,6 +324,7 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
 
       const rel = req.body?.path;
       const content = req.body?.content;
+      const baseMtimeMs = req.body?.baseMtimeMs;
       if (typeof rel !== 'string' || !rel.trim()) {
         return reply.code(400).send({ error: 'A file path is required.' });
       }
@@ -337,10 +342,19 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(400).send({ error: (err as Error).message });
       }
 
-      // Refuse to clobber a directory.
+      // Refuse to clobber a directory; and, if the caller supplied the mtime it
+      // opened the file at, refuse to silently overwrite an edit made on disk
+      // since then (409). Omitting baseMtimeMs forces the write (explicit override).
       try {
-        if (fs.statSync(abs).isDirectory()) {
+        const st = fs.statSync(abs);
+        if (st.isDirectory()) {
           return reply.code(400).send({ error: 'Path is a directory.' });
+        }
+        if (typeof baseMtimeMs === 'number' && st.mtimeMs > baseMtimeMs) {
+          return reply.code(409).send({
+            error:
+              'This file changed on disk since you opened it. Reload to see the latest, or save again to overwrite.',
+          });
         }
       } catch {
         /* target doesn't exist yet — creating a new file, allowed */
@@ -361,7 +375,9 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
       }
 
       await fsp.writeFile(abs, content, 'utf8');
-      return { ok: true, bytes: Buffer.byteLength(content, 'utf8') };
+      // Return the new mtime so the client can update its conflict baseline.
+      const written = fs.statSync(abs);
+      return { ok: true, bytes: Buffer.byteLength(content, 'utf8'), mtimeMs: written.mtimeMs };
     },
   );
 }

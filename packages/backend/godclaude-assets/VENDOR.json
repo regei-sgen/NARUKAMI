@@ -1,0 +1,16 @@
+{
+  "source": "C:/Users/lloyd/godclaude",
+  "version": "1.7.2",
+  "vendoredAt": "2026-07-08T04:32:12.857Z",
+  "files": [
+    "deterministic-contract.md",
+    "godmode.mjs",
+    "godmode-stats.mjs",
+    "godmonitor.mjs",
+    "godmode-statusline.mjs"
+  ],
+  "dirs": [
+    "hooks",
+    "modes"
+  ]
+}

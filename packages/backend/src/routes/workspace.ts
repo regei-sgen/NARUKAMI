@@ -1,8 +1,18 @@
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../db';
 import { isRunning } from '../services/runner';
+import { openInBrowser, validateDevUrl } from '../services/openUrl';
 
 export async function workspaceRoutes(app: FastifyInstance): Promise<void> {
+  // Open a detected dev-server URL in the system default browser (terminal
+  // toolbar "Open"). Loopback-only — validateDevUrl rejects everything else.
+  app.post<{ Body: { url?: string } }>('/api/open-url', async (req, reply) => {
+    const url = validateDevUrl(req.body?.url);
+    if (!url) return reply.code(400).send({ error: 'Only local http(s) dev-server URLs can be opened.' });
+    openInBrowser(url);
+    return { ok: true, url };
+  });
+
   // The full restorable workspace: open terminal tabs + persisted UI settings.
   app.get('/api/workspace', async () => {
     const runs = await prisma.run.findMany({

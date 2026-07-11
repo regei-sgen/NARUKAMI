@@ -61,7 +61,7 @@ describe('computeStats', () => {
     expect(s.byKind).toEqual({});
   });
 
-  it('counts ok vs failed, sums active time, tracks span + kinds', () => {
+  it('counts ok / killed / failed, sums active time, tracks span + kinds', () => {
     const items: EodItem[] = [
       item({ kind: 'command', status: 'exited', exitCode: 0, durationMs: 5000, startedAt: '2026-07-04T10:00:00.000Z', endedAt: '2026-07-04T10:00:05.000Z' }),
       item({ kind: 'shell', status: 'killed', exitCode: -1, durationMs: 2000, startedAt: '2026-07-04T09:00:00.000Z', endedAt: '2026-07-04T09:00:02.000Z' }),
@@ -70,11 +70,26 @@ describe('computeStats', () => {
     const s = computeStats(items);
     expect(s.total).toBe(3);
     expect(s.ok).toBe(2);
-    expect(s.failed).toBe(1);
+    // A 'killed' run is bucketed as 'killed' (yellow), NOT 'failed' (red) — the
+    // summary now matches the per-item chip colour instead of contradicting it.
+    expect(s.killed).toBe(1);
+    expect(s.failed).toBe(0);
     expect(s.activeMs).toBe(17000);
     expect(s.byKind).toEqual({ command: 1, shell: 1, claude: 1 });
     expect(s.spanStart).toBe('2026-07-04T09:00:00.000Z'); // earliest start
     expect(s.spanEnd).toBe('2026-07-04T12:00:00.000Z'); // latest end
+  });
+
+  it('separates killed (warn) from failed (err) — errors and non-zero exits are failed', () => {
+    const s = computeStats([
+      item({ status: 'killed', exitCode: null }),
+      item({ status: 'error', exitCode: null }),
+      item({ status: 'exited', exitCode: 3 }),
+      item({ status: 'exited', exitCode: 0 }),
+    ]);
+    expect(s.ok).toBe(1);
+    expect(s.killed).toBe(1);
+    expect(s.failed).toBe(2); // error + non-zero exit
   });
 
   it('ignores null durations in the active sum', () => {

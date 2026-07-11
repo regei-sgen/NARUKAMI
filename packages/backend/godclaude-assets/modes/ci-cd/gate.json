@@ -1,0 +1,34 @@
+{
+  "_comment": "ci-cd mode — additive + tightened. Adds ship/deploy claim words and run-observation commands (gh run view, kubectl rollout status, terraform plan, curl to a live URL). Linters are deliberately NOT included. reReadClears:false so re-reading the YAML/IaC does not clear a deploy claim — an observed run is required.",
+  "extraClaim": [
+    "\\bdeployed\\b",
+    "\\bshipped\\b",
+    "\\brolled?\\s*out\\b",
+    "\\brollout\\s+complete\\b",
+    "\\b(pipeline|build|ci)\\s+(is\\s+)?(green|passing)\\b",
+    "\\b(go(es|ne)?\\s+live|is\\s+live|now\\s+live|went\\s+live|live\\s+in\\s+prod(uction)?)\\b",
+    "\\bin\\s+prod(uction)?\\b",
+    "\\bpromoted\\b",
+    "\\b(terraform|tofu|helm|kubectl|pulumi|stack|infra(structure)?|manifest|change[s]?)\\b[^\\n]*\\b(applied|provisioned)\\b",
+    "\\breleased\\b",
+    "\\b(endpoint|service|deploy(ment)?|pod|app|site|host|probe|healthcheck|cluster)\\b[^\\n]*\\b(healthy|reachable)\\b"
+  ],
+  "extraTestCmd": [
+    "\\bgh\\s+run\\s+(view|list|watch)\\b",
+    "\\bglab\\s+ci\\b",
+    "\\bkubectl\\s+(rollout\\s+status|get|diff)\\b",
+    "\\bhelm\\s+status\\b",
+    "\\bterraform\\s+plan\\b",
+    "\\bpulumi\\s+preview\\b",
+    "\\b(cloudformation|describe-stacks|describe-services)\\b",
+    "\\bcurl\\b[^\\n]*\\bhttps?://"
+  ],
+  "extraEvidence": [
+    "\\bconclusion[\"']?\\s*[:=]\\s*[\"']?success\\b",
+    "\\bsuccessfully rolled out\\b",
+    "\\bNo changes\\b[^\\n]*\\binfrastructure\\b",
+    "\\bHTTP[^\\n]*\\b200\\b",
+    "\\b(Healthy|Ready)\\b"
+  ],
+  "reReadClears": false
+}

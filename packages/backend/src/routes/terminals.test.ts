@@ -43,4 +43,14 @@ describe('makeRateLimiter', () => {
     expect(allow('b', 0)).toBe(true); // different key, own budget
     expect(allow('a', 1)).toBe(false);
   });
+
+  it('evicts a fully-expired key rather than carrying stale hits forward', () => {
+    // Exercises the map-eviction path added to stop unbounded growth (one entry
+    // per distinct terminal id ever targeted): once a key's window fully elapses,
+    // it is deleted and a later hit starts fresh.
+    const allow = makeRateLimiter(1, 100);
+    expect(allow('t', 0)).toBe(true);
+    expect(allow('t', 50)).toBe(false); // still in window
+    expect(allow('t', 250)).toBe(true); // window elapsed → evicted → fresh slot
+  });
 });

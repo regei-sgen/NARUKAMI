@@ -72,10 +72,20 @@ export function isAllowedOrigin(origin: string | undefined): boolean {
   }
 }
 
-/** Accept only loopback Host headers (127.0.0.1 / localhost, any port). */
+/** Accept only loopback Host headers (127.0.0.1 / localhost / [::1], any port). */
 export function isAllowedHost(host: string | undefined): boolean {
   if (!host) return false;
-  const h = host.toLowerCase();
+  const h = host.toLowerCase().trim();
+  // Bracketed IPv6 literal, optionally with a port: "[::1]" or "[::1]:4000".
+  // (The old `split(':')[0]` returned "[" here, so the loopback IPv6 branch was
+  // dead and every [::1] Host was wrongly rejected — disagreeing with
+  // isAllowedOrigin, which accepts it.)
+  if (h.startsWith('[')) {
+    const end = h.indexOf(']');
+    if (end === -1) return false;
+    return h.slice(1, end) === '::1';
+  }
+  // hostname[:port] — strip the port.
   const name = h.split(':')[0];
-  return name === '127.0.0.1' || name === 'localhost' || name === '[::1]';
+  return name === '127.0.0.1' || name === 'localhost';
 }

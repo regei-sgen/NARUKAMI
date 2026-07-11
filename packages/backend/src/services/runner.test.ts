@@ -8,6 +8,7 @@ import {
   capTranscript,
   stripAnsi,
   looksLikeTrustPrompt,
+  buildClaudeArgs,
 } from './runner';
 
 const realPlatform = process.platform;
@@ -19,12 +20,13 @@ afterEach(() => {
 });
 
 describe('shellFor', () => {
-  it('uses PowerShell -Command on Windows', () => {
+  it('uses a PowerShell -Command invocation on Windows (pwsh 7+ when available)', () => {
     setPlatform('win32');
-    expect(shellFor('npm run dev')).toEqual({
-      file: 'powershell.exe',
-      args: ['-NoLogo', '-NoProfile', '-Command', 'npm run dev'],
-    });
+    const r = shellFor('npm run dev');
+    // Args are always the -Command form; the file is pwsh (if PATH-resolvable) so
+    // `&&`/`||` chaining works, otherwise Windows PowerShell 5.1.
+    expect(r.args).toEqual(['-NoLogo', '-NoProfile', '-Command', 'npm run dev']);
+    expect(r.file).toMatch(/pwsh(\.exe)?$|powershell\.exe$/i);
   });
   it('uses $SHELL -lc on POSIX', () => {
     setPlatform('linux');
@@ -68,6 +70,53 @@ describe('resolveExecutable', () => {
   });
 });
 
+describe('buildClaudeArgs', () => {
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  it('mints a fresh --session-id for a new session (never --continue)', () => {
+    const { rawArgs, sessionId } = buildClaudeArgs({
+      mcpArgs: ['--mcp-config', 'x.json'],
+      newId: () => 'fixed-id',
+    });
+    expect(sessionId).toBe('fixed-id');
+    expect(rawArgs).toEqual(['--session-id', 'fixed-id', '--mcp-config', 'x.json']);
+    expect(rawArgs).not.toContain('--continue');
+    expect(rawArgs).not.toContain('--resume');
+  });
+
+  it('resumes by explicit id with --resume (never --continue or --session-id)', () => {
+    const newId = () => {
+      throw new Error('newId must NOT be called when resuming');
+    };
+    const { rawArgs, sessionId } = buildClaudeArgs({
+      mcpArgs: [],
+      resumeSessionId: 'abc-123',
+      newId,
+    });
+    expect(sessionId).toBe('abc-123');
+    expect(rawArgs).toEqual(['--resume', 'abc-123']);
+    expect(rawArgs).not.toContain('--continue');
+    expect(rawArgs).not.toContain('--session-id');
+  });
+
+  it('appends mcpArgs AFTER the id args', () => {
+    const { rawArgs } = buildClaudeArgs({
+      mcpArgs: ['--mcp-config', '/tmp/run.json'],
+      resumeSessionId: 'sid',
+    });
+    expect(rawArgs).toEqual(['--resume', 'sid', '--mcp-config', '/tmp/run.json']);
+  });
+
+  it('defaults to a real UUID and gives each fresh session a distinct id', () => {
+    const a = buildClaudeArgs({ mcpArgs: [] });
+    const b = buildClaudeArgs({ mcpArgs: [] });
+    expect(a.sessionId).toMatch(UUID_RE);
+    expect(b.sessionId).toMatch(UUID_RE);
+    expect(a.sessionId).not.toBe(b.sessionId); // separate sessions → separate ids
+    expect(a.rawArgs[0]).toBe('--session-id');
+  });
+});
+
 describe('cleanEnv', () => {
   it('includes string env vars and never yields undefined values', () => {
     process.env.__NARUKAMI_TEST__ = 'hi';
@@ -75,6 +124,33 @@ describe('cleanEnv', () => {
     expect(env.__NARUKAMI_TEST__).toBe('hi');
     expect(Object.values(env).every((v) => typeof v === 'string')).toBe(true);
     delete process.env.__NARUKAMI_TEST__;
+  });
+
+  it('strips NARUKAMI-internal / secret-bearing vars from the spawned child env', () => {
+    const added = {
+      DATABASE_URL: 'file:./dev.db',
+      RUNNER_TOKEN_FILE: '/tmp/.runner-token',
+      PORT: '4000',
+      NARUKAMI_TOKEN: 'super-secret',
+      NARUKAMI_BASE_URL: 'http://127.0.0.1:4000',
+      PRISMA_QUERY_ENGINE_LIBRARY: '/x/engine.node',
+      ORDINARY_VAR_XYZ: 'keepme',
+    };
+    Object.assign(process.env, added);
+    try {
+      const env = cleanEnv();
+      // Secrets / internal wiring must NOT leak into untrusted project commands.
+      expect(env.DATABASE_URL).toBeUndefined();
+      expect(env.RUNNER_TOKEN_FILE).toBeUndefined();
+      expect(env.PORT).toBeUndefined();
+      expect(env.NARUKAMI_TOKEN).toBeUndefined();
+      expect(env.NARUKAMI_BASE_URL).toBeUndefined();
+      expect(env.PRISMA_QUERY_ENGINE_LIBRARY).toBeUndefined();
+      // ...but ordinary vars still pass through.
+      expect(env.ORDINARY_VAR_XYZ).toBe('keepme');
+    } finally {
+      for (const k of Object.keys(added)) delete process.env[k];
+    }
   });
 });
 

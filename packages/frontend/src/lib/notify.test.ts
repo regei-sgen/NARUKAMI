@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { finishToastFor, statusVerb, taskToast, toastText } from './notify';
+import { finishToastFor, shouldShowInAppToast, statusVerb, taskToast, toastText } from './notify';
 import type { ActiveRun, RunStatus } from '../types';
 
 function run(over: Partial<ActiveRun> = {}): ActiveRun {
@@ -87,6 +87,32 @@ describe('taskToast', () => {
 
   it('uses customLabel when present', () => {
     expect(taskToast(run({ customLabel: 'agent-1' }), 1).label).toBe('agent-1');
+  });
+});
+
+describe('shouldShowInAppToast', () => {
+  // p1 is the run's project (see run() default). A focused, visible window.
+  const here = { selectedProjectId: 'p1', focused: true, visible: true };
+  const t = taskToast(run({ kind: 'claude', status: 'running' }), 1);
+
+  it('suppresses when viewing the run\'s own project in a focused window', () => {
+    expect(shouldShowInAppToast(t, here)).toBe(false);
+  });
+
+  it('shows when a DIFFERENT project is selected', () => {
+    expect(shouldShowInAppToast(t, { ...here, selectedProjectId: 'p2' })).toBe(true);
+  });
+
+  it('shows when no project is selected', () => {
+    expect(shouldShowInAppToast(t, { ...here, selectedProjectId: null })).toBe(true);
+  });
+
+  it('shows when the window is not focused (so a backgrounded finish is queued)', () => {
+    expect(shouldShowInAppToast(t, { ...here, focused: false })).toBe(true);
+  });
+
+  it('shows when the tab is hidden (visibilityState !== visible)', () => {
+    expect(shouldShowInAppToast(t, { ...here, visible: false })).toBe(true);
   });
 });
 

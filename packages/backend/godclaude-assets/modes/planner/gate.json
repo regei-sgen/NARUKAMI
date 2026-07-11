@@ -1,0 +1,28 @@
+{
+  "_comment": "planner/architect mode (godplan) — additive + tightened. Adds planning sign-off claim words (plan ready/comprehensive/solid, ready to build, sound approach) and accepts CODEBASE-SURVEY actions as proof a plan is grounded: search/exploration commands (grep/rg/find/git-grep/tree) and the Grep/Glob/code-search tools. reReadClears:false so re-reading the plan you just wrote does NOT clear a 'ready' claim — you must have surveyed the REAL code. Pure in-response plans don't mutate files, so they're gate-exempt; the contract carries the grounding discipline.",
+  "_claimNote": "Each entry is a VERDICT/sign-off on the plan you produced — not neutral description of existing or alternative code. Bare 'good|sound|clear design' (line-6 of the old set) over-matched descriptive prose ('the existing code has a clear design', 'a sound approach but adds a dependency'), so the adjective+noun form is now anchored to 'this is a …'. 'comprehensive|thorough plan' is a real completeness claim and is matched in natural order. The apostrophe class tolerates a typographic ' (U+2019).",
+  "extraClaim": [
+    "\\bplan(\\s+is)?\\s+(ready|complete|comprehensive|solid|final|done|set|locked)\\b",
+    "\\bready\\s+to\\s+(build|implement|execute|code|start|ship)\\b",
+    "\\bthis\\s+is\\s+a\\s+(good|solid|sound|comprehensive|thorough)\\s+(plan|approach|design|architecture)\\b",
+    "\\b(comprehensive|thorough)\\s+(migration\\s+|implementation\\s+)?plan\\b",
+    "\\bthis\\s+(approach|design|plan)\\s+(will|should)\\s+work\\b",
+    "\\bdesign\\s+is\\s+(sound|final|done|ready|settled)\\b",
+    "\\b(the\\s+)?architecture\\s+is\\s+(sound|set|final|settled)\\b",
+    "\\blet['’]s\\s+(build|implement|ship)\\s+(it|this)\\b"
+  ],
+  "_testCmdNote": "Grounding = SEARCHING the real code (not catting your own plan). grep/rg/find/git-grep/tree and the Grep/Glob tools count; a bare re-read of the written plan does not (reReadClears:false).",
+  "extraTestCmd": [
+    "\\b(grep|rg|ripgrep|ag|Select-String)\\b",
+    "\\b(find|fd)\\b",
+    "\\btree\\b",
+    "\\bgit\\s+(grep|log|show|ls-files|diff)\\b",
+    "\\bwc\\s+-l\\b"
+  ],
+  "extraVerifyTools": [
+    "^Grep$",
+    "^Glob$",
+    "mcp__.*(search|symbol|definition|references|outline|codebase|index)"
+  ],
+  "reReadClears": false
+}

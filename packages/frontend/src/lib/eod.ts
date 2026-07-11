@@ -41,7 +41,8 @@ export function fmtTime(iso: string | null): string {
 export interface DayStats {
   total: number;
   ok: number;
-  failed: number;
+  killed: number; // user-stopped (rendered 'warn'/yellow, like the per-item chip)
+  failed: number; // errored / non-zero exit (rendered 'err'/red)
   activeMs: number; // summed run durations
   spanStart: string | null;
   spanEnd: string | null;
@@ -53,6 +54,7 @@ export function computeStats(items: EodItem[]): DayStats {
   const s: DayStats = {
     total: items.length,
     ok: 0,
+    killed: 0,
     failed: 0,
     activeMs: 0,
     spanStart: null,
@@ -60,7 +62,12 @@ export function computeStats(items: EodItem[]): DayStats {
     byKind: {},
   };
   for (const it of items) {
-    if (isOk(it)) s.ok += 1;
+    // Bucket by the SAME classification the per-item chip uses, so the summary
+    // counts can't disagree with the colors below them: a 'killed' run showed
+    // yellow per-item but was previously tallied under the red 'failed' count.
+    const cls = statusClass(it);
+    if (cls === 'ok') s.ok += 1;
+    else if (cls === 'warn') s.killed += 1;
     else s.failed += 1;
     if (it.durationMs != null) s.activeMs += it.durationMs;
     s.byKind[it.kind] = (s.byKind[it.kind] ?? 0) + 1;

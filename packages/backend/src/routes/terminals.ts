@@ -21,11 +21,16 @@ const MAX_READ_LINES = 2_000;
 export function makeRateLimiter(max: number, windowMs: number) {
   const hits = new Map<string, number[]>();
   return function allow(key: string, now: number): boolean {
-    const recent = (hits.get(key) ?? []).filter((t) => now - t < windowMs);
-    if (recent.length >= max) {
-      hits.set(key, recent);
-      return false;
+    // Evict keys whose window has fully elapsed so the map can't grow unbounded
+    // (one permanent entry per distinct terminal id ever targeted). Cheap here:
+    // at most a handful of targets are live within any single window.
+    for (const [k, times] of hits) {
+      const live = times.filter((t) => now - t < windowMs);
+      if (live.length === 0) hits.delete(k);
+      else hits.set(k, live);
     }
+    const recent = hits.get(key) ?? [];
+    if (recent.length >= max) return false;
     recent.push(now);
     hits.set(key, recent);
     return true;
@@ -71,7 +76,14 @@ export async function terminalRoutes(app: FastifyInstance): Promise<void> {
 
       const live = getLiveTranscript(req.params.id);
       if (live !== null) {
-        return { live: true, text: tailLines(stripAnsi(live), lines) };
+        // Bound the work: only the tail can survive tailLines(), so don't run
+        // the ANSI-strip regexes over a potentially multi-MB transcript. Keep a
+        // generous raw window (~512 chars/line, 64KB floor) before stripping; a
+        // truncated escape at the slice edge can only dirty the first (dropped)
+        // line of the window.
+        const window = Math.max(64 * 1024, lines * 512);
+        const raw = live.length > window ? live.slice(-window) : live;
+        return { live: true, text: tailLines(stripAnsi(raw), lines) };
       }
 
       // Not live — hand back persisted history if the run exists at all.
@@ -101,7 +113,13 @@ export async function terminalRoutes(app: FastifyInstance): Promise<void> {
     if (text.length > MAX_SEND_CHARS) {
       return reply.code(413).send({ error: `text exceeds ${MAX_SEND_CHARS} chars.` });
     }
-    if (from && from === targetId) {
+    // `from` (the caller's own run id) is REQUIRED: the self-send guard below is
+    // the anti-feedback-loop backstop, and it can be trivially bypassed by simply
+    // omitting `from`. The only caller — the MCP bridge — always sends it.
+    if (!from) {
+      return reply.code(400).send({ error: 'from (the caller run id) is required.' });
+    }
+    if (from === targetId) {
       return reply.code(400).send({ error: 'A terminal cannot send to itself.' });
     }
     if (!isRunning(targetId)) {

@@ -1,5 +1,6 @@
 import type { Toast } from '../types';
 import { toastText } from '../lib/notify';
+import { Ic, type IconName } from './icons';
 
 interface Props {
   toasts: Toast[];
@@ -7,7 +8,7 @@ interface Props {
   onDismiss: (id: string) => void;
 }
 
-const ICON: Record<Toast['kind'], string> = { shell: '⌨', claude: '✦', command: '▶' };
+const ICON: Record<Toast['kind'], IconName> = { shell: 'shell', claude: 'spark', command: 'play' };
 
 export function Toasts({ toasts, onFocus, onDismiss }: Props) {
   if (toasts.length === 0) return null;
@@ -30,7 +31,7 @@ export function Toasts({ toasts, onFocus, onDismiss }: Props) {
               }
             }}
           >
-            <span className="toast-icon">{ICON[t.kind]}</span>
+            <span className="toast-icon"><Ic name={ICON[t.kind]} /></span>
             <div className="toast-body">
               <div className="toast-title">{title}</div>
               <div className="toast-sub">{body}</div>

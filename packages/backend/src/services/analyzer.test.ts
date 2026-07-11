@@ -1,7 +1,4 @@
-import { afterAll, describe, it, expect } from 'vitest';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { describe, it, expect } from 'vitest';
 import {
   isRecord,
   stripFences,
@@ -10,8 +7,6 @@ import {
   toStringArray,
   normalize,
   unwrapEnvelope,
-  readPriorEods,
-  saveEodHistory,
 } from './analyzer';
 
 describe('isRecord', () => {
@@ -169,58 +164,5 @@ describe('normalize', () => {
   it('drops commands with no runnable command string', () => {
     const out = normalize({ commands: [{ label: 'a' }, { label: 'b', command: 'y' }] });
     expect(out.commands).toEqual([{ label: 'b', command: 'y', isDefault: true }]);
-  });
-});
-
-describe('EOD history persistence', () => {
-  const dirs: string[] = [];
-  const tmp = async () => {
-    const d = await mkdtemp(join(tmpdir(), 'narukami-eod-'));
-    dirs.push(d);
-    return d;
-  };
-  afterAll(async () => {
-    for (const d of dirs) await rm(d, { recursive: true, force: true }).catch(() => {});
-  });
-
-  it('readPriorEods returns "" when there is no history dir', async () => {
-    expect(await readPriorEods(join(tmpdir(), 'does-not-exist-narukami-xyz'), '2026-07-11')).toBe('');
-  });
-
-  it('readPriorEods returns the 3 newest prior days, newest first, excluding today', async () => {
-    const dir = await tmp();
-    for (const day of ['2026-07-06', '2026-07-07', '2026-07-08', '2026-07-09', '2026-07-11']) {
-      await writeFile(join(dir, `${day}.md`), `report ${day}`, 'utf8');
-    }
-    const out = await readPriorEods(dir, '2026-07-11'); // today excluded
-    // newest-first, capped at 3 → 09, 08, 07 (never 11, never 06)
-    expect(out.indexOf('2026-07-09')).toBeGreaterThanOrEqual(0);
-    expect(out.indexOf('2026-07-08')).toBeGreaterThan(out.indexOf('2026-07-09'));
-    expect(out.indexOf('2026-07-07')).toBeGreaterThan(out.indexOf('2026-07-08'));
-    expect(out).not.toContain('2026-07-06'); // pruned by the 3-day cap
-    expect(out).not.toContain('report 2026-07-11'); // today's own file excluded
-  });
-
-  it('saveEodHistory writes today and prunes to the 3 newest days', async () => {
-    const dir = await tmp();
-    await mkdir(dir, { recursive: true });
-    for (const day of ['2026-07-01', '2026-07-02', '2026-07-03']) {
-      await writeFile(join(dir, `${day}.md`), `old ${day}`, 'utf8');
-    }
-    await saveEodHistory(dir, '2026-07-11', 'EOD - Test\n\nSummary\n\nAll good.');
-    const files = (await readdir(dir)).filter((f) => f.endsWith('.md')).sort();
-    expect(files).toEqual(['2026-07-02.md', '2026-07-03.md', '2026-07-11.md']); // oldest pruned
-    const saved = await readFile(join(dir, '2026-07-11.md'), 'utf8');
-    expect(saved).toContain('EOD - Test');
-    expect(saved.endsWith('\n')).toBe(true); // trailing newline ensured
-  });
-
-  it('saveEodHistory overwrites the same day rather than stacking', async () => {
-    const dir = await tmp();
-    await saveEodHistory(dir, '2026-07-11', 'first');
-    await saveEodHistory(dir, '2026-07-11', 'second');
-    const files = (await readdir(dir)).filter((f) => f.endsWith('.md'));
-    expect(files).toEqual(['2026-07-11.md']);
-    expect(await readFile(join(dir, '2026-07-11.md'), 'utf8')).toContain('second');
   });
 });

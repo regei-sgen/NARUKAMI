@@ -22,5 +22,15 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 
+# SQLite WAL sidecars (journal_mode=WAL is set at boot; only dev.db is tracked)
+*.db-wal
+*.db-shm
+# single-instance advisory lock
+.narukami.lock
+
 # packaged archives / large artifacts
 *.zip
+
+# Code Map engine (codebase-memory-mcp) per-repo shareable graph artifact
+.codebase-memory/
+.cbmignore

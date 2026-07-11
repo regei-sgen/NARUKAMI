@@ -3,7 +3,7 @@ import { URL } from 'node:url';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { prisma } from './db';
 import { isAllowedHost, isAllowedOrigin, isValidToken } from './auth';
-import { attach, getFinalState, resizeRun, writeToRun } from './services/runner';
+import { attach, getFinalState, getFinalTranscript, resizeRun, writeToRun } from './services/runner';
 
 interface ClientMessage {
   type: 'input' | 'resize';
@@ -80,14 +80,35 @@ async function handleConnection(ws: WebSocket, runId: string): Promise<void> {
 
   if (attachment) {
     if (attachment.backlog) send(ws, { type: 'data', chunk: attachment.backlog });
+    // Explicit "the run is live" signal so the client can show 'running' only for
+    // an actually-live run — a dead/restored run reaches the slow path below and
+    // gets an 'exit' instead, so it never flashes 'running'.
+    send(ws, { type: 'ready' });
 
     ws.on('message', (raw) => handleClientMessage(runId, raw));
     ws.on('close', () => attachment.unsubscribe());
     return;
   }
 
-  // Slow path: the run isn't live (already finished, or unknown). Replay the
-  // persisted history from the DB and report the final status.
+  // Slow path: the run isn't live. During the brief window AFTER the pty exited
+  // but BEFORE its final log flush committed and the record was deleted, the full
+  // transcript still lives in memory — including the tail not yet in the DB.
+  // Prefer it so a reconnect in that window doesn't replay a truncated history.
+  const memTranscript = getFinalTranscript(runId);
+  if (memTranscript !== null) {
+    if (memTranscript) send(ws, { type: 'data', chunk: memTranscript });
+    const finalState = getFinalState(runId);
+    send(ws, {
+      type: 'exit',
+      status: finalState?.status ?? 'exited',
+      exitCode: finalState?.exitCode ?? null,
+    });
+    ws.close();
+    return;
+  }
+
+  // Otherwise the record is gone — replay the persisted history from the DB and
+  // report the final status.
   const run = await prisma.run.findUnique({
     where: { id: runId },
     include: { logs: { orderBy: { ts: 'asc' } } },

@@ -1,0 +1,33 @@
+{
+  "_comment": "researcher mode — additive. Adds fact-assertion claim words, accepts WebSearch/WebFetch (and fetch-style MCP) as verification tools, and citation/probe evidence. reReadClears stays true.",
+  "extraClaim": [
+    "\\b(the\\s+)?(latest|current|newest)\\b[^\\n]*\\bversion\\b",
+    "\\baccording to\\b",
+    "\\bper the (docs?|source|spec|changelog)\\b",
+    "\\bas of\\b",
+    "\\bdeprecated (in|since)\\b",
+    "\\bintroduced in\\b",
+    "\\b(research|sources?|evidence)\\s+(shows?|indicates?|confirms?)\\b",
+    "\\bthe answer is\\b"
+  ],
+  "extraTestCmd": [
+    "\\bnpm\\s+view\\b",
+    "\\bpip\\s+index\\s+versions\\b",
+    "\\bgh\\s+api\\b",
+    "\\bgit\\s+ls-remote\\b",
+    "\\bcurl\\b[^\\n]*\\bhttps?://"
+  ],
+  "_verifyToolsNote": "Only network/web retrieval counts — a LOCAL code/symbol/file search verifies no external fact, so the mcp patterns require a web/http/browser/crawl token or a known web-search-engine name (not the bare word 'search').",
+  "extraVerifyTools": [
+    "WebSearch",
+    "WebFetch",
+    "mcp__.*(fetch|web|http|browser|crawl)",
+    "mcp__.*(brave|google|tavily|exa|serp|perplexity|kagi|bing|duckduckgo)[^\\n]*search"
+  ],
+  "extraEvidence": [
+    "https?://\\S+",
+    "\\bdoi:\\s*\\S+",
+    "\\bretrieved\\b[^\\n]*\\b20\\d\\d\\b"
+  ],
+  "reReadClears": true
+}

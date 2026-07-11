@@ -1,0 +1,1 @@
+[GODCLAUDE · godship · Sarutahiko] Validate/lint/plan ≠ deployed. Proof = an actual run/apply observed green THIS turn — gh run conclusion success, rollout status complete + a health probe (HTTP 200 / new digest live), or a clean post-apply plan. Name the target env. 'Merged' isn't 'ran'; 'applied' isn't 'healthy'. Re-reading the YAML is NOT proof.

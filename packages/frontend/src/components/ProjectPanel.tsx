@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { api } from '../api';
+import { Ic } from './icons';
 import type { AnalyzerResult, Project, RunCommand } from '../types';
 
 interface Props {
@@ -92,40 +93,38 @@ export function ProjectPanel({
 
   return (
     <div className="panel">
-      <div className="panel-head">
-        <div className="panel-headinfo">
-          <h2>{project.name}</h2>
-          <div className="panel-path">{project.path}</div>
-          <div className="panel-meta">
-            <span className={`status status-${project.status}`}>{project.status}</span>
-            {project.type && <span className="tag">{project.type}</span>}
-            {project.packageMgr && <span className="tag">{project.packageMgr}</span>}
-          </div>
+      <div className="toolbar">
+        <div className="tb-left">
+          <span className="panel-path">{project.path}</span>
+          <span className={`status status-${project.status}`}>{project.status}</span>
+          {project.type && <span className="tag">{project.type}</span>}
+          {project.packageMgr && <span className="tag">{project.packageMgr}</span>}
         </div>
-        <div className="panel-head-actions">
-          <button className="btn btn-shell" onClick={() => onShell(project)}>
-            ⌨ Shell
+        <div className="tb-right">
+          {/* One uniform look for the action row — only Analyze keeps its blade shape. */}
+          <button className="btn btn-action" onClick={() => onShell(project)}>
+            <Ic name="shell" /> Shell
           </button>
           <button
-            className="btn btn-shell"
+            className="btn btn-action"
             title="Open an elevated PowerShell (Administrator) — triggers a UAC prompt"
             onClick={() => onShell(project, true)}
           >
-            🛡 Shell (Admin)
+            <Ic name="shield" /> Shell (Admin)
           </button>
           <button
-            className="btn btn-claude"
+            className="btn btn-action"
             title="Interactive Claude Code session (starts with /effort ultracode)"
             onClick={() => onClaude(project)}
           >
-            ✦ Claude Code
+            <Ic name="spark" /> Claude Code
           </button>
           <button
-            className="btn btn-claude"
+            className="btn btn-action"
             title="Resume the last Claude conversation in this project (claude --continue)"
             onClick={() => onContinueClaude(project)}
           >
-            ✦ Continue
+            <Ic name="spark" /> Continue
           </button>
           <button className="btn btn-primary" onClick={analyze} disabled={analyzing}>
             {analyzing ? 'Analyzing…' : 'Analyze'}
@@ -142,12 +141,12 @@ export function ProjectPanel({
       {analysis?.warnings?.length ? (
         <ul className="warnings">
           {analysis.warnings.map((w, i) => (
-            <li key={i}>⚠ {w}</li>
+            <li key={i}><Ic name="warn" /> {w}</li>
           ))}
         </ul>
       ) : null}
 
-      <h3>Run commands</h3>
+      <h3 className="section-head">Run commands</h3>
       {project.commands.length === 0 ? (
         <div className="muted">
           No commands yet — click <b>Analyze</b> to detect them, or add one below.
@@ -166,7 +165,7 @@ export function ProjectPanel({
               </div>
               <div className="cmd-actions">
                 <button className="btn btn-run" onClick={() => onRun(project, c)}>
-                  ▶ Run
+                  <Ic name="play" /> Run
                 </button>
                 <button className="btn-icon" title="Delete command" onClick={() => del(c.id)}>
                   ×
@@ -218,7 +217,7 @@ export function ProjectPanel({
             disabled={asking}
           />
           <button type="submit" className="btn btn-claude" disabled={asking}>
-            {asking ? 'Asking Claude…' : '✦ Ask Claude'}
+            {asking ? 'Asking Claude…' : <><Ic name="spark" /> Ask Claude</>}
           </button>
         </form>
       </div>

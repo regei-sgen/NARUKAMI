@@ -17,6 +17,7 @@ model Project {
   type        String?   // e.g. "node", "python", "unknown"
   packageMgr  String?   // e.g. "npm", "pnpm", "yarn", "pip", "poetry"
   status      String    @default("registered") // registered | analyzed | error
+  codeMapEmbed Boolean  @default(false) // when true, Claude sessions for this project get the codebase-memory-mcp (Code Map) MCP server attached
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
@@ -50,6 +51,7 @@ model Run {
   name        String?     // user-renamed tab label (persisted)
   dockOpen    Boolean     @default(false)     // is this an open tab in the workspace (restored on reopen)
   pid         Int?
+  claudeSessionId String?  // kind='claude' only: the NARUKAMI-assigned Claude session UUID (--session-id). Own id, kept separate from any native-CLI session; resumes target this id, never `claude --continue`.
   status      String      @default("running") // running | exited | killed | error
   exitCode    Int?
   startedAt   DateTime    @default(now())
@@ -102,4 +104,16 @@ model EodEntry {
 
   @@unique([projectId, day])
   @@index([projectId, day])
+}
+
+// End-of-Day REPORT: one cross-project markdown report per day, generated (AI)
+// from the projects active that day (Claude sessions native+NARUKAMI, runs, git
+// commits). Distinct from EodEntry (the older per-project run snapshot).
+model EodReport {
+  id        String   @id @default(cuid())
+  day       String   @unique // local 'YYYY-MM-DD' — one report per day
+  markdown  String   // the generated report (template format)
+  projects  String   // JSON array of { name, path } included in the report
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }

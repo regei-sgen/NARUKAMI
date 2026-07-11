@@ -1,20 +1,10 @@
 import { execFile } from 'node:child_process';
-import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
 import { promisify } from 'node:util';
 import type { AnalyzerCommand, AnalyzerResult } from '../types';
+import { godSpawnEnv } from './godclaude';
+import { resolveExecutable, wrapForWindows } from './exec';
 
 const execFileAsync = promisify(execFile);
-
-// The /eod skill keeps a per-project history for cross-day continuity, under
-// ~/.claude/eod-history/<slug>/<day>.md. That path is inside Claude Code's own
-// config dir, which it sandboxes tools out of even with --add-dir, so a headless
-// run can't read or write it. NARUKAMI does that file I/O itself in Node instead
-// (see readPriorEods / saveEodHistory) and hands the prior EODs to the skill as
-// context — keeping the skill's continuity logic while dodging the sandbox.
-const EOD_HISTORY_DIR = join(homedir(), '.claude', 'eod-history');
-const EOD_HISTORY_KEEP = 3;
 
 // 32 MiB is plenty for a JSON analysis; guards against a runaway response.
 const MAX_BUFFER = 32 * 1024 * 1024;
@@ -25,27 +15,6 @@ const MAX_BUFFER = 32 * 1024 * 1024;
 // and, for analyze, the per-project lock is never released. Timing out kills the
 // child (SIGKILL) and surfaces a clear error instead of a permanent hang.
 const CLAUDE_TIMEOUT_MS = 120_000;
-
-// The /eod skill does real work headlessly (git log, GitHub PR search, reading
-// prior EODs, writing its history file), so it needs a longer ceiling than the
-// pure text/JSON analyzers above.
-const EOD_SKILL_TIMEOUT_MS = 300_000;
-
-// Tools the /eod skill needs to gather its data (git/gh via Bash, Read/Glob/Grep
-// for docs and files). Passed as an allowlist under `--permission-mode dontAsk`,
-// so exactly these run and every other tool is auto-denied (no interactive
-// approval is possible headless). Deliberately NOT `bypassPermissions` — the EOD
-// button must not silently grant a headless agent unrestricted tool access. No
-// Write: NARUKAMI persists the history file itself (see saveEodHistory).
-const EOD_ALLOWED_TOOLS = 'Bash Read Glob Grep';
-
-// Run the /eod skill with the user's hooks disabled. A heavily-hooked global
-// config (e.g. a SessionStart/Stop "operating contract" that injects instructions)
-// otherwise overrides the skill's "output ONLY the EOD text" with meta-commentary
-// that lands in `.result` instead of the report. `disableAllHooks` skips hooks for
-// THIS headless call only; the user command (~/.claude/commands/eod.md) still
-// resolves (it is discovered from the filesystem, not via a hook).
-const EOD_SETTINGS_OVERRIDE = JSON.stringify({ disableAllHooks: true });
 
 const ANALYZE_PROMPT = `You are analyzing the software project in the current working directory to determine how to install and run it.
 
@@ -200,24 +169,24 @@ export function normalize(parsed: unknown): AnalyzerResult {
   };
 }
 
-async function runClaude(
-  prompt: string,
-  cwd: string,
-  opts: { extraArgs?: string[]; timeoutMs?: number } = {},
-): Promise<string> {
-  const timeoutMs = opts.timeoutMs ?? CLAUDE_TIMEOUT_MS;
+async function runClaude(prompt: string, cwd: string): Promise<string> {
+  // Resolve `claude` to a full path (and route a .cmd/.bat shim through cmd.exe
+  // on Windows). Passing the bare name let libuv find claude.cmd and then throw
+  // EINVAL — surfaced as a misleading "not on PATH" error — for npm-global
+  // installs, which is how Claude Code is normally installed on Windows.
+  const claudeBin = resolveExecutable('claude');
+  const { file, args } = wrapForWindows(claudeBin, ['-p', prompt, '--output-format', 'json']);
   try {
-    const { stdout } = await execFileAsync(
-      'claude',
-      ['-p', prompt, '--output-format', 'json', ...(opts.extraArgs ?? [])],
-      {
-        cwd,
-        maxBuffer: MAX_BUFFER,
-        windowsHide: true,
-        timeout: timeoutMs,
-        killSignal: 'SIGKILL',
-      },
-    );
+    const { stdout } = await execFileAsync(file, args, {
+      cwd,
+      maxBuffer: MAX_BUFFER,
+      windowsHide: true,
+      timeout: CLAUDE_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+      // Headless analysis sessions are NARUKAMI sessions too — same embedded
+      // godclaude home as the interactive terminals.
+      env: { ...process.env, ...godSpawnEnv() },
+    });
     return stdout;
   } catch (err) {
     const e = err as ExecError;
@@ -231,7 +200,7 @@ async function runClaude(
     // headless run — say so, since it can't be answered from here.
     if (e.killed) {
       throw new AnalyzerError(
-        `claude -p timed out after ${timeoutMs / 1000}s and was killed. A hook or a ` +
+        `claude -p timed out after ${CLAUDE_TIMEOUT_MS / 1000}s and was killed. A hook or a ` +
           `permission/folder-trust gate in this project likely blocked the headless run — ` +
           `open the folder in Claude Code once to trust it, or loosen the blocking hook, then retry.`,
         e.stdout || e.stderr || '',
@@ -343,131 +312,99 @@ Explain briefly why it most likely failed and give concrete steps to fix it. Res
   return unwrapEnvelope(stdout);
 }
 
-/** The skill's per-project history slug: basename of the git repo root at
- * `projectPath` (fallback: the directory basename). Matches the /eod command's
- * own `basename $(git rev-parse --show-toplevel || pwd)`. */
-async function eodHistorySlug(projectPath: string): Promise<string> {
-  try {
-    const { stdout } = await execFileAsync('git', ['-C', projectPath, 'rev-parse', '--show-toplevel'], {
-      timeout: 10_000,
-      windowsHide: true,
-    });
-    const root = stdout.trim();
-    if (root) return basename(root);
-  } catch {
-    // not a git repo / git missing — fall through to the dir basename
-  }
-  return basename(projectPath);
+/**
+ * Write a concise end-of-day narrative for a project from the day's finished
+ * runs (+ the user's note). Plain prose, first-person, a few sentences.
+ */
+export async function summarizeDay(
+  projectPath: string,
+  day: string,
+  runsText: string,
+  commitsText: string,
+  note: string,
+): Promise<string> {
+  const prompt = `You are writing a short end-of-day work summary for a software project, for ${day}.
+
+Features/changes committed to git today (subject + details per commit):
+"""
+${commitsText.slice(-9000) || '(no commits today)'}
+"""
+
+Runs that finished in the project today (label · kind · status · duration):
+"""
+${runsText.slice(-6000) || '(no finished runs recorded)'}
+"""
+
+${note ? `The developer's own note for the day:\n"""\n${note.slice(0, 2000)}\n"""\n` : ''}
+Write a concise, factual end-of-day summary (2-5 sentences, plain text, no markdown, no bullet list). Lead with the features/changes that were added (from the commits); mention notable run failures if any. If there's very little signal, say so briefly. Do not invent specifics that aren't supported by the data.`;
+
+  const stdout = await runClaude(prompt, projectPath);
+  return unwrapEnvelope(stdout).trim();
 }
 
-/** The up-to-3 most recent prior EOD reports for a project (newest first),
- * excluding `day` itself. '' when there's no history yet. Best-effort. */
-export async function readPriorEods(historyDir: string, day: string): Promise<string> {
-  try {
-    const files = (await readdir(historyDir))
-      .filter((f) => f.endsWith('.md') && f !== `${day}.md`)
-      .sort() // filenames are YYYY-MM-DD.md, so lexical sort == chronological
-      .reverse()
-      .slice(0, EOD_HISTORY_KEEP);
-    const blocks: string[] = [];
-    for (const f of files) {
-      const text = (await readFile(join(historyDir, f), 'utf8')).trim();
-      if (text) blocks.push(`----- ${f.replace(/\.md$/, '')} -----\n${text}`);
-    }
-    return blocks.join('\n\n');
-  } catch {
-    return '';
-  }
-}
-
-/** Persist today's report (one file per day, overwrite) and prune to the newest
- * EOD_HISTORY_KEEP days. Done in Node because the headless skill is sandboxed out
- * of ~/.claude. Best-effort — a failed save never fails the request. */
-export async function saveEodHistory(historyDir: string, day: string, report: string): Promise<void> {
-  try {
-    await mkdir(historyDir, { recursive: true });
-    await writeFile(join(historyDir, `${day}.md`), report.endsWith('\n') ? report : `${report}\n`, 'utf8');
-    const stale = (await readdir(historyDir))
-      .filter((f) => f.endsWith('.md'))
-      .sort()
-      .reverse()
-      .slice(EOD_HISTORY_KEEP);
-    for (const f of stale) await rm(join(historyDir, f), { force: true }).catch(() => {});
-  } catch {
-    // best-effort; the report is also stored in NARUKAMI's own DB
-  }
+export interface EodProjectInput {
+  name: string;
+  commitsText: string;
+  runsText: string;
+  sessions: number;
+  sessionContext: string; // the developer's actual prompts/tasks from that day's Claude sessions
 }
 
 /**
- * Generate the end-of-day report by invoking the user's OWN `/eod` skill
- * (~/.claude/commands/eod.md) headlessly in the project directory, rather than a
- * bespoke inline prompt. The skill does its own wide-net data gathering — merged
- * GitHub PRs, local branches, the day's git log — and emits the user's exact EOD
- * format and continuity logic.
- *
- * NARUKAMI supplies, as appended system context (kept separate from the
- * `/eod <day>` argument so the skill's date parsing stays clean):
- *   - the day's tracked runs (Claude sessions / commands NARUKAMI executed),
- *   - the developer's note for work NOT in commits and NOT in the tracked session
- *     (offline/manual work), and
- *   - the prior EODs for continuity (read from history in Node).
- * It then persists the returned report to history itself. The skill is told to
- * skip its own history read/write, since it is sandboxed out of ~/.claude.
- *
- * Runs with `--permission-mode dontAsk` + an explicit `--allowedTools` allowlist
- * (no Write) and a longer timeout. Intentionally not `bypassPermissions`.
+ * Generate a cross-project End-of-Day report for `prettyDate` in the FIXED
+ * template format (## EOD -- date → ### Project bullets → ### Summary). One
+ * `claude -p` call over every selected project's git commits + runs + session
+ * activity. Returns markdown with any surrounding code fence stripped.
  */
-export async function runEodSkill(args: {
-  projectPath: string;
-  projectName: string;
-  day: string;
-  runsText: string;
-  note: string;
-}): Promise<string> {
-  const { projectPath, projectName, day, runsText, note } = args;
+export async function generateEodReport(
+  cwd: string,
+  prettyDate: string,
+  projects: EodProjectInput[],
+  note: string,
+): Promise<string> {
+  const blocks = projects
+    .map(
+      (p) => `## PROJECT: ${p.name}  (${p.sessions} Claude session(s) active today)
+Git commits today (subject + details):
+"""
+${p.commitsText.slice(-4000) || '(no commits today)'}
+"""
+Runs that finished today:
+"""
+${p.runsText.slice(-1500) || '(none recorded)'}
+"""
+What the developer actually worked on in Claude sessions today (their own prompts/tasks — use this to describe the work when commits are thin):
+"""
+${p.sessionContext.slice(-3000) || '(no session context captured)'}
+"""`,
+    )
+    .join('\n\n');
 
-  const historyDir = join(EOD_HISTORY_DIR, await eodHistorySlug(projectPath));
-  const priorEods = await readPriorEods(historyDir, day);
+  const prompt = `You are writing a developer's End-of-Day report for ${prettyDate}, in a FIXED markdown format.
 
-  // Appended to the system prompt. execFile passes this as one argv element (no
-  // shell), so the note / run / prior-EOD text can't break out or inject flags.
-  const context = [
-    `This /eod run was triggered by NARUKAMI (a local project runner) for the project "${projectName}" at ${projectPath}, for ${day}. Treat ${day} as the target date regardless of any other text in the command arguments.`,
-    '',
-    'NARUKAMI handles history for you: it has already read the prior EODs (below) and will save this report to ~/.claude/eod-history itself. Do NOT try to read or write that directory — you are sandboxed out of it. Do all your OTHER data gathering (git log, GitHub PRs, branches, docs) as normal, and output ONLY the final EOD text.',
-    '',
-    'NARUKAMI recorded activity that git history alone does not show. Fold the relevant parts into the report, following the EXACT style and format the /eod command specifies — do not add sections or commentary it does not ask for.',
-    '',
-    'Tracked runs today — the Claude sessions, commands, and shells NARUKAMI executed in this project (label · kind · status · duration). This is "the Claude session" side of the work:',
-    '"""',
-    runsText.trim() ? runsText.slice(-6000) : '(no tracked runs recorded)',
-    '"""',
-    '',
-    "Developer's note — work done today that is NOT in git commits and NOT in the tracked runs above (offline/manual work: meetings, decisions, reviews, ops). Treat it as first-hand truth and include it in the report:",
-    '"""',
-    note.trim() ? note.slice(0, 2000) : '(no note provided)',
-    '"""',
-    '',
-    priorEods
-      ? `Prior EODs for this project, most recent first — use them for continuity exactly as the command says (never re-list a feature already covered; report only today's deltas as follow-ups):\n"""\n${priorEods.slice(-8000)}\n"""`
-      : 'No prior EODs recorded for this project yet — this is the first tracked day, so no continuity dedupe is needed.',
-  ].join('\n');
+Output EXACTLY this structure and NOTHING else (no preamble, no explanation, no code fences):
 
-  const stdout = await runClaude(`/eod ${day}`, projectPath, {
-    extraArgs: [
-      '--permission-mode',
-      'dontAsk',
-      '--allowedTools',
-      EOD_ALLOWED_TOOLS,
-      '--settings',
-      EOD_SETTINGS_OVERRIDE,
-      '--append-system-prompt',
-      context,
-    ],
-    timeoutMs: EOD_SKILL_TIMEOUT_MS,
-  });
+## EOD -- ${prettyDate}
 
-  const report = unwrapEnvelope(stdout).trim();
-  if (report) await saveEodHistory(historyDir, day, report);
-  return report;
+### <Project Name>
+-   <2-4 concise, past-tense bullets of what was accomplished>
+
+(repeat one "### <Project Name>" section for EACH project listed below, in the given order)
+
+### Summary
+-   <1-2 bullets summarizing the whole day across the projects>
+
+Rules:
+- Use each project's name EXACTLY as given (the text after "## PROJECT:", before the parenthetical).
+- Base every bullet on the git commits / runs / session tasks provided. Condense related work into readable outcomes ("Built X", "Added Y", "Fixed Z"). Do NOT invent specifics or numbers not present.
+- Bullets are short, factual, past tense — 2-4 per project.
+- If a project has NO commits, write real bullets from "What the developer actually worked on" (their session tasks) — describe the actual work. Do NOT emit filler like "Worked on <name> across N sessions"; only fall back to that if there is genuinely no commit AND no session context.
+${note ? `- Weave in the developer's own note where relevant:\n"""\n${note.slice(0, 1500)}\n"""` : ''}
+
+Projects (in order):
+
+${blocks}`;
+
+  const stdout = await runClaude(prompt, cwd);
+  return stripFences(unwrapEnvelope(stdout)).trim();
 }

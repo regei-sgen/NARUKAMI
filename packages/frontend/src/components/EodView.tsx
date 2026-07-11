@@ -1,97 +1,153 @@
-import { useCallback, useEffect, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
-import type { EodEntry, EodItem, Project } from '../types';
-import { computeStats, fmtDuration, fmtTime, statusClass, todayKey } from '../lib/eod';
+import type { EodActiveProject, EodReportDoc } from '../types';
+import { todayKey } from '../lib/eod';
+import { Ic } from './icons';
 
-interface Props {
-  project: Project;
+/**
+ * Convert the report markdown to Slack mrkdwn so it can be pasted straight into
+ * Slack: `#`/`##`/`###` headings → `*bold*`, `-`/`*` bullets → `• `, `---` → blank.
+ * Exported for testing.
+ */
+export function toSlack(md: string): string {
+  const out: string[] = [];
+  for (const raw of md.split('\n')) {
+    const line = raw.replace(/\s+$/, '');
+    if (/^-{3,}$/.test(line.trim())) {
+      out.push('');
+      continue;
+    }
+    const h = line.match(/^#{1,6}\s+(.*)$/);
+    if (h) {
+      out.push(`*${h[1].replace(/^EOD\s*--\s*/, 'EOD — ')}*`);
+      continue;
+    }
+    const b = line.match(/^\s*[-*]\s+(.*)$/);
+    if (b) {
+      out.push(`• ${b[1]}`);
+      continue;
+    }
+    out.push(line);
+  }
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
-const KIND_ICON: Record<string, string> = { shell: '⌨', claude: '✦', command: '▶' };
+/** Render Slack mrkdwn to styled elements for the on-screen preview. */
+export function renderSlack(slack: string): ReactNode[] {
+  return slack.split('\n').map((line, i) => {
+    if (!line.trim()) return <div key={i} className="eods-gap" />;
+    const bold = line.match(/^\*(.+)\*$/);
+    if (bold) return <div key={i} className="eods-h">{bold[1]}</div>;
+    if (line.startsWith('• ')) return <div key={i} className="eods-b">{line}</div>;
+    return <div key={i} className="eods-p">{line}</div>;
+  });
+}
 
-export function EodView({ project }: Props) {
-  const [entries, setEntries] = useState<EodEntry[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState<string | null>(null);
+export function EodView() {
+  const [day, setDay] = useState<string>(todayKey());
+  const [active, setActive] = useState<EodActiveProject[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [note, setNote] = useState('');
-  const [compiling, setCompiling] = useState(false);
-  const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editValue, setEditValue] = useState('');
-  const [summarizingId, setSummarizingId] = useState<string | null>(null);
+  const [loadingActive, setLoadingActive] = useState(true);
+  const [generating, setGenerating] = useState(false);
+  const [report, setReport] = useState<EodReportDoc | null>(null);
+  const [reports, setReports] = useState<EodReportDoc[]>([]);
+  const [err, setErr] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setErr(null);
+  const loadReports = useCallback(async () => {
     try {
-      setEntries(await api.listEod(project.id));
+      setReports(await api.listEodReports());
+    } catch (e) {
+      setErr((e as Error).message);
+    }
+  }, []);
+
+  // On day change: detect active projects (default all selected) + load any saved
+  // report already generated for that day.
+  const loadDay = useCallback(async (d: string) => {
+    setLoadingActive(true);
+    setErr(null);
+    setReport(null);
+    try {
+      const [res, saved] = await Promise.all([api.getEodActive(d), api.listEodReports()]);
+      setActive(res.projects);
+      setSelected(new Set(res.projects.map((p) => p.path)));
+      setReports(saved);
+      setReport(saved.find((r) => r.day === d) ?? null);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
-      setLoading(false);
+      setLoadingActive(false);
     }
-  }, [project.id]);
+  }, []);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    void loadDay(day);
+  }, [day, loadDay]);
 
-  // Replace one entry in place (after note/summary edits) without a full reload.
-  const patchEntry = (e: EodEntry) => setEntries((cur) => cur.map((x) => (x.id === e.id ? e : x)));
+  const toggle = (path: string) =>
+    setSelected((cur) => {
+      const next = new Set(cur);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
 
-  const compile = async () => {
-    setCompiling(true);
+  const generate = async () => {
+    const paths = active.filter((p) => selected.has(p.path)).map((p) => p.path);
+    if (paths.length === 0) return;
+    setGenerating(true);
     setErr(null);
     try {
-      const entry = await api.compileEod(project.id, note.trim() || undefined);
-      setNote('');
-      setExpandedId(entry.id);
-      await load();
+      const r = await api.generateEodReport(day, paths, note.trim() || undefined);
+      setReport(r);
+      await loadReports();
     } catch (e) {
       setErr((e as Error).message);
     } finally {
-      setCompiling(false);
+      setGenerating(false);
     }
   };
 
-  const saveNote = async (id: string) => {
+  const openSaved = async (r: EodReportDoc) => {
+    setDay(r.day); // triggers loadDay, which will pick up this saved report
+  };
+
+  const removeReport = async (id: string) => {
     try {
-      patchEntry(await api.updateEodNote(id, editValue.trim()));
-      setEditingId(null);
+      await api.deleteEodReport(id);
+      if (report?.id === id) setReport(null);
+      await loadReports();
     } catch (e) {
       setErr((e as Error).message);
     }
   };
 
-  const summarize = async (id: string) => {
-    setSummarizingId(id);
-    setErr(null);
-    try {
-      patchEntry(await api.summarizeEod(id));
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setSummarizingId(null);
-    }
+  const copy = () => {
+    if (report) void navigator.clipboard?.writeText(toSlack(report.markdown));
+  };
+  const download = () => {
+    if (!report) return;
+    const blob = new Blob([toSlack(report.markdown)], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `EOD_${report.day}_slack.txt`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
   };
 
-  const remove = async (id: string) => {
-    try {
-      await api.deleteEod(id);
-      await load();
-    } catch (e) {
-      setErr((e as Error).message);
-    }
-  };
-
-  const today = todayKey();
+  const selectedCount = useMemo(() => active.filter((p) => selected.has(p.path)).length, [active, selected]);
 
   return (
     <div className="eod">
       <div className="eod-head">
         <h2>End of Day</h2>
         <div className="muted">
-          {project.name} · keeps the last 10 days · compiles today's finished runs
+          Detects every project active on a day (native + NARUKAMI Claude sessions, runs, git commits) and generates a
+          report you can include, copy, or download.
         </div>
       </div>
 
@@ -101,203 +157,114 @@ export function EodView({ project }: Props) {
         </div>
       )}
 
-      <div className="eod-compile">
-        <textarea
-          className="eod-note-input"
-          value={note}
-          onChange={(e) => setNote(e.target.value)}
-          placeholder="Anything not in your commits or Claude sessions? Meetings, decisions, offline work — folded into the /eod report (optional)"
-          rows={2}
-          spellCheck
-        />
-        <button className="btn btn-claude eod-compile-btn" onClick={compile} disabled={compiling}>
-          {compiling ? 'Compiling…' : '✦ Compile today'}
-        </button>
-      </div>
-
-      {loading ? (
-        <div className="muted eod-empty">Loading…</div>
-      ) : entries.length === 0 ? (
-        <div className="muted eod-empty">
-          No EOD entries yet. Click <b>Compile today</b> to snapshot what this project finished today.
-        </div>
-      ) : (
-        <ul className="eod-list">
-          {entries.map((e) => {
-            const open = expandedId === e.id;
-            const stats = computeStats(e.items);
-            return (
-              <li key={e.id} className={`eod-entry${e.day === today ? ' eod-today' : ''}`}>
-                <div className="eod-entry-head" onClick={() => setExpandedId(open ? null : e.id)}>
-                  <span className="eod-caret">{open ? '▾' : '▸'}</span>
-                  <span className="eod-title">
-                    EOD — {project.name} · {e.day}
-                    {e.day === today && <span className="eod-badge">today</span>}
-                  </span>
-                  <span className="eod-count">{stats.total} finished</span>
-                  <button
-                    className="btn-icon eod-del"
-                    title="Delete this EOD"
-                    onClick={(ev) => {
-                      ev.stopPropagation();
-                      void remove(e.id);
-                    }}
-                  >
+      <div className="eod-layout">
+        <aside className="eod-card eod-saved">
+          <div className="eod-card-head">
+            <span>Saved days</span>
+            <span className="eod-card-sub">{reports.length || 'none'}</span>
+          </div>
+          {reports.length === 0 ? (
+            <div className="muted eod-saved-empty">Generated reports land here.</div>
+          ) : (
+            <ul className="eod-saved-list">
+              {reports.map((r) => (
+                <li key={r.id} className={`eod-saved-item${r.day === day ? ' active' : ''}`}>
+                  <button className="eod-saved-day" onClick={() => void openSaved(r)}>
+                    <span>{r.day}</span>
+                    <span className="eod-saved-count">{r.projects.length} proj</span>
+                  </button>
+                  <button className="btn-icon eod-saved-del" title="Delete report" onClick={() => void removeReport(r.id)}>
                     ×
                   </button>
-                </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </aside>
 
-                {/* Always-visible stats strip. */}
-                <div className="eod-stats">
-                  <span className="eod-stat">
-                    <b>{stats.total}</b> runs
-                  </span>
-                  <span className="eod-stat s-ok">
-                    <b>{stats.ok}</b> ok
-                  </span>
-                  <span className={`eod-stat ${stats.failed ? 's-err' : ''}`}>
-                    <b>{stats.failed}</b> failed
-                  </span>
-                  <span className="eod-stat">
-                    active <b>{fmtDuration(stats.activeMs)}</b>
-                  </span>
-                  {stats.spanStart && (
-                    <span className="eod-stat">
-                      {fmtTime(stats.spanStart)}–{fmtTime(stats.spanEnd)}
-                    </span>
-                  )}
-                  {Object.entries(stats.byKind).map(([k, n]) => (
-                    <span key={k} className="eod-stat eod-kindchip">
-                      {KIND_ICON[k] ?? '•'} {n}
-                    </span>
-                  ))}
-                  {e.commits.length > 0 && (
-                    <span className="eod-stat eod-featchip">
-                      ✚ {e.commits.length} {e.commits.length === 1 ? 'feature' : 'features'}
-                    </span>
-                  )}
-                </div>
+        <div className="eod-main">
+          {/* 01 — the day and what was touched */}
+          <section className="eod-card">
+            <div className="eod-card-head">
+              <span><b className="eod-step">01</b> Day &amp; projects</span>
+              <span className="eod-card-sub">
+                {loadingActive ? 'detecting…' : `${active.length} active · ${selectedCount} selected`}
+              </span>
+            </div>
+            <div className="eod-controls">
+              <label className="eod-daypick">
+                Day
+                <input type="date" value={day} max={todayKey()} onChange={(e) => setDay(e.target.value || todayKey())} />
+              </label>
+              <button
+                className="btn btn-ghost eod-refresh"
+                onClick={() => void loadDay(day)}
+                disabled={loadingActive}
+                title="Re-scan Claude sessions, runs and commits for this day"
+              >
+                {loadingActive ? <><Ic name="refresh" /> Detecting…</> : <><Ic name="refresh" /> Refresh</>}
+              </button>
+            </div>
 
-                {open && (
-                  <div className="eod-body">
-                    {/* Features/changes added that day, from git commits. */}
-                    <div className="eod-features">
-                      <div className="eod-features-head">
-                        Features added
-                        <span className="eod-features-count">{e.commits.length}</span>
-                      </div>
-                      {e.commits.length === 0 ? (
-                        <div className="muted eod-features-empty">
-                          No commits recorded for this day (not a git repo, or nothing committed).
-                        </div>
-                      ) : (
-                        <ul className="eod-commits">
-                          {e.commits.map((c) => (
-                            <li key={c.hash} className="eod-commit">
-                              <div className="eod-commit-top">
-                                <span className="eod-commit-subject">{c.subject}</span>
-                                {c.filesChanged != null && (
-                                  <span className="eod-commit-files">
-                                    {c.filesChanged} {c.filesChanged === 1 ? 'file' : 'files'}
-                                  </span>
-                                )}
-                                <code className="eod-commit-hash">{c.hash}</code>
-                              </div>
-                              {c.body && <pre className="eod-commit-body">{c.body}</pre>}
-                            </li>
-                          ))}
-                        </ul>
-                      )}
+            {!loadingActive && active.length === 0 ? (
+              <div className="muted eod-empty">No project activity detected on {day}.</div>
+            ) : (
+              <ul className="eod-active">
+                {active.map((p) => (
+                  <li key={p.path} className="eod-active-item">
+                    <label className="eod-check">
+                      <input type="checkbox" checked={selected.has(p.path)} onChange={() => toggle(p.path)} />
+                      <span className="eod-active-name">{p.name}</span>
+                      {!p.registered && <span className="eod-tag-ext" title={p.path}>ext</span>}
+                    </label>
+                    <div className="eod-active-badges">
+                      {p.commits > 0 && <span className="eod-badge-c" title="git commits"><Ic name="plus" /> {p.commits}</span>}
+                      {p.sessions > 0 && <span className="eod-badge-s" title="Claude sessions (native + NARUKAMI)"><Ic name="spark" /> {p.sessions}</span>}
+                      {p.runs > 0 && <span className="eod-badge-r" title="NARUKAMI runs"><Ic name="play" /> {p.runs}</span>}
                     </div>
+                    <code className="eod-active-path" title={p.path}>{p.path}</code>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
 
-                    {e.items.length === 0 ? (
-                      <div className="muted">No finished runs recorded for this day.</div>
-                    ) : (
-                      <ul className="eod-items">
-                        {e.items.map((it: EodItem, i) => (
-                          <li key={i} className="eod-item">
-                            <span className="eod-item-icon">{KIND_ICON[it.kind] ?? '•'}</span>
-                            <span className="eod-item-label">{it.label}</span>
-                            {it.command && <code className="eod-item-cmd">{it.command}</code>}
-                            <span className="eod-item-dur">{fmtDuration(it.durationMs)}</span>
-                            <span className="eod-item-time">{fmtTime(it.endedAt)}</span>
-                            <span className={`eod-item-status s-${statusClass(it)}`}>
-                              {it.status}
-                              {it.exitCode != null ? ` (${it.exitCode})` : ''}
-                            </span>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
+          {/* 02 — note + generate */}
+          <section className="eod-card">
+            <div className="eod-card-head">
+              <span><b className="eod-step">02</b> Note &amp; generate</span>
+              {generating && <span className="eod-card-sub">Claude is writing — up to a minute</span>}
+            </div>
+            <textarea
+              className="eod-note-input"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="Optional note to weave into the report…"
+              rows={2}
+              spellCheck
+            />
+            <div className="eod-gen-row">
+              <button className="btn btn-claude" onClick={() => void generate()} disabled={generating || selectedCount === 0}>
+                {generating ? <><Ic name="spark" /> Generating…</> : report ? <><Ic name="spark" /> Regenerate report</> : <><Ic name="spark" /> Generate report</>}
+              </button>
+            </div>
+          </section>
 
-                    {/* Full EOD report, generated by the user's own /eod skill. */}
-                    <div className="eod-summary">
-                      <div className="eod-summary-head">
-                        <span className="eod-summary-label">EOD report</span>
-                        <button
-                          className="btn btn-claude eod-sum-btn"
-                          onClick={() => void summarize(e.id)}
-                          disabled={summarizingId === e.id}
-                        >
-                          {summarizingId === e.id
-                            ? 'Running /eod…'
-                            : e.summary
-                              ? '✦ Re-run /eod'
-                              : '✦ Run /eod skill'}
-                        </button>
-                      </div>
-                      {e.summary ? (
-                        <p className="eod-summary-text">{e.summary}</p>
-                      ) : (
-                        <p className="muted eod-summary-text">
-                          No EOD report yet — click <b>Run /eod skill</b> to generate one with your
-                          local <code>/eod</code> command. It pulls git, GitHub, and prior EODs, and
-                          folds in your note.
-                        </p>
-                      )}
-                    </div>
-
-                    {/* Editable note. */}
-                    <div className="eod-note">
-                      {editingId === e.id ? (
-                        <div className="eod-note-edit">
-                          <textarea
-                            className="eod-note-input"
-                            value={editValue}
-                            onChange={(ev) => setEditValue(ev.target.value)}
-                            rows={2}
-                            spellCheck
-                          />
-                          <div className="eod-note-actions">
-                            <button className="btn" onClick={() => void saveNote(e.id)}>
-                              Save
-                            </button>
-                            <button className="btn btn-ghost" onClick={() => setEditingId(null)}>
-                              Cancel
-                            </button>
-                          </div>
-                        </div>
-                      ) : (
-                        <div
-                          className="eod-note-view"
-                          onClick={() => {
-                            setEditingId(e.id);
-                            setEditValue(e.note ?? '');
-                          }}
-                          title="Click to edit note"
-                        >
-                          <span className="eod-note-label">Note:</span>{' '}
-                          {e.note ? e.note : <span className="muted">— click to add —</span>}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-      )}
+          {/* 03 — the result */}
+          {report && (
+            <section className="eod-card eod-report">
+              <div className="eod-card-head">
+                <span><b className="eod-step">03</b> Report · {report.day}</span>
+                <span className="eod-report-btns">
+                  <button className="btn" onClick={copy}>Copy for Slack</button>
+                  <button className="btn" onClick={download}>Download .txt</button>
+                </span>
+              </div>
+              <div className="eod-report-body eod-slack">{renderSlack(toSlack(report.markdown))}</div>
+            </section>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

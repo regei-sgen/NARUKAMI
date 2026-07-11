@@ -64,6 +64,10 @@
       {
         "from": "../backend/broker-agent.mjs",
         "to": "broker-agent.mjs"
+      },
+      {
+        "from": "../backend/godclaude-assets",
+        "to": "godclaude-assets"
       }
     ],
     "asarUnpack": [

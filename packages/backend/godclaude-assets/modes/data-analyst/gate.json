@@ -1,0 +1,27 @@
+{
+  "_comment": "data-analyst mode — additive + tightened. Treats reporting a NUMBER as a claim, accepts query/compute engines as proof, and sets reReadClears:false so re-reading the un-run script does not clear a data claim (a real query run is required).",
+  "extraClaim": [
+    "\\b(the\\s+)?(data|numbers?|results?|chart|report)\\s+(shows?|indicates?|confirms?)\\b",
+    "\\b\\d+(\\.\\d+)?\\s*%",
+    "\\breturns?\\s+\\d+\\s+rows?\\b",
+    "\\b(correlat|trend|outlier|significant|driven\\s+by|ties?\\s+out|reconcil)",
+    "\\bno\\s+(nulls?|dupes?|duplicates?)\\b",
+    "\\b(total|average|mean|median|count)\\s+(is|=|of)\\b"
+  ],
+  "extraTestCmd": [
+    "\\b(duckdb|sqlite3|psql|mysql|mariadb|sqlcmd|sqlplus|bq|snowsql|clickhouse-client|databricks)\\b",
+    "\\b(python3?|Rscript)\\b[^\\n]*(\\.(py|r|ipynb|sql)\\b|\\s-c\\b|\\s-e\\b|\\s-m\\s+(pandas|polars|duckdb|papermill|jupyter|sqlite3|sqlalchemy|csv))",
+    "\\bjupyter\\b[^\\n]*(nbconvert|execute)|\\bpapermill\\b",
+    "\\bdbt\\s+(run|test|build)\\b",
+    "\\b(great_expectations|pandera)\\b",
+    "\\bwc\\s+-l\\b"
+  ],
+  "extraEvidence": [
+    "\\b\\d+\\s+rows?\\s+(returned|affected|selected|in set)\\b",
+    "\\bshape:\\s*\\(\\d+,",
+    "\\bdtypes?\\b",
+    "\\bnon-null\\b",
+    "\\bRangeIndex\\b"
+  ],
+  "reReadClears": false
+}

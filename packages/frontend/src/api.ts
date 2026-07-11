@@ -1,16 +1,29 @@
 import type {
   AnalyzerResult,
-  EodEntry,
+  ArgusLogResult,
+  ArgusSessions,
+  ArgusStatus,
+  Armory,
+  CodeChanges,
+  CodeEngineStatus,
+  CodeGraph,
+  CodeNodeDetail,
+  CodeScope,
+  EmbeddedGodAction,
+  EmbeddedGodStatus,
+  EodActiveResponse,
+  EodReportDoc,
   FileContent,
-  GitDiff,
-  GitStatus,
+  FileHead,
+  GitBranch,
+  MemoryGraph,
+  MemoryNoteDetail,
   Project,
   ProjectTree,
   RestoredRun,
   RunCommand,
   UiSettings,
-  UsageReport,
-  UsageWindows,
+  VitalsFeed,
   WorkspaceState,
 } from './types';
 
@@ -49,8 +62,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (res.status === 204) return undefined as T;
 
+  // Parse defensively: a non-2xx response can carry a NON-JSON body (an HTML 500
+  // page, a proxy error). Parsing before the res.ok check, unguarded, threw a raw
+  // SyntaxError instead of the intended "Request failed (500)" message.
   const text = await res.text();
-  const body: unknown = text ? JSON.parse(text) : undefined;
+  let body: unknown;
+  try {
+    body = text ? JSON.parse(text) : undefined;
+  } catch {
+    body = undefined;
+  }
 
   if (!res.ok) {
     const message = (body as ErrorBody | undefined)?.error ?? `Request failed (${res.status})`;
@@ -138,10 +159,19 @@ export const api = {
       `/api/projects/${projectId}/file?path=${encodeURIComponent(filePath)}`,
     ),
 
-  saveFile: (projectId: string, filePath: string, content: string) =>
-    request<{ ok: boolean; bytes: number }>(`/api/projects/${projectId}/file`, {
+  // baseMtimeMs = the file's mtime when it was opened; the backend rejects the
+  // save with 409 if the file changed on disk since (last-write-wins guard).
+  // force=true overwrites regardless (used after the user acknowledges the conflict).
+  saveFile: (
+    projectId: string,
+    filePath: string,
+    content: string,
+    baseMtimeMs?: number,
+    force = false,
+  ) =>
+    request<{ ok: boolean; bytes: number; mtimeMs: number }>(`/api/projects/${projectId}/file`, {
       method: 'POST',
-      body: JSON.stringify({ path: filePath, content }),
+      body: JSON.stringify({ path: filePath, content, baseMtimeMs: force ? undefined : baseMtimeMs }),
     }),
 
   // Case-insensitive content search across the project's files.
@@ -150,15 +180,24 @@ export const api = {
       `/api/projects/${projectId}/search?q=${encodeURIComponent(q)}`,
     ),
 
-  // Git working-tree status (changed files) for the file-tree change markers.
-  getGitStatus: (projectId: string) => request<GitStatus>(`/api/projects/${projectId}/git/status`),
+  // --- editor git integration (read-only) ---
+  getGitBranch: (projectId: string) => request<GitBranch>(`/api/projects/${projectId}/git/branch`),
 
-  // Changed line ranges for one file, for the editor's diff gutter.
-  getGitDiff: (projectId: string, filePath: string) =>
-    request<GitDiff>(`/api/projects/${projectId}/git/diff?path=${encodeURIComponent(filePath)}`),
+  getFileHead: (projectId: string, filePath: string) =>
+    request<FileHead>(`/api/projects/${projectId}/git/file-head?path=${encodeURIComponent(filePath)}`),
 
   // --- workspace / session restore ---
   getWorkspace: () => request<WorkspaceState>('/api/workspace'),
+
+  // Header Instrument Cluster feed: process vitals + account usage windows.
+  getVitals: () => request<VitalsFeed>('/api/vitals'),
+
+  // Open a detected local dev-server URL in the system default browser.
+  openUrl: (url: string) =>
+    request<{ ok: boolean; url: string }>('/api/open-url', {
+      method: 'POST',
+      body: JSON.stringify({ url }),
+    }),
 
   closeRun: (runId: string) =>
     request<{ ok: boolean; stopped: boolean }>(`/api/runs/${runId}/close`, { method: 'POST' }),
@@ -176,37 +215,113 @@ export const api = {
       ...(resume ? { body: JSON.stringify({ continue: true }) } : {}),
     }),
 
-  // --- token-usage telemetry (Dashboard) ---
-  getTelemetry: (projectId: string) =>
-    request<UsageReport>(`/api/projects/${projectId}/telemetry`),
+  // --- end-of-day reports (cross-project, per day) ---
+  getEodActive: (day?: string) =>
+    request<EodActiveResponse>(`/api/eod/active${day ? `?day=${encodeURIComponent(day)}` : ''}`),
 
-  // account-wide rolling-window usage (5h / weekly / hourly) for the limit gauge.
-  getUsageWindows: () => request<UsageWindows>('/api/usage/windows'),
-
-  // --- end-of-day snapshots ---
-  listEod: (projectId: string) => request<EodEntry[]>(`/api/projects/${projectId}/eod`),
-
-  compileEod: (projectId: string, note?: string) =>
-    request<EodEntry>(`/api/projects/${projectId}/eod/compile`, {
+  generateEodReport: (day: string, paths: string[], note?: string) =>
+    request<EodReportDoc>('/api/eod/report', {
       method: 'POST',
-      body: JSON.stringify(note !== undefined ? { note } : {}),
+      body: JSON.stringify({ day, paths, note }),
     }),
 
-  updateEodNote: (eodId: string, note: string) =>
-    request<EodEntry>(`/api/eod/${eodId}/note`, {
-      method: 'POST',
-      body: JSON.stringify({ note }),
-    }),
+  listEodReports: () => request<EodReportDoc[]>('/api/eod/reports'),
 
-  summarizeEod: (eodId: string) =>
-    request<EodEntry>(`/api/eod/${eodId}/summarize`, { method: 'POST' }),
+  getEodReport: (id: string) => request<EodReportDoc>(`/api/eod/reports/${id}`),
 
-  deleteEod: (eodId: string) =>
-    request<{ ok: boolean }>(`/api/eod/${eodId}`, { method: 'DELETE' }),
+  deleteEodReport: (id: string) =>
+    request<{ ok: boolean }>(`/api/eod/reports/${id}`, { method: 'DELETE' }),
 
   saveSettings: (patch: { ui?: UiSettings } & Record<string, unknown>) =>
     request<{ ok: boolean; saved: number }>('/api/settings', {
       method: 'POST',
       body: JSON.stringify(patch),
     }),
+
+  // --- Argus Panoptes (read-only god-monitor over ~/.claude) ---
+  getArgusStatus: () => request<ArgusStatus>('/api/argus/status'),
+
+  getArgusSessions: () => request<ArgusSessions>('/api/argus/sessions'),
+
+  getArgusMemoryGraph: () => request<MemoryGraph>('/api/argus/memory-graph'),
+
+  getArgusNote: (project: string, slug: string) =>
+    request<MemoryNoteDetail>(
+      `/api/argus/memory/note?project=${encodeURIComponent(project)}&slug=${encodeURIComponent(slug)}`,
+    ),
+
+  getArgusLogs: (source: 'monitor' | 'perf' | 'audit', limit = 200) =>
+    request<ArgusLogResult>(
+      `/api/argus/logs?source=${encodeURIComponent(source)}&limit=${limit}`,
+    ),
+
+  // --- Embedded godclaude (NARUKAMI's OWN instance — writable control plane) ---
+  getGodStatus: () => request<EmbeddedGodStatus>('/api/godclaude/status'),
+
+  godInstall: () => request<EmbeddedGodStatus>('/api/godclaude/install', { method: 'POST' }),
+
+  godArm: (on: boolean) =>
+    request<EmbeddedGodAction>('/api/godclaude/arm', {
+      method: 'POST',
+      body: JSON.stringify({ on }),
+    }),
+
+  // Per-session god toggle (terminal toolbar): overlay for ONE Claude session.
+  godArmSession: (sessionId: string, on: boolean) =>
+    request<{ output: string; active: boolean }>('/api/godclaude/arm', {
+      method: 'POST',
+      body: JSON.stringify({ on, sessionId }),
+    }),
+
+  godSessionState: (sessionId: string) =>
+    request<{ installed: boolean; active: boolean; modes: string[] }>(
+      `/api/godclaude/sessions/${encodeURIComponent(sessionId)}/state`,
+    ),
+
+  godMode: (mode: string, sessionId?: string) =>
+    request<EmbeddedGodAction>('/api/godclaude/mode', {
+      method: 'POST',
+      body: JSON.stringify({ mode, sessionId }),
+    }),
+
+  godAutopilot: (on: boolean) =>
+    request<EmbeddedGodAction>('/api/godclaude/autopilot', {
+      method: 'POST',
+      body: JSON.stringify({ on }),
+    }),
+
+  // --- Code Map (project codebase graph via codebase-memory-mcp) ---
+  getCodeEngine: () => request<CodeEngineStatus>('/api/code-graph/engine'),
+
+  generateCodeGraph: (projectId: string, scope: CodeScope) =>
+    request<{ graph: CodeGraph; engine: CodeEngineStatus }>(
+      `/api/projects/${projectId}/code-graph/generate`,
+      { method: 'POST', body: JSON.stringify({ scope }) },
+    ),
+
+  getCodeGraph: (projectId: string, scope: CodeScope) =>
+    request<{ graph: CodeGraph }>(
+      `/api/projects/${projectId}/code-graph?scope=${encodeURIComponent(scope)}`,
+    ),
+
+  getCodeChanges: (projectId: string) =>
+    request<CodeChanges>(`/api/projects/${projectId}/code-graph/changes`),
+
+  // Everything the engine stores about one clicked node — backs the inspector
+  // section rendered under the graph.
+  getCodeNodeDetail: (projectId: string, nodeId: string) =>
+    request<{ detail: CodeNodeDetail }>(
+      `/api/projects/${projectId}/code-graph/node?nodeId=${encodeURIComponent(nodeId)}`,
+    ),
+
+  // Toggle whether this project's Code Map is embedded (as an MCP server) into
+  // the Claude sessions NARUKAMI launches for it.
+  setCodeMapEmbed: (projectId: string, enabled: boolean) =>
+    request<{ codeMapEmbed: boolean }>(`/api/projects/${projectId}/code-graph/embed`, {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
+    }),
+
+  // --- Armory (read-only inventory of skills / hooks / memory / agents / commands) ---
+  getArmory: () => request<Armory>('/api/armory'),
 };

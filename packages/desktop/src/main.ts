@@ -95,6 +95,10 @@ async function createWindow(): Promise<BrowserWindow> {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      // Never throttle the renderer when minimized/occluded: live terminals
+      // keep streaming, and a throttled renderer would stall xterm writes and
+      // idle/activity timers, then burst-replay them on restore (visible lag).
+      backgroundThrottling: false,
     },
   });
   win.setMenuBarVisibility(false);
@@ -154,7 +158,25 @@ function setupAutoUpdate(win: BrowserWindow): void {
   setInterval(check, 15 * 60 * 1000);
 }
 
+// Single-instance guard: a second desktop launch would open the SAME userData
+// SQLite DB as the first and the two would corrupt each other's run bookkeeping
+// (each boot's reconcile marks the other's live runs 'exited'). Refuse the second
+// instance and focus the existing window instead.
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (win) {
+      if (win.isMinimized()) win.restore();
+      win.focus();
+    }
+  });
+}
+
 app.whenReady().then(async () => {
+  if (!hasSingleInstanceLock) return;
   try {
     appUrl = await startBackend();
     const win = await createWindow();
