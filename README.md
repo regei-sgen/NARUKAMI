@@ -1,9 +1,15 @@
-# ⚡ NARUKAMI — Local Project Runner
+# ⚡ NARUKAMI — Local Project Runner (Desktop App)
 
 Register software projects by file path, let **Claude Code** analyze how each one
 runs, and run each command in its **own live terminal in the browser** — real
 output, colors, prompts, Ctrl-C, and interactive input, streamed over a
 WebSocket into [xterm.js](https://xtermjs.org/).
+
+> **NARUKAMI is a cross-platform desktop application** (Electron). Run it as a
+> native desktop window with **`npm run desktop`**, or package a self-contained
+> **desktop installer** with **`npm run desktop:dist`** (Windows `.exe`, with the
+> SQLite database embedded — no Docker, no server). It also runs as a local web
+> app with **`npm run dev`** → http://localhost:5173.
 
 > **⚠ This app executes shell commands on your machine. Treat it like local
 > remote-code-execution.** Everything binds to `127.0.0.1` and every request /
