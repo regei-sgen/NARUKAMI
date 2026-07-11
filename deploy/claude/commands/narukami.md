@@ -1,8 +1,7 @@
 ---
 description: Launch the NARUKAMI local project runner (SQLite + backend + frontend)
 ---
-Launch the NARUKAMI dev app. Repo root: the directory this repo is cloned into
-(on the original machine: `C:\Users\Stephanie Piape\Documents\NARUKAMI`).
+Launch the NARUKAMI dev app. Repo root: `__NARUKAMI_REPO__`.
 
 The database is **embedded SQLite** (a local file — no Docker, no Postgres).
 
@@ -13,6 +12,7 @@ Steps:
 2. First run only: ensure the local env + DB exist:
    - `packages/backend/.env` (copy from `packages/backend/.env.example` if missing)
    - run `npm run migrate` once to create the SQLite schema (`prisma/dev.db`).
+   (Running `deploy/bootstrap.ps1` / `deploy/bootstrap.sh` does all of this.)
 3. From the repo root, start everything in the background: `npm run dev` (this
    runs `npm run token` first, then launches the backend on 127.0.0.1:4000 and
    the Vite frontend on localhost:5173 via `concurrently`).
@@ -31,5 +31,3 @@ Notes:
   `$SHELL -lc`.
 - If the `claude` CLI is missing/logged out, Analyze returns a clear error (the
   server keeps running).
-- Prefer the packaged desktop app for daily use; `npm run dev` is for hacking on
-  NARUKAMI itself.
