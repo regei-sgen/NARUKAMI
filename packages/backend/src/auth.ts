@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { ALLOWED_ORIGINS, TOKEN_FILE } from './config';
+import { hostAllowed } from './services/share';
 
 let cachedToken: string | null = null;
 
@@ -64,18 +65,14 @@ export function isAllowedOrigin(origin: string | undefined): boolean {
   if (ALLOWED_ORIGINS.has(origin)) return true;
   // Accept any loopback origin — the packaged desktop app serves the SPA from
   // the backend itself, so the WS origin is http://127.0.0.1:<random port>.
-  try {
-    const h = new URL(origin).hostname;
-    return h === '127.0.0.1' || h === 'localhost' || h === '[::1]';
-  } catch {
-    return false;
-  }
+  // When "phone access" is enabled, hostAllowed also accepts private-LAN origins
+  // (never public ones); otherwise it stays loopback-only.
+  return hostAllowed(origin);
 }
 
-/** Accept only loopback Host headers (127.0.0.1 / localhost, any port). */
+/** Accept loopback Host headers always; private-LAN hosts only while phone access
+ *  is enabled (see services/share.ts). */
 export function isAllowedHost(host: string | undefined): boolean {
   if (!host) return false;
-  const h = host.toLowerCase();
-  const name = h.split(':')[0];
-  return name === '127.0.0.1' || name === 'localhost' || name === '[::1]';
+  return hostAllowed(host);
 }

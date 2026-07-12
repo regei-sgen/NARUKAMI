@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { api } from '../api';
 import type { AnalyzerResult, Project, RunCommand } from '../types';
+import { PhoneShare } from './PhoneShare';
 
 interface Props {
   project: Project;
@@ -24,6 +25,7 @@ export function ProjectPanel({
   const [analyzing, setAnalyzing] = useState(false);
   const [analysis, setAnalysis] = useState<AnalyzerResult | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [showPhone, setShowPhone] = useState(false);
 
   // manual add
   const [label, setLabel] = useState('');
@@ -103,6 +105,13 @@ export function ProjectPanel({
           </div>
         </div>
         <div className="panel-head-actions">
+          <button
+            className={`btn btn-shell ${showPhone ? 'active' : ''}`}
+            title="Scan a QR code to watch this project (and open a terminal) from your phone"
+            onClick={() => setShowPhone((v) => !v)}
+          >
+            📱 Phone
+          </button>
           <button className="btn btn-shell" onClick={() => onShell(project)}>
             ⌨ Shell
           </button>
@@ -132,6 +141,8 @@ export function ProjectPanel({
           </button>
         </div>
       </div>
+
+      {showPhone && <PhoneShare projectId={project.id} onClose={() => setShowPhone(false)} />}
 
       {err && (
         <div className="banner banner-error" onClick={() => setErr(null)}>

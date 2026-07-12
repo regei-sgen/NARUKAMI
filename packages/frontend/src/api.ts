@@ -1,4 +1,5 @@
 import type {
+  AccuracyReport,
   AnalyzerResult,
   EodEntry,
   FileContent,
@@ -34,6 +35,11 @@ export function hasToken(): boolean {
 
 export function runWsUrl(runId: string): string {
   return `${WS_BASE}/ws/runs/${encodeURIComponent(runId)}?token=${encodeURIComponent(TOKEN ?? '')}`;
+}
+
+// Real-render stream (Playwright Firefox/WebKit frames) for the Browser view.
+export function renderWsUrl(): string {
+  return `${WS_BASE}/ws/render?token=${encodeURIComponent(TOKEN ?? '')}`;
 }
 
 interface ErrorBody {
@@ -90,6 +96,23 @@ export const api = {
     request<RunCommand>(`/api/projects/${projectId}/commands/suggest`, {
       method: 'POST',
       body: JSON.stringify({ request: requestText, isDefault }),
+    }),
+
+  // Browser view: where the embedded Chromium preview diverges from the real
+  // target browser. Runs the curated catalog + Claude over the project source.
+  checkBrowserAccuracy: (projectId: string, url: string, engine: string) =>
+    request<{ report: AccuracyReport }>(`/api/projects/${projectId}/browser/accuracy`, {
+      method: 'POST',
+      body: JSON.stringify({ url, engine }),
+    }),
+
+  // Which real render engines (Firefox/WebKit) are downloaded and ready.
+  getRenderStatus: () => request<{ firefox: boolean; webkit: boolean }>('/api/render/status'),
+
+  // One-time download of the real Firefox + WebKit engines (a few minutes).
+  installRenderBrowsers: () =>
+    request<{ ok: boolean; firefox: boolean; webkit: boolean }>('/api/render/install', {
+      method: 'POST',
     }),
 
   deleteCommand: (commandId: string) =>
@@ -211,5 +234,17 @@ export const api = {
     request<{ ok: boolean; saved: number }>('/api/settings', {
       method: 'POST',
       body: JSON.stringify(patch),
+    }),
+
+  // --- phone / LAN sharing (scan a project's QR from your phone) ---
+  // enabled = whether the backend is CURRENTLY bound to the LAN; addresses/port/
+  // token are what the desktop UI needs to build a project's QR URL.
+  getShare: () =>
+    request<{ enabled: boolean; port: number; addresses: string[]; token: string }>('/api/share'),
+
+  setShare: (enabled: boolean) =>
+    request<{ enabled: boolean; needsRestart: boolean }>('/api/share', {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
     }),
 };

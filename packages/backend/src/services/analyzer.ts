@@ -167,7 +167,7 @@ export function normalize(parsed: unknown): AnalyzerResult {
   };
 }
 
-async function runClaude(prompt: string, cwd: string): Promise<string> {
+export async function runClaude(prompt: string, cwd: string): Promise<string> {
   try {
     const { stdout } = await execFileAsync(
       'claude',

@@ -4,6 +4,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { prisma } from './db';
 import { isAllowedHost, isAllowedOrigin, isValidToken } from './auth';
 import { attach, getFinalState, resizeRun, writeToRun } from './services/runner';
+import { handleRenderConnection } from './services/playwrightRender';
 
 interface ClientMessage {
   type: 'input' | 'resize';
@@ -13,6 +14,7 @@ interface ClientMessage {
 }
 
 const RUN_WS_RE = /^\/ws\/runs\/([^/?]+)$/;
+const RENDER_WS_RE = /^\/ws\/render$/;
 
 /** Attach a raw `ws` server to Fastify's HTTP server for live terminal streams. */
 export function setupWebSocket(server: Server): void {
@@ -27,15 +29,16 @@ export function setupWebSocket(server: Server): void {
       return;
     }
 
-    const match = RUN_WS_RE.exec(url.pathname);
-    if (!match) {
+    const runMatch = RUN_WS_RE.exec(url.pathname);
+    const isRender = RENDER_WS_RE.test(url.pathname);
+    if (!runMatch && !isRender) {
       socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
       socket.destroy();
       return;
     }
 
     // Reject cross-site / non-loopback connections (prevents a malicious page
-    // in the browser from opening our terminal socket).
+    // in the browser from opening our terminal or render socket).
     if (!isAllowedOrigin(req.headers.origin) || !isAllowedHost(req.headers.host)) {
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       socket.destroy();
@@ -48,7 +51,20 @@ export function setupWebSocket(server: Server): void {
       return;
     }
 
-    const runId = match[1];
+    if (isRender) {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        handleRenderConnection(ws).catch(() => {
+          try {
+            ws.close();
+          } catch {
+            /* noop */
+          }
+        });
+      });
+      return;
+    }
+
+    const runId = runMatch![1];
     wss.handleUpgrade(req, socket, head, (ws) => {
       handleConnection(ws, runId).catch(() => {
         try {

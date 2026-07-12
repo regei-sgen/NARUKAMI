@@ -13,6 +13,8 @@ import { CodeEditor } from './components/CodeEditor';
 import { EodView } from './components/EodView';
 import { Dashboard } from './components/Dashboard';
 import { LiveProcesses } from './components/LiveProcesses';
+import { BrowserView } from './components/BrowserView';
+import { Blueprint } from './components/Blueprint';
 import { TerminalTab } from './components/TerminalTab';
 import { Toasts } from './components/Toasts';
 import { ThemePicker } from './components/ThemePicker';
@@ -29,7 +31,9 @@ export default function App() {
   // mounted (see the term-stack below) so ptys survive project switches; this
   // only controls which one is visible for the currently selected project.
   const [activeTabByProject, setActiveTabByProject] = useState<Record<string, string>>({});
-  const [view, setView] = useState<'runner' | 'editor' | 'eod' | 'dashboard' | 'live'>('runner');
+  const [view, setView] = useState<
+    'runner' | 'editor' | 'eod' | 'dashboard' | 'live' | 'browser' | 'blueprint'
+  >('runner');
   // Terminal dock: docked bottom (resizable height) or right (resizable width),
   // plus minimize. All persisted server-side.
   const [dockPosition, setDockPosition] = useState<'bottom' | 'right'>('bottom');
@@ -41,6 +45,11 @@ export default function App() {
   // back over it to re-dock (desktop shell only).
   const dockRef = useRef<HTMLElement>(null);
   const [dockHint, setDockHint] = useState<boolean>(false);
+  // Browser view tear-off: which projects have their Browser board detached into
+  // its own window, the placeholder's drop element, and its drag-back highlight.
+  const browserDockRef = useRef<HTMLDivElement>(null);
+  const [browserOut, setBrowserOut] = useState<Set<string>>(new Set());
+  const [browserHint, setBrowserHint] = useState<boolean>(false);
   // Active color theme. Seeded from the localStorage cache (already applied in
   // main.tsx before paint); reconciled with the server-persisted value on boot.
   const [themeId, setThemeId] = useState<ThemeId>(cachedThemeId);
@@ -125,7 +134,9 @@ export default function App() {
           ui.view === 'editor' ||
           ui.view === 'eod' ||
           ui.view === 'dashboard' ||
-          ui.view === 'live'
+          ui.view === 'live' ||
+          ui.view === 'browser' ||
+          ui.view === 'blueprint'
         )
           setView(ui.view);
         if (ui.activeTabByProject) setActiveTabByProject(ui.activeTabByProject);
@@ -625,6 +636,59 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dockPosition, dockHeight, dockWidth, dockMinimized, sidebarCollapsed, view, selectedId, activeRuns.length]);
 
+  // Tear the whole Browser view off into its own window (leaves the main view,
+  // which shows a placeholder). It returns via onBrowserReclaim (drag-back/close).
+  const popOutBrowser = (projectId: string, pos?: { x: number; y: number }) => {
+    const bridge = desktop();
+    if (!bridge) return;
+    bridge.popOutBrowser(projectId, pos);
+    setBrowserOut((cur) => new Set(cur).add(projectId));
+  };
+  const bringBackBrowser = (projectId: string) => {
+    desktop()?.bringBackBrowser(projectId); // main closes the window → reclaim fires
+  };
+
+  useEffect(() => {
+    const bridge = desktop();
+    if (!bridge) return;
+    const offReclaim = bridge.onBrowserReclaim((projectId) =>
+      setBrowserOut((cur) => {
+        if (!cur.has(projectId)) return cur;
+        const next = new Set(cur);
+        next.delete(projectId);
+        return next;
+      }),
+    );
+    const offHint = bridge.onBrowserDockHint((active) => setBrowserHint(active));
+    return () => {
+      offReclaim();
+      offHint();
+    };
+  }, []);
+
+  // Report the Browser placeholder's on-screen rect so a torn-off Browser window
+  // can be dragged back onto it. Only meaningful while the placeholder is shown.
+  useEffect(() => {
+    const bridge = desktop();
+    if (!bridge) return;
+    const report = () => {
+      const el = browserDockRef.current;
+      const r = el?.getBoundingClientRect();
+      bridge.reportBrowserDockRect(
+        r && r.width > 0 && r.height > 0
+          ? { x: r.left, y: r.top, width: r.width, height: r.height }
+          : null,
+      );
+    };
+    report();
+    window.addEventListener('resize', report);
+    return () => {
+      window.removeEventListener('resize', report);
+      bridge.reportBrowserDockRect(null);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, selectedId, browserOut, sidebarCollapsed]);
+
   // Drag a terminal tab out of the strip to tear it off. We don't hijack the
   // click: only a press that travels a real distance AND is released outside the
   // dock detaches (at the cursor). A plain click still just selects the tab.
@@ -743,6 +807,19 @@ export default function App() {
                   >
                     Live
                   </button>
+                  <button
+                    className={`vs-btn ${view === 'browser' ? 'active' : ''}`}
+                    onClick={() => setView('browser')}
+                  >
+                    Browser
+                  </button>
+                  <button
+                    className={`vs-btn ${view === 'blueprint' ? 'active' : ''}`}
+                    title="Complete, copy-pasteable spec of every function in this app"
+                    onClick={() => setView('blueprint')}
+                  >
+                    Blueprint
+                  </button>
                 </div>
                 {view === 'runner' ? (
                   <div className="runner-scroll">
@@ -769,6 +846,35 @@ export default function App() {
                   <div className="runner-scroll live-view">
                     <LiveProcesses runs={projectRuns} workingIds={workingIds} />
                   </div>
+                ) : view === 'browser' ? (
+                  desktop() && browserOut.has(selected.id) ? (
+                    <div
+                      ref={browserDockRef}
+                      className={`bv-detached ${browserHint ? 'dock-hint' : ''}`}
+                    >
+                      <div className="bv-detached-inner">
+                        <div className="bv-detached-title">Browser is open in its own window</div>
+                        <div className="bv-detached-sub">
+                          Drag that window back here — or click below — to re-dock it.
+                        </div>
+                        <button
+                          className="btn btn-run"
+                          onClick={() => bringBackBrowser(selected.id)}
+                        >
+                          Bring it back
+                        </button>
+                      </div>
+                      {browserHint && <div className="bv-detached-hint">Drop to dock the browser</div>}
+                    </div>
+                  ) : (
+                    <BrowserView
+                      key={selected.id}
+                      projectId={selected.id}
+                      onPopOut={desktop() ? (pos) => popOutBrowser(selected.id, pos) : undefined}
+                    />
+                  )
+                ) : view === 'blueprint' ? (
+                  <Blueprint />
                 ) : (
                   <CodeEditor
                     key={selected.id}

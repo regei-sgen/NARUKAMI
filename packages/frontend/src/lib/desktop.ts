@@ -22,6 +22,36 @@ export interface NarukamiBridge {
   onReclaim: (cb: (runId: string) => void) => () => void;
   // Main window: toggle the dock's drop highlight during a drag-back.
   onDockHint: (cb: (active: boolean) => void) => () => void;
+
+  // --- Browser view tear-off (the whole responsive board → its own window) ---
+  // Tear the Browser view off into its own window (leaves the main view). `pos`
+  // is the cursor in screen coordinates so the shell spawns it there.
+  popOutBrowser: (projectId: string, pos?: { x: number; y: number }) => void;
+  // Ask the shell to close the torn-off Browser window (the "bring back" button).
+  bringBackBrowser: (projectId: string) => void;
+  // Main window: report the Browser drop zone's rect (viewport coords) for
+  // drag-back detection; null when there's no drop target.
+  reportBrowserDockRect: (rect: Rect | null) => void;
+  // Main window: the torn-off Browser is being re-docked — restore the view.
+  onBrowserReclaim: (cb: (projectId: string) => void) => () => void;
+  // Main window: toggle the Browser drop highlight during a drag-back.
+  onBrowserDockHint: (cb: (active: boolean) => void) => () => void;
+
+  // --- Per-viewport pop-out (one device → its own full-window view) ---
+  // Open a single device viewport of a browser tab in its own window (mirror —
+  // it stays in the board too). Many can be open at once, keyed by
+  // project+browser+viewport; re-invoking the same one just focuses it. `pos` is
+  // the cursor in screen coordinates for a drag-out.
+  popOutViewport: (params: {
+    projectId: string;
+    browserId: string;
+    vpId: string;
+    pos?: { x: number; y: number };
+  }) => void;
+
+  // Restart the app — used when toggling phone/LAN sharing (the backend's network
+  // bind is decided at startup).
+  relaunch: () => void;
 }
 
 export function desktop(): NarukamiBridge | null {

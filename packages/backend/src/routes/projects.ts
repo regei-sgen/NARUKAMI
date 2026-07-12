@@ -4,6 +4,7 @@ import type { FastifyInstance } from 'fastify';
 import { Prisma } from '../generated/prisma';
 import { prisma } from '../db';
 import { analyzeProject, AnalyzerError, suggestCommand } from '../services/analyzer';
+import { catalogReport, checkBrowserAccuracy } from '../services/browserAccuracy';
 
 // Serialize analysis per project so two overlapping requests can't interleave
 // the deleteMany/createMany replacement and produce a duplicated command set.
@@ -182,6 +183,40 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
           return reply.code(502).send({ error: err.message, raw: err.raw ?? null });
         }
         return reply.code(500).send({ error: 'Command suggestion failed.', detail: String(err) });
+      }
+    },
+  );
+
+  // Cross-browser accuracy advisor for the Browser view: report where the real
+  // target browser (Safari/Firefox/…) would diverge from the embedded Chromium
+  // preview. Combines a curated catalog with Claude inspecting this project's
+  // source. If the `claude` CLI is unavailable, fall back to the catalog alone
+  // so the user always gets the reliable baseline.
+  app.post<{ Params: { id: string }; Body: { url?: string; engine?: string } }>(
+    '/api/projects/:id/browser/accuracy',
+    async (req, reply) => {
+      const project = await prisma.project.findUnique({ where: { id: req.params.id } });
+      if (!project) return reply.code(404).send({ error: 'Project not found.' });
+
+      const url = req.body?.url?.trim() ?? '';
+      const engine = req.body?.engine?.trim() || 'chrome';
+
+      try {
+        const report = await checkBrowserAccuracy(project.path, url, engine);
+        return { report };
+      } catch (err) {
+        if (err instanceof AnalyzerError) {
+          // Graceful degradation: still hand back the curated catalog, noting
+          // that the deep (project-aware) pass couldn't run.
+          const base = catalogReport(engine);
+          return {
+            report: {
+              ...base,
+              summary: `Claude Code couldn't run a project-aware check (${err.message}) — showing the built-in ${base.engine} reference instead.`,
+            },
+          };
+        }
+        return reply.code(500).send({ error: 'Accuracy check failed.', detail: String(err) });
       }
     },
   );

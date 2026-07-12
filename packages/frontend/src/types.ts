@@ -39,6 +39,23 @@ export interface AnalyzerResult {
   warnings: string[];
 }
 
+// Cross-browser accuracy advisor: where the embedded Chromium preview diverges
+// from the real target browser (Safari/Firefox/…). 'catalog' findings come from
+// the curated reference; 'claude' findings are specific to this project's code.
+export interface AccuracyFinding {
+  area: string;
+  severity: 'high' | 'medium' | 'low';
+  note: string;
+  fix: string;
+  source: 'catalog' | 'claude';
+}
+
+export interface AccuracyReport {
+  engine: string;
+  summary: string;
+  findings: AccuracyFinding[];
+}
+
 export interface FileNode {
   name: string;
   path: string; // project-relative, POSIX separators
@@ -248,7 +265,7 @@ export interface UsageWindows {
 // Persisted UI layout (stored server-side under the 'ui' settings key).
 export interface UiSettings {
   selectedId?: string | null;
-  view?: 'runner' | 'editor' | 'eod' | 'dashboard' | 'live';
+  view?: 'runner' | 'editor' | 'eod' | 'dashboard' | 'live' | 'browser' | 'blueprint';
   dockPosition?: 'bottom' | 'right';
   dockHeight?: number;
   dockWidth?: number;
