@@ -247,4 +247,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ enabled }),
     }),
+
+  // This app's own commit history (dated), for the Blueprint Changelog panel.
+  getChangelog: () =>
+    request<{ commits: import('./lib/changelog').LogCommit[] }>('/api/changelog'),
 };

@@ -15,6 +15,7 @@ import { telemetryRoutes } from './routes/telemetry';
 import { terminalRoutes } from './routes/terminals';
 import { renderRoutes } from './routes/render';
 import { shareRoutes } from './routes/share';
+import { changelogRoutes } from './routes/changelog';
 import { setupWebSocket } from './ws';
 import { reconcileStaleRuns } from './services/runner';
 import { shutdownRender } from './services/playwrightRender';
@@ -158,6 +159,7 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
   await app.register(terminalRoutes);
   await app.register(renderRoutes);
   await app.register(shareRoutes);
+  await app.register(changelogRoutes);
 
   // Packaged desktop mode: serve the built frontend from this same server so the
   // renderer is same-origin. The bearer token is injected into index.html so the

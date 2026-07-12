@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from 'react';
 import { Markdown } from '../lib/markdown';
 import { BLUEPRINT, blueprintMarkdown, orderedSections } from '../lib/blueprint';
+import { Changelog } from './Changelog';
 
 // The "Blueprint" tab: a complete, copy-pasteable specification of every function
 // and subsystem in NARUKAMI. A table of contents on the left; the rendered spec on
@@ -13,6 +14,7 @@ export function Blueprint() {
   const fullMd = useMemo(() => blueprintMarkdown(bp), [bp]);
   const [query, setQuery] = useState('');
   const [copied, setCopied] = useState<string | null>(null);
+  const [mode, setMode] = useState<'spec' | 'changelog'>('spec');
   const docRef = useRef<HTMLDivElement>(null);
 
   const q = query.trim().toLowerCase();
@@ -61,7 +63,8 @@ export function Blueprint() {
 
   const scrollTo = (anchor: string) => {
     setQuery('');
-    // Defer so a cleared filter re-renders the full list before we scroll.
+    setMode('spec'); // a TOC click is always about the spec
+    // Defer so a cleared filter / mode switch re-renders before we scroll.
     requestAnimationFrame(() => {
       docRef.current?.querySelector(`#bp-${anchor}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
@@ -102,22 +105,46 @@ export function Blueprint() {
 
       <div className="bp-main">
         <div className="bp-bar">
-          <div className="bp-title">{bp.title}</div>
-          <input
-            className="bp-search"
-            placeholder="Filter sections…"
-            value={query}
-            spellCheck={false}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-          <button className="btn btn-primary bp-copyall" onClick={() => copy(fullMd, 'all')}>
-            {copied === 'all' ? 'Copied ✓' : 'Copy all (Markdown)'}
-          </button>
-          <button className="btn" onClick={download}>
-            Download .md
-          </button>
+          <div className="bp-modes" role="group" aria-label="Blueprint view">
+            <button
+              className={`bp-mode ${mode === 'spec' ? 'on' : ''}`}
+              onClick={() => setMode('spec')}
+            >
+              Spec
+            </button>
+            <button
+              className={`bp-mode ${mode === 'changelog' ? 'on' : ''}`}
+              onClick={() => setMode('changelog')}
+            >
+              Changelog
+            </button>
+          </div>
+          {mode === 'spec' ? (
+            <>
+              <input
+                className="bp-search"
+                placeholder="Filter sections…"
+                value={query}
+                spellCheck={false}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+              <button className="btn btn-primary bp-copyall" onClick={() => copy(fullMd, 'all')}>
+                {copied === 'all' ? 'Copied ✓' : 'Copy all (Markdown)'}
+              </button>
+              <button className="btn" onClick={download}>
+                Download .md
+              </button>
+            </>
+          ) : (
+            <div className="bp-title">Changelog — what changed, by date</div>
+          )}
         </div>
 
+        {mode === 'changelog' ? (
+          <div className="bp-doc">
+            <Changelog />
+          </div>
+        ) : (
         <div className="bp-doc" ref={docRef}>
           {bp.preamble && (
             <div className="bp-preamble">
@@ -150,6 +177,7 @@ export function Blueprint() {
 
           {q && shown.length === 0 && <div className="bp-empty">No sections match “{query}”.</div>}
         </div>
+        )}
       </div>
     </div>
   );

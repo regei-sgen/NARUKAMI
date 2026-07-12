@@ -6,6 +6,7 @@
 // "dependencies" — we don't stage node_modules ourselves (it prunes them anyway).
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -55,4 +56,36 @@ fs.cpSync(path.join(repoRoot, 'packages', 'backend', 'dist'), path.join(stage, '
 
 const engine = path.join(stage, 'backend', 'dist', 'generated', 'prisma', 'query_engine-windows.dll.node');
 console.log('[stage] prisma engine present:', fs.existsSync(engine));
+
+// Bundle the app's commit history so the Blueprint "Changelog" works in the
+// packaged app (which has no .git to read live). Matches the LogCommit shape the
+// backend serves; parsed inline here to avoid importing the compiled backend.
+try {
+  const FS = '\x1f';
+  const raw = execFileSync(
+    'git',
+    ['-C', repoRoot, 'log', '--no-merges', '-z', '-n', '500', `--pretty=format:%aI${FS}%an${FS}%h${FS}%s${FS}%b`],
+    { maxBuffer: 8 * 1024 * 1024 },
+  ).toString();
+  const commits = raw
+    .split('\0')
+    .filter((b) => b.trim() !== '')
+    .map((b) => {
+      const p = b.split(FS);
+      return {
+        date: (p[0] ?? '').trim(),
+        author: (p[1] ?? '').trim(),
+        hash: (p[2] ?? '').trim(),
+        subject: (p[3] ?? '').trim(),
+        body: p.slice(4).join(FS).trim(),
+        filesChanged: null,
+      };
+    })
+    .filter((c) => c.hash);
+  fs.writeFileSync(path.join(stage, 'backend', 'dist', 'changelog.json'), JSON.stringify(commits));
+  console.log('[stage] changelog commits bundled:', commits.length);
+} catch (err) {
+  console.log('[stage] changelog bundling skipped:', err.message);
+}
+
 console.log('[stage] done →', stage);
