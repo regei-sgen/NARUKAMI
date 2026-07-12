@@ -72,8 +72,30 @@ export function isPrivateLanHostname(h: string | null): boolean {
   return false;
 }
 
+// Rank a private IPv4 so the most likely *real* Wi-Fi/Ethernet address sorts
+// first and virtual adapters (Docker/WSL on 172.x, VirtualBox 192.168.56.x,
+// Hyper-V/ICS 192.168.137.x) and link-local fall to the back. Home/office Wi-Fi
+// is almost always 192.168.x or 10.x, so those win.
+export function lanAddressRank(addr: string): number {
+  if (/^169\.254\./.test(addr)) return 5; // link-local — rarely reachable
+  if (/^192\.168\.(?:56|137)\./.test(addr)) return 4; // VirtualBox / Hyper-V ICS
+  if (/^172\.(?:1[6-9]|2\d|3[01])\./.test(addr)) return 3; // often Docker / WSL
+  if (/^10\./.test(addr)) return 1;
+  if (/^192\.168\./.test(addr)) return 0;
+  return 2;
+}
+
+// Order candidate LAN addresses best-guess first (stable within a rank so the OS
+// interface order breaks ties).
+export function orderLanAddresses(addrs: string[]): string[] {
+  return [...new Set(addrs)]
+    .map((a, i) => ({ a, i, r: lanAddressRank(a) }))
+    .sort((x, y) => x.r - y.r || x.i - y.i)
+    .map((e) => e.a);
+}
+
 // This machine's non-internal private IPv4 addresses — the candidate LAN IPs the
-// phone would connect to. First entry is the best guess for the QR code.
+// phone would connect to, best guess first (see orderLanAddresses).
 export function lanAddresses(): string[] {
   const out: string[] = [];
   const nets = os.networkInterfaces();
@@ -84,7 +106,18 @@ export function lanAddresses(): string[] {
       }
     }
   }
-  return [...new Set(out)];
+  return orderLanAddresses(out);
+}
+
+// Decide which interface the server binds. When phone sharing is ON we MUST
+// listen on all interfaces (0.0.0.0) so a phone on the LAN can reach us — this
+// overrides whatever host the caller passed. (The Electron shell always passes
+// 127.0.0.1; without this override the LAN bind never happens and the phone gets
+// "site cannot be reached" even though the QR shows up.) Sharing OFF keeps the
+// old behaviour: the caller's host, else loopback.
+export function resolveBindHost(shareEnabled: boolean, optsHost?: string): string {
+  if (shareEnabled) return '0.0.0.0';
+  return optsHost ?? '127.0.0.1';
 }
 
 // Should a request with this Host/Origin be accepted on a LAN-reachable endpoint?

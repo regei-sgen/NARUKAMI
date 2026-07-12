@@ -4,7 +4,7 @@ import path from 'node:path';
 import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
-import { ALLOWED_ORIGINS, HOST, PORT } from './config';
+import { ALLOWED_ORIGINS, PORT } from './config';
 import { getToken, requireAuth } from './auth';
 import { projectRoutes } from './routes/projects';
 import { runRoutes } from './routes/runs';
@@ -23,6 +23,7 @@ import {
   hostAllowed,
   hostnameOf,
   isLoopbackHostname,
+  resolveBindHost,
   setShareEnabled,
   setSharePort,
   SHARE_SETTING_KEY,
@@ -63,7 +64,9 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
     shareEnabled = false;
   }
   setShareEnabled(shareEnabled);
-  const host = opts.host ?? (shareEnabled ? '0.0.0.0' : HOST);
+  // When sharing is on, bind 0.0.0.0 even though the desktop shell passes
+  // 127.0.0.1 — otherwise the phone can never reach us.
+  const host = resolveBindHost(shareEnabled, opts.host);
 
   // Runs the previous process left as 'running' have dead ptys — reconcile them.
   const reconciled = await reconcileStaleRuns().catch(() => 0);

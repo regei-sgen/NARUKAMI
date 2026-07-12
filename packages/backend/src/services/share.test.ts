@@ -5,6 +5,9 @@ import {
   isLoopbackHostname,
   isPrivateLanHostname,
   lanAddresses,
+  lanAddressRank,
+  orderLanAddresses,
+  resolveBindHost,
   setShareEnabled,
 } from './share';
 
@@ -86,5 +89,42 @@ describe('lanAddresses', () => {
     const addrs = lanAddresses();
     expect(Array.isArray(addrs)).toBe(true);
     for (const a of addrs) expect(isPrivateLanHostname(a)).toBe(true);
+  });
+});
+
+describe('resolveBindHost', () => {
+  it('binds 0.0.0.0 whenever sharing is on — even if the caller asks for loopback', () => {
+    // This is the regression guard: the desktop shell always passes 127.0.0.1,
+    // and sharing MUST still open the LAN or the phone gets "site can't be reached".
+    expect(resolveBindHost(true, '127.0.0.1')).toBe('0.0.0.0');
+    expect(resolveBindHost(true, undefined)).toBe('0.0.0.0');
+    expect(resolveBindHost(true, '0.0.0.0')).toBe('0.0.0.0');
+  });
+  it('stays loopback (or the caller host) when sharing is off', () => {
+    expect(resolveBindHost(false, '127.0.0.1')).toBe('127.0.0.1');
+    expect(resolveBindHost(false, undefined)).toBe('127.0.0.1');
+    expect(resolveBindHost(false, '0.0.0.0')).toBe('0.0.0.0');
+  });
+});
+
+describe('lanAddressRank / orderLanAddresses', () => {
+  it('ranks real home/office Wi-Fi ahead of virtual adapters and link-local', () => {
+    expect(lanAddressRank('192.168.1.20')).toBeLessThan(lanAddressRank('172.17.0.1')); // vs Docker
+    expect(lanAddressRank('10.0.0.5')).toBeLessThan(lanAddressRank('192.168.56.1')); // vs VirtualBox
+    expect(lanAddressRank('192.168.1.20')).toBeLessThan(lanAddressRank('169.254.1.1')); // vs link-local
+    expect(lanAddressRank('192.168.137.1')).toBeGreaterThan(lanAddressRank('192.168.1.1')); // ICS demoted
+  });
+  it('orders candidates best-guess first and de-dupes', () => {
+    const ordered = orderLanAddresses([
+      '169.254.9.9',
+      '172.17.0.1',
+      '192.168.68.119',
+      '10.1.2.3',
+      '192.168.68.119',
+    ]);
+    expect(ordered).toEqual(['192.168.68.119', '10.1.2.3', '172.17.0.1', '169.254.9.9']);
+  });
+  it('keeps OS interface order to break ties within a rank', () => {
+    expect(orderLanAddresses(['192.168.1.5', '192.168.1.9'])).toEqual(['192.168.1.5', '192.168.1.9']);
   });
 });

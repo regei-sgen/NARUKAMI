@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import QRCode from 'qrcode';
 import { api } from '../api';
 import { desktop } from '../lib/desktop';
+import { mobileUrl } from '../lib/share';
 
 // Per-project "scan from your phone" panel. Shows a QR code that opens the
 // lightweight mobile page (/m) for THIS project on a phone that's on the same
@@ -41,7 +42,7 @@ export function PhoneShare({ projectId, onClose }: { projectId: string; onClose:
 
   const url = useMemo(() => {
     if (!enabled || !addr || !port || !token) return '';
-    return `http://${addr}:${port}/m?project=${encodeURIComponent(projectId)}&token=${encodeURIComponent(token)}`;
+    return mobileUrl(addr, port, projectId, token);
   }, [enabled, addr, port, token, projectId]);
 
   // Render the QR whenever the target URL changes.
