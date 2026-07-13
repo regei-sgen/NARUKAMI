@@ -10,7 +10,7 @@ import { claudeDir, decodeProjectDir, parseMemoryNote } from './argus';
  * default, never throws. Not filtered by the selected project — it shows it all.
  */
 
-export type Scope = 'global' | 'project';
+export type Scope = 'global' | 'project' | 'plugin';
 
 export interface ArmorySkill {
   name: string;
@@ -125,6 +125,38 @@ function readDocs(dir: string, scope: Scope, project?: string): ArmoryDoc[] {
   return out;
 }
 
+/**
+ * Parse ~/.claude/plugins/installed_plugins.json (v2) into skill sources:
+ * one {label, dir} per install entry, where dir is `<installPath>/skills` and
+ * label is the plugin name without its marketplace suffix (chip-friendly).
+ * Pure (no I/O) so the manifest-shape handling is directly unit-testable.
+ */
+export function pluginSkillSources(json: unknown): Array<{ label: string; dir: string }> {
+  const plugins = (json as { plugins?: Record<string, unknown> } | null)?.plugins;
+  if (!plugins || typeof plugins !== 'object') return [];
+  const out: Array<{ label: string; dir: string }> = [];
+  for (const id of Object.keys(plugins)) {
+    const entries = plugins[id];
+    if (!Array.isArray(entries)) continue;
+    const label = id.split('@')[0] || id;
+    for (const e of entries) {
+      const installPath = (e as { installPath?: unknown } | null)?.installPath;
+      if (typeof installPath === 'string' && installPath) out.push({ label, dir: path.join(installPath, 'skills') });
+    }
+  }
+  return out;
+}
+
+/** Skills shipped by installed Claude Code plugins (superpowers etc.). Fail-soft. */
+function readPluginSkills(cdir: string): ArmorySkill[] {
+  try {
+    const raw = fs.readFileSync(path.join(cdir, 'plugins', 'installed_plugins.json'), 'utf8');
+    return pluginSkillSources(JSON.parse(raw)).flatMap((s) => readSkills(s.dir, 'plugin', s.label));
+  } catch {
+    return [];
+  }
+}
+
 function readHooksFile(file: string, scope: Scope, project?: string): ArmoryHook[] {
   try {
     return flattenHooks(JSON.parse(fs.readFileSync(file, 'utf8')), scope, project);
@@ -176,6 +208,7 @@ export function collectArmory(projects: ArmoryProject[]): Armory {
 
   const skills = [
     ...readSkills(path.join(cdir, 'skills'), 'global'),
+    ...readPluginSkills(cdir),
     ...projects.flatMap((p) => readSkills(projClaude(p, 'skills'), 'project', p.name)),
   ].sort(byName);
 

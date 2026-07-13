@@ -169,7 +169,11 @@ export function normalize(parsed: unknown): AnalyzerResult {
   };
 }
 
-async function runClaude(prompt: string, cwd: string): Promise<string> {
+async function runClaude(
+  prompt: string,
+  cwd: string,
+  timeoutMs: number = CLAUDE_TIMEOUT_MS,
+): Promise<string> {
   // Resolve `claude` to a full path (and route a .cmd/.bat shim through cmd.exe
   // on Windows). Passing the bare name let libuv find claude.cmd and then throw
   // EINVAL — surfaced as a misleading "not on PATH" error — for npm-global
@@ -181,7 +185,7 @@ async function runClaude(prompt: string, cwd: string): Promise<string> {
       cwd,
       maxBuffer: MAX_BUFFER,
       windowsHide: true,
-      timeout: CLAUDE_TIMEOUT_MS,
+      timeout: timeoutMs,
       killSignal: 'SIGKILL',
       // Headless analysis sessions are NARUKAMI sessions too — same embedded
       // godclaude home as the interactive terminals.
@@ -200,7 +204,7 @@ async function runClaude(prompt: string, cwd: string): Promise<string> {
     // headless run — say so, since it can't be answered from here.
     if (e.killed) {
       throw new AnalyzerError(
-        `claude -p timed out after ${CLAUDE_TIMEOUT_MS / 1000}s and was killed. A hook or a ` +
+        `claude -p timed out after ${timeoutMs / 1000}s and was killed. A hook or a ` +
           `permission/folder-trust gate in this project likely blocked the headless run — ` +
           `open the folder in Claude Code once to trust it, or loosen the blocking hook, then retry.`,
         e.stdout || e.stderr || '',
@@ -407,4 +411,80 @@ ${blocks}`;
 
   const stdout = await runClaude(prompt, cwd);
   return stripFences(unwrapEnvelope(stdout)).trim();
+}
+
+export interface ReleaseNotesInput {
+  product: string;
+  version: string;
+  /** CHANGELOG [Unreleased] section (pre-capped by the caller). */
+  changelog: string;
+  /** `git log --oneline` for the release range (pre-capped by the caller). */
+  commits: string;
+  /** Human description of the commit range, for the prompt. */
+  rangeLabel: string;
+}
+
+export interface ReleaseNotes {
+  /** Patch Note Summary — plain-language, non-developer, ≤~50 words. */
+  summary: string;
+  /** Patch Note Description — one "- " line per major change, newline-separated. */
+  description: string;
+}
+
+// Release notes read a whole [Unreleased] section + a commit range — give the
+// model more runway than the 2-minute analysis budget.
+const RELEASE_NOTES_TIMEOUT_MS = 300_000;
+
+/**
+ * Write the SGA release patch notes (summary + description) from the CHANGELOG
+ * [Unreleased] section + the release's git log, in the release-zip skill's
+ * fixed format. One `claude -p` call returning JSON.
+ */
+export async function generateReleaseNotes(
+  cwd: string,
+  input: ReleaseNotesInput,
+): Promise<ReleaseNotes> {
+  const prompt = `You are writing the release patch notes for ${input.product} version ${input.version} (a packaged software release).
+
+Source material A — the CHANGELOG's [Unreleased] section:
+"""
+${input.changelog || '(empty — fall back to the commit list)'}
+"""
+
+Source material B — git commits in this release (${input.rangeLabel}):
+"""
+${input.commits || '(none captured)'}
+"""
+
+Respond with ONLY a single minified JSON object and nothing else — no prose, no markdown fences:
+{"summary": "...", "description": "..."}
+
+"summary" is the Patch Note Summary — short and simple, written so a non-developer understands it at a glance. 2-3 short sentences, under ~50 words total. Lead with **${input.product} ${input.version}** (markdown bold), then say in plain everyday language what is better for the user. Hard rules:
+- No technical jargon — no tool / component / file / code names, no acronyms (API, DOM, OTA, WS, etc.), no "release arc" framing, no version-history references, no numbers or counts.
+- Describe user-visible benefits only — what someone can now do or what got smoother/more reliable — never how it works internally.
+- If you can't say it simply, cut it. Shorter beats complete.
+
+"description" is the Patch Note Description — one line per major change, each line starting with "- " and a past-tense action verb. Group related sub-changes into a single line, 1-2 sentences max per line. Cover, in order, whichever apply: major new features; UX/visual improvements; settings/configuration changes; logging/observability improvements; intelligence/skill/persona expansions; page-driving/browser capability changes; bug fixes (critical first); platform reliability; then a closing line summarizing the release's significance. Derive every claim from the source material — do not invent features. Concrete counts are allowed here (description only). Do not repeat the summary verbatim. Join the lines with \\n inside the JSON string.`;
+
+  const stdout = await runClaude(prompt, cwd, RELEASE_NOTES_TIMEOUT_MS);
+  const inner = unwrapEnvelope(stdout);
+  const jsonText = extractJsonObject(inner);
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    throw new AnalyzerError('Could not parse the release notes JSON returned by Claude Code.', inner);
+  }
+
+  const obj = isRecord(parsed) ? parsed : {};
+  const summary = typeof obj.summary === 'string' ? obj.summary.trim() : '';
+  const description = typeof obj.description === 'string' ? obj.description.trim() : '';
+  if (!summary || !description) {
+    throw new AnalyzerError(
+      'Claude Code did not return both a release summary and a description.',
+      inner,
+    );
+  }
+  return { summary, description };
 }

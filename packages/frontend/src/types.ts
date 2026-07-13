@@ -141,6 +141,22 @@ export interface MobileDeviceInfo {
   connections: number; // live websocket count (0 = knocked but not streaming)
 }
 
+// --- editor git source control (Changes tab; mirrors backend gitChanges.ts) ---
+export type GitChangeType = 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked';
+export interface GitChangeEntry {
+  path: string;
+  type: GitChangeType;
+  staged: boolean;
+}
+export interface GitChanges {
+  isRepo: boolean;
+  branch: string | null;
+  detached: boolean;
+  staged: GitChangeEntry[];
+  unstaged: GitChangeEntry[];
+  conflicts: GitChangeEntry[];
+}
+
 export type RunStatus = 'connecting' | 'running' | 'exited' | 'killed' | 'error';
 
 export interface ActiveRun {
@@ -221,7 +237,7 @@ export interface EodEntry {
 // Persisted UI layout (stored server-side under the 'ui' settings key).
 export interface UiSettings {
   selectedId?: string | null;
-  view?: 'runner' | 'editor' | 'eod' | 'argus' | 'codemap' | 'armory' | 'browser';
+  view?: 'runner' | 'editor' | 'eod' | 'release' | 'argus' | 'codemap' | 'armory' | 'browser';
   dockPosition?: 'bottom' | 'right';
   dockHeight?: number;
   dockWidth?: number;
@@ -496,7 +512,9 @@ export interface EodActiveProject {
   commits: number;
 }
 export interface EodActiveResponse {
-  day: string;
+  from: string;
+  to: string;
+  day: string; // rangeKey ('YYYY-MM-DD' single, 'from_to' range) — kept for back-compat
   projects: EodActiveProject[];
 }
 export interface EodReportDoc {
@@ -508,8 +526,57 @@ export interface EodReportDoc {
   updatedAt: string;
 }
 
+// --- SGA Release (mirror packages/backend/src/services/release.ts + routes/release.ts) ---
+export interface ReleaseDoc {
+  id: string;
+  projectId: string;
+  version: string;
+  zipPath: string; // absolute path of the produced zip (~/sgen-claude-chat-v<x>.zip)
+  zipBytes: number;
+  headCommit: string | null;
+  dirtyIncluded: boolean; // uncommitted changes were knowingly shipped in the zip
+  summary: string | null; // Patch Note Summary (plain-language, AI)
+  notes: string | null; // Patch Note Description (one line per change, AI)
+  createdAt: string;
+  updatedAt: string;
+  zipExists?: boolean; // whether the zip is still on disk (computed server-side)
+}
+export interface ReleaseDirtyFile {
+  path: string;
+  status: string; // 'added' | 'modified' | 'deleted'
+}
+export interface ReleasePreflight {
+  isRepo: boolean;
+  isSga: boolean; // the three SGA version files exist at their known paths
+  missing: string[];
+  currentVersion: string | null;
+  suggestedVersion: string | null;
+  dirty: ReleaseDirtyFile[];
+  branch: string | null; // current branch (short SHA when detached)
+  zipDir: string; // permanent zip output folder (AppSetting; defaults to the home dir)
+  releasing: boolean;
+  releases: ReleaseDoc[];
+}
+export interface ReleaseZipDirResult {
+  ok: boolean;
+  zipDir: string;
+  isDefault: boolean;
+}
+export interface ReleaseCommitResult {
+  ok: boolean;
+  commit: string;
+  message: string;
+  files: string[];
+}
+export interface ReleasePushResult {
+  ok: boolean;
+  branch: string;
+  upstreamCreated: boolean;
+  detail: string;
+}
+
 // --- Armory (mirror packages/backend/src/services/armory.ts) ---
-export type ArmoryScope = 'global' | 'project';
+export type ArmoryScope = 'global' | 'project' | 'plugin';
 export interface ArmorySkill {
   name: string;
   description: string;

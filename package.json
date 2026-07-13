@@ -2,7 +2,7 @@
   "name": "narukami",
   "version": "1.0.0",
   "private": true,
-  "description": "NARUKAMI — local project runner: register projects by path, analyze how they run with Claude Code, and run each in its own live browser terminal.",
+  "description": "NARUKAMI — a cross-platform Electron desktop app (and local web runner): register software projects by path, let Claude Code analyze how each runs, and run each command in its own live browser terminal. Runs as a native desktop window (`npm run desktop`) and packages to a self-contained desktop installer (`npm run desktop:dist`).",
   "workspaces": [
     "packages/backend",
     "packages/frontend",

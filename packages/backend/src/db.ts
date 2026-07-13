@@ -29,6 +29,21 @@ const ADDITIVE_TABLES: ReadonlyArray<string> = [
      "updatedAt" DATETIME NOT NULL
    )`,
   `CREATE UNIQUE INDEX IF NOT EXISTS "EodReport_day_key" ON "EodReport"("day")`,
+  `CREATE TABLE IF NOT EXISTS "Release" (
+     "id" TEXT NOT NULL PRIMARY KEY,
+     "projectId" TEXT NOT NULL,
+     "version" TEXT NOT NULL,
+     "zipPath" TEXT NOT NULL,
+     "zipBytes" INTEGER NOT NULL,
+     "headCommit" TEXT,
+     "dirtyIncluded" BOOLEAN NOT NULL DEFAULT 0,
+     "summary" TEXT,
+     "notes" TEXT,
+     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+     "updatedAt" DATETIME NOT NULL,
+     CONSTRAINT "Release_projectId_fkey" FOREIGN KEY ("projectId") REFERENCES "Project" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+   )`,
+  `CREATE INDEX IF NOT EXISTS "Release_projectId_createdAt_idx" ON "Release"("projectId", "createdAt")`,
 ];
 
 type RawClient = Pick<PrismaClient, '$queryRawUnsafe' | '$executeRawUnsafe'>;

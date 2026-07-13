@@ -1,5 +1,19 @@
 import { describe, it, expect } from 'vitest';
-import { dayKey, dayBounds, boundsForDayKey, prettyDate, toItem, itemLine, parseItems, type EodItem } from './eod';
+import {
+  dayKey,
+  dayBounds,
+  boundsForDayKey,
+  prettyDate,
+  toItem,
+  itemLine,
+  parseItems,
+  boundsForRange,
+  rangeKey,
+  parseRangeKey,
+  prettyRange,
+  normalizeRange,
+  type EodItem,
+} from './eod';
 
 describe('boundsForDayKey (local timezone)', () => {
   it('turns a day key into LOCAL midnight → next local midnight', () => {
@@ -17,6 +31,51 @@ describe('prettyDate', () => {
   it('formats a local day key as "Month D, YYYY"', () => {
     expect(prettyDate('2026-07-06')).toBe('July 6, 2026');
     expect(prettyDate('2026-01-09')).toBe('January 9, 2026');
+  });
+});
+
+describe('range helpers', () => {
+  it('boundsForRange spans start-of-`from` to start-of-day-after-`to` (inclusive end day)', () => {
+    const { start, end } = boundsForRange('2026-07-01', '2026-07-11');
+    expect(start.getFullYear()).toBe(2026);
+    expect(start.getMonth()).toBe(6);
+    expect(start.getDate()).toBe(1);
+    expect(start.getHours()).toBe(0);
+    expect(end.getMonth()).toBe(6);
+    expect(end.getDate()).toBe(12); // midnight AFTER the 11th → the 11th is included
+    expect(end.getHours()).toBe(0);
+  });
+
+  it('boundsForRange(single day) equals boundsForDayKey', () => {
+    const r = boundsForRange('2026-07-06', '2026-07-06');
+    const d = boundsForDayKey('2026-07-06');
+    expect(r.start.getTime()).toBe(d.start.getTime());
+    expect(r.end.getTime()).toBe(d.end.getTime());
+  });
+
+  it('rangeKey: single day stays plain, a range joins with "_"', () => {
+    expect(rangeKey('2026-07-06', '2026-07-06')).toBe('2026-07-06');
+    expect(rangeKey('2026-07-01', '2026-07-11')).toBe('2026-07-01_2026-07-11');
+  });
+
+  it('parseRangeKey inverts rangeKey (single day → from === to)', () => {
+    expect(parseRangeKey('2026-07-06')).toEqual({ from: '2026-07-06', to: '2026-07-06' });
+    expect(parseRangeKey('2026-07-01_2026-07-11')).toEqual({ from: '2026-07-01', to: '2026-07-11' });
+  });
+
+  it('prettyRange: single / same-month / cross-month / cross-year', () => {
+    expect(prettyRange('2026-07-06', '2026-07-06')).toBe('July 6, 2026');
+    expect(prettyRange('2026-07-01', '2026-07-11')).toBe('July 1–11, 2026');
+    expect(prettyRange('2026-07-28', '2026-08-02')).toBe('July 28 – August 2, 2026');
+    expect(prettyRange('2025-12-30', '2026-01-02')).toBe('December 30, 2025 – January 2, 2026');
+  });
+
+  it('normalizeRange: from/to kept, reversed swapped, legacy day fills both, future capped to today', () => {
+    expect(normalizeRange('2020-01-01', '2020-01-05')).toEqual({ from: '2020-01-01', to: '2020-01-05' });
+    expect(normalizeRange('2020-01-05', '2020-01-01')).toEqual({ from: '2020-01-01', to: '2020-01-05' });
+    expect(normalizeRange(undefined, undefined, '2020-02-02')).toEqual({ from: '2020-02-02', to: '2020-02-02' });
+    const today = dayKey(new Date());
+    expect(normalizeRange('2020-01-01', '2999-01-01')).toEqual({ from: '2020-01-01', to: today });
   });
 });
 

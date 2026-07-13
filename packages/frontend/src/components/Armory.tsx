@@ -9,9 +9,13 @@ import { Ic } from './icons';
  * the selected project) — it shows it all. Polls once on open; manual refresh.
  */
 function ScopeChip({ scope, project }: { scope: ArmoryScope; project?: string }) {
+  // 'project' → the project's name; 'plugin' → the plugin's name; else 'global'.
+  const label = scope === 'project' ? project || 'project' : scope === 'plugin' ? project || 'plugin' : 'global';
+  const title =
+    scope === 'project' ? project : scope === 'plugin' ? `plugin: ${project ?? ''}` : 'global (~/.claude)';
   return (
-    <span className={`armory-scope armory-scope-${scope}`} title={scope === 'project' ? project : 'global (~/.claude)'}>
-      {scope === 'project' ? project || 'project' : 'global'}
+    <span className={`armory-scope armory-scope-${scope}`} title={title}>
+      {label}
     </span>
   );
 }

@@ -8,6 +8,49 @@ export function todayKey(): string {
   return `${d.getFullYear()}-${m}-${day}`;
 }
 
+// EOD date-range helpers — mirror packages/backend/src/routes/eod.ts so the client
+// can build the same identity keys and headings the server stores/renders.
+const MONTHS = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+
+/** 'YYYY-MM-DD' → 'Month D, YYYY'. */
+export function prettyDate(day: string): string {
+  const [y, m, d] = day.split('-').map(Number);
+  return `${MONTHS[(m || 1) - 1]} ${d}, ${y}`;
+}
+
+/** Report identity key: a single day stays 'YYYY-MM-DD'; a range is 'from_to'. */
+export function rangeKey(from: string, to: string): string {
+  return from === to ? from : `${from}_${to}`;
+}
+
+/** Inverse of rangeKey: a stored key → {from, to} (single day → from === to). */
+export function parseRangeKey(key: string): { from: string; to: string } {
+  const m = /^(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})$/.exec(key);
+  return m ? { from: m[1], to: m[2] } : { from: key, to: key };
+}
+
+/** Human heading: single day, or a range with shared month/year collapsed. */
+export function prettyRange(from: string, to: string): string {
+  if (from === to) return prettyDate(from);
+  const [fy, fm, fd] = from.split('-').map(Number);
+  const [ty, tm, td] = to.split('-').map(Number);
+  if (fy === ty && fm === tm) return `${MONTHS[(fm || 1) - 1]} ${fd}–${td}, ${fy}`;
+  if (fy === ty) return `${MONTHS[(fm || 1) - 1]} ${fd} – ${MONTHS[(tm || 1) - 1]} ${td}, ${fy}`;
+  return `${prettyDate(from)} – ${prettyDate(to)}`;
+}
+
+/** Shift a 'YYYY-MM-DD' key by n local days (n may be negative). */
+export function addDays(day: string, n: number): string {
+  const [y, m, d] = day.split('-').map(Number);
+  const dt = new Date(y, (m || 1) - 1, (d || 1) + n);
+  const mm = String(dt.getMonth() + 1).padStart(2, '0');
+  const dd = String(dt.getDate()).padStart(2, '0');
+  return `${dt.getFullYear()}-${mm}-${dd}`;
+}
+
 /** A run counts as "ok" only if it exited cleanly (no signal/error, exit 0). */
 export function isOk(it: EodItem): boolean {
   return it.status === 'exited' && (it.exitCode == null || it.exitCode === 0);

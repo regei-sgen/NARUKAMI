@@ -1330,6 +1330,11 @@
   border: 1px solid var(--border-red);
   background: color-mix(in srgb, var(--accent) var(--tint-ghost), transparent);
 }
+.armory-scope-plugin {
+  color: var(--purple);
+  border: 1px solid color-mix(in srgb, var(--purple) 35%, transparent);
+  background: color-mix(in srgb, var(--purple) var(--tint-ghost), transparent);
+}
 .armory-list {
   display: flex;
   flex-direction: column;

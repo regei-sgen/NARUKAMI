@@ -49,6 +49,62 @@ function validDay(s: unknown): string | undefined {
   return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : undefined;
 }
 
+/**
+ * Bounds for an INCLUSIVE day range: from the start of `from`'s local day to the
+ * start of the day AFTER `to` — i.e. [from 00:00, (to+1) 00:00). Single-day
+ * (from === to) reduces to boundsForDayKey. Every EOD activity source
+ * (sessions/runs/commits) already windows on these bounds, so ranges "just work".
+ */
+export function boundsForRange(from: string, to: string): { start: Date; end: Date } {
+  return { start: boundsForDayKey(from).start, end: boundsForDayKey(to).end };
+}
+
+/**
+ * Stable identity for a report: a single day keeps its plain 'YYYY-MM-DD' key
+ * (so pre-range reports keep working unchanged); a multi-day range is 'from_to'.
+ * This is the EodReport.day unique key — no schema change needed.
+ */
+export function rangeKey(from: string, to: string): string {
+  return from === to ? from : `${from}_${to}`;
+}
+
+/** Inverse of rangeKey: a stored key → {from, to} (single day → from === to). */
+export function parseRangeKey(key: string): { from: string; to: string } {
+  const m = /^(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})$/.exec(key);
+  return m ? { from: m[1], to: m[2] } : { from: key, to: key };
+}
+
+/**
+ * Human heading for the report: 'Month D, YYYY' for a single day; for a range,
+ * collapse shared month/year — 'July 1–11, 2026', 'July 28 – August 2, 2026',
+ * or 'December 30, 2025 – January 2, 2026'.
+ */
+export function prettyRange(from: string, to: string): string {
+  if (from === to) return prettyDate(from);
+  const [fy, fm, fd] = from.split('-').map(Number);
+  const [ty, tm, td] = to.split('-').map(Number);
+  if (fy === ty && fm === tm) return `${MONTHS[(fm || 1) - 1]} ${fd}–${td}, ${fy}`;
+  if (fy === ty) return `${MONTHS[(fm || 1) - 1]} ${fd} – ${MONTHS[(tm || 1) - 1]} ${td}, ${fy}`;
+  return `${prettyDate(from)} – ${prettyDate(to)}`;
+}
+
+/**
+ * Resolve a request's date window. Prefers from/to; falls back to the legacy
+ * single `day`; then today. Orders the pair (swaps a reversed range) and caps the
+ * end at today so a stray future date can't widen the window. String comparison
+ * is valid for zero-padded 'YYYY-MM-DD'.
+ */
+export function normalizeRange(fromRaw: unknown, toRaw: unknown, dayRaw?: unknown): { from: string; to: string } {
+  const today = dayKey(new Date());
+  const day = validDay(dayRaw);
+  let from = validDay(fromRaw) ?? day ?? today;
+  let to = validDay(toRaw) ?? day ?? from;
+  if (from > to) [from, to] = [to, from];
+  if (to > today) to = today;
+  if (from > to) from = to;
+  return { from, to };
+}
+
 // ── legacy run-item helpers (kept: still unit-tested and used for the report's
 //    "runs finished today" context text) ──────────────────────────────────────
 export interface EodItem {
@@ -130,9 +186,9 @@ function runsWhere(path: string, start: Date, end: Date) {
 export async function eodRoutes(app: FastifyInstance): Promise<void> {
   // Projects active on a day (default today): Claude sessions (native + NARUKAMI),
   // NARUKAMI runs, and git commits, unioned. Feeds the include-checkbox list.
-  app.get<{ Querystring: { day?: string } }>('/api/eod/active', async (req) => {
-    const day = validDay(req.query.day) ?? dayKey(new Date());
-    const { start, end } = boundsForDayKey(day);
+  app.get<{ Querystring: { from?: string; to?: string; day?: string } }>('/api/eod/active', async (req) => {
+    const { from, to } = normalizeRange(req.query.from, req.query.to, req.query.day);
+    const { start, end } = boundsForRange(from, to);
 
     const registered: RegisteredProject[] = await prisma.project.findMany({
       select: { id: true, name: true, path: true },
@@ -149,14 +205,14 @@ export async function eodRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const projects = await collectActiveProjects({ registered, runsByPath, start, end });
-    return { day, projects };
+    return { from, to, day: rangeKey(from, to), projects };
   });
 
   // Generate + save the day's cross-project report from the selected paths (AI).
-  app.post<{ Body: { day?: string; paths?: string[]; note?: string } }>(
+  app.post<{ Body: { from?: string; to?: string; day?: string; paths?: string[]; note?: string } }>(
     '/api/eod/report',
     async (req, reply) => {
-      const day = validDay(req.body?.day) ?? dayKey(new Date());
+      const { from, to } = normalizeRange(req.body?.from, req.body?.to, req.body?.day);
       const paths = Array.isArray(req.body?.paths)
         ? req.body.paths.filter((p): p is string => typeof p === 'string' && p.length > 0)
         : [];
@@ -164,7 +220,7 @@ export async function eodRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(400).send({ error: 'Select at least one project to include.' });
       }
       const note = typeof req.body?.note === 'string' ? req.body.note.trim().slice(0, 2000) : '';
-      const { start, end } = boundsForDayKey(day);
+      const { start, end } = boundsForRange(from, to);
 
       const registered = await prisma.project.findMany({ select: { name: true, path: true } });
       const nameByPath = new Map(registered.map((r) => [normPath(r.path), r.name]));
@@ -189,11 +245,12 @@ export async function eodRoutes(app: FastifyInstance): Promise<void> {
       }
 
       try {
-        const markdown = await generateEodReport(paths[0], prettyDate(day), inputs, note);
+        const markdown = await generateEodReport(paths[0], prettyRange(from, to), inputs, note);
+        const key = rangeKey(from, to);
         const report = await prisma.eodReport.upsert({
-          where: { day },
+          where: { day: key },
           update: { markdown, projects: JSON.stringify(included) },
-          create: { day, markdown, projects: JSON.stringify(included) },
+          create: { day: key, markdown, projects: JSON.stringify(included) },
         });
         return reply.code(201).send(serializeReport(report));
       } catch (err) {
