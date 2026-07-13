@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../db';
 import {
-  getLiveTranscript,
+  getLiveTranscriptTail,
   isRunning,
   liveRunIds,
   stripAnsi,
@@ -74,14 +74,14 @@ export async function terminalRoutes(app: FastifyInstance): Promise<void> {
         ? Math.min(Math.max(1, Math.floor(requested)), MAX_READ_LINES)
         : DEFAULT_READ_LINES;
 
-      const live = getLiveTranscript(req.params.id);
+      // Bound the work: only the tail can survive tailLines(), so join/strip a
+      // window (~512 chars/line, 64KB floor) instead of the potentially multi-MB
+      // transcript. getLiveTranscriptTail walks whole chunks from the end, so a
+      // truncated escape at the window edge can only dirty the first (dropped)
+      // line of the window.
+      const window = Math.max(64 * 1024, lines * 512);
+      const live = getLiveTranscriptTail(req.params.id, window);
       if (live !== null) {
-        // Bound the work: only the tail can survive tailLines(), so don't run
-        // the ANSI-strip regexes over a potentially multi-MB transcript. Keep a
-        // generous raw window (~512 chars/line, 64KB floor) before stripping; a
-        // truncated escape at the slice edge can only dirty the first (dropped)
-        // line of the window.
-        const window = Math.max(64 * 1024, lines * 512);
         const raw = live.length > window ? live.slice(-window) : live;
         return { live: true, text: tailLines(stripAnsi(raw), lines) };
       }

@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { api } from '../../api';
+import { usePollWhileVisible } from '../../lib/usePoll';
 import type { EmbeddedGodStatus, MemoryGraph as MemoryGraphData } from '../../types';
 import { SessionFleet } from './panels/SessionFleet';
 import { EmbeddedGod } from './panels/EmbeddedGod';
@@ -59,17 +60,12 @@ export function ArgusPanoptes({ selectedPath }: Props) {
     }
   }, []);
 
-  useEffect(() => {
-    void loadStatus();
-    const id = setInterval(() => void loadStatus(), STATUS_POLL_MS);
-    return () => clearInterval(id);
-  }, [loadStatus]);
-
-  useEffect(() => {
-    void loadGraph();
-    const id = setInterval(() => void loadGraph(), GRAPH_POLL_MS);
-    return () => clearInterval(id);
-  }, [loadGraph]);
+  // Both polls pause while the window is hidden: each status tick reaches a
+  // Prisma query + godclaude fs reads (and, on cache expiry, an
+  // Electron-as-node godmonitor spawn) — leaving this tab selected and
+  // minimizing overnight used to keep all of that running for zero viewers.
+  usePollWhileVisible(loadStatus, STATUS_POLL_MS);
+  usePollWhileVisible(loadGraph, GRAPH_POLL_MS);
 
   // Only the project selected in the sidebar lights up. The graph's project field
   // is the Claude-encoded dir name (every non-alphanumeric char → '-'); encoding

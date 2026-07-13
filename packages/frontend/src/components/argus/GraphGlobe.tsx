@@ -1,4 +1,5 @@
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { onWindowVisibility, windowHidden } from '../../lib/visibility';
 
 /**
  * GraphGlobe — a dependency-free, interactive 3D graph renderer. Nodes settle onto
@@ -85,6 +86,8 @@ export function GraphGlobe<T extends GlobeNode = GlobeNode>({
   const movedRef = useRef(false);
   const hoverRef = useRef<T | null>(null);
   const mouseRef = useRef<{ x: number; y: number } | null>(null);
+  const runningRef = useRef(false); // is the rAF loop currently scheduled?
+  const wakeRef = useRef<(() => void) | null>(null); // restart the loop from outside the effect
   const [tip, setTip] = useState<{ x: number; y: number; node: T } | null>(null);
   const tipRef = useRef<{ x: number; y: number; node: T } | null>(null);
   tipRef.current = tip;
@@ -125,7 +128,10 @@ export function GraphGlobe<T extends GlobeNode = GlobeNode>({
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     };
     sizeCanvas();
-    const onResize = () => sizeCanvas();
+    const onResize = () => {
+      sizeCanvas();
+      wakeRef.current?.(); // repaint at the new size even if the loop was parked
+    };
     window.addEventListener('resize', onResize);
 
     const pos = posRef.current;
@@ -150,6 +156,7 @@ export function GraphGlobe<T extends GlobeNode = GlobeNode>({
 
     let raf = 0;
     let tick = 0;
+    let glowTimer: ReturnType<typeof setTimeout> | null = null;
     const step = () => {
       tick += 1;
       const alpha = alphaRef.current;
@@ -352,28 +359,79 @@ export function GraphGlobe<T extends GlobeNode = GlobeNode>({
       if (m && hover) setTip({ x: m.x, y: m.y, node: hover });
       else if (tipRef.current) setTip(null);
 
+      // Idle-stop (same pattern as GraphFlat): full rate only while the layout
+      // is settling or the user is interacting. A settled globe whose only
+      // motion is the pulsing highlight halo throttles to ~12fps (the slow
+      // sine reads identically); a fully static globe parks the loop at ~0 CPU
+      // until wake() reschedules it. Without this the per-frame projection +
+      // edge sort + full repaint ran at display refresh forever — including
+      // while the window was minimized (backgroundThrottling:false).
+      const interacting = alphaRef.current > 0.02 || !!mouseRef.current || draggingRef.current;
+      const glowOnly = !interacting && !!highlight && highlight.size > 0;
+      if (windowHidden()) runningRef.current = false; // park; visibility effect wakes us
+      else if (interacting) raf = requestAnimationFrame(step);
+      else if (glowOnly)
+        glowTimer = setTimeout(() => {
+          glowTimer = null;
+          raf = requestAnimationFrame(step);
+        }, 80);
+      else runningRef.current = false;
+    };
+    const wake = () => {
+      // A glow-throttled loop is "running" but its next frame is ~80ms out —
+      // interaction needs the frame NOW, so cancel the timer and go direct.
+      if (glowTimer) {
+        clearTimeout(glowTimer);
+        glowTimer = null;
+        raf = requestAnimationFrame(step);
+        return;
+      }
+      if (runningRef.current) return;
+      runningRef.current = true;
       raf = requestAnimationFrame(step);
     };
+    wakeRef.current = wake;
+    runningRef.current = true;
     raf = requestAnimationFrame(step);
 
     const onWheel = (ev: WheelEvent) => {
       ev.preventDefault();
       const next = zoomRef.current * Math.exp(-ev.deltaY * 0.0015);
       zoomRef.current = Math.min(4.5, Math.max(0.45, next));
+      wake(); // a parked loop must resume to render the new zoom
     };
     canvas.addEventListener('wheel', onWheel, { passive: false });
 
     return () => {
       cancelAnimationFrame(raf);
+      if (glowTimer) clearTimeout(glowTimer);
+      runningRef.current = false;
+      wakeRef.current = null;
       window.removeEventListener('resize', onResize);
       canvas.removeEventListener('wheel', onWheel);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [graphSig, height]);
 
+  // A highlight/steady glow can appear (or colors shift with it) while the loop
+  // is parked — wake it so the new state actually renders.
+  useEffect(() => {
+    wakeRef.current?.();
+  }, [highlightIds, steadyIds]);
+
+  // Parked-while-hidden loops resume when the window comes back.
+  useEffect(
+    () =>
+      onWindowVisibility((hidden) => {
+        if (!hidden) wakeRef.current?.();
+      }),
+    [],
+  );
+
   const onMove = (ev: React.PointerEvent) => {
     const rect = (ev.currentTarget as HTMLElement).getBoundingClientRect();
     mouseRef.current = { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
+    wakeRef.current?.(); // need frames to update hover/tooltip
   };
   const onLeave = () => {
     mouseRef.current = null;
@@ -383,6 +441,7 @@ export function GraphGlobe<T extends GlobeNode = GlobeNode>({
     ev.preventDefault();
     draggingRef.current = true;
     movedRef.current = false;
+    wakeRef.current?.(); // a parked loop must resume to render the rotation
     let last = { x: ev.clientX, y: ev.clientY };
     const canvas = canvasRef.current;
     if (canvas) canvas.style.cursor = 'grabbing';
@@ -414,6 +473,7 @@ export function GraphGlobe<T extends GlobeNode = GlobeNode>({
   const onDoubleClick = () => {
     rotRef.current = { yaw: 0.5, pitch: -0.28 };
     zoomRef.current = 1;
+    wakeRef.current?.(); // render the reset view even if the loop was parked
   };
 
   return (

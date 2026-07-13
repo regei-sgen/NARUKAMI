@@ -28,6 +28,25 @@ describe('shellFor', () => {
     expect(r.args).toEqual(['-NoLogo', '-NoProfile', '-Command', 'npm run dev']);
     expect(r.file).toMatch(/pwsh(\.exe)?$|powershell\.exe$/i);
   });
+  it("runs in cmd.exe when shell='cmd' on Windows (verbatim string, not argv)", () => {
+    setPlatform('win32');
+    // A string bypasses node-pty's argv join, whose CRT quote-escaping (\")
+    // cmd.exe cannot parse — an array here corrupts quoted commands.
+    expect(shellFor('npm run dev', 'cmd')).toEqual({
+      file: 'cmd.exe',
+      args: '/d /s /c "npm run dev"',
+    });
+    // Inner quotes must survive verbatim (/s strips only the outer pair).
+    expect(shellFor('echo "a b"', 'cmd').args).toBe('/d /s /c "echo "a b""');
+  });
+  it("ignores shell='cmd' on POSIX (no cmd.exe there)", () => {
+    setPlatform('linux');
+    const prev = process.env.SHELL;
+    process.env.SHELL = '/bin/zsh';
+    expect(shellFor('ls', 'cmd').file).toBe('/bin/zsh');
+    if (prev === undefined) delete process.env.SHELL;
+    else process.env.SHELL = prev;
+  });
   it('uses $SHELL -lc on POSIX', () => {
     setPlatform('linux');
     const prev = process.env.SHELL;
@@ -49,6 +68,10 @@ describe('interactiveShell', () => {
   it('is a bare PowerShell on Windows', () => {
     setPlatform('win32');
     expect(interactiveShell()).toEqual({ file: 'powershell.exe', args: ['-NoLogo'] });
+  });
+  it("is a bare cmd.exe when shell='cmd' on Windows", () => {
+    setPlatform('win32');
+    expect(interactiveShell('cmd')).toEqual({ file: 'cmd.exe', args: [] });
   });
   it('is an interactive $SHELL on POSIX', () => {
     setPlatform('linux');

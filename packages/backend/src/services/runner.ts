@@ -15,6 +15,11 @@ export type RunFinalStatus = 'exited' | 'killed' | 'error';
 
 export type RunnerEvent =
   | { type: 'data'; chunk: string }
+  // The pty grid changed (any attached client resized it). Broadcast so every
+  // OTHER attached view can adopt the same grid — one pty has ONE size, and a
+  // desktop and a phone mirroring the same run must agree on it or both render
+  // mis-wrapped output.
+  | { type: 'resize'; cols: number; rows: number }
   | { type: 'exit'; status: RunFinalStatus; exitCode: number | null };
 
 type Subscriber = (event: RunnerEvent) => void;
@@ -35,8 +40,11 @@ export interface RunTransport {
   onExit(cb: (info: { exitCode: number | null }) => void): void;
 }
 
-/** Wrap a local node-pty process as a RunTransport. */
-function ptyTransport(file: string, args: string[], cwd: string): RunTransport {
+/** Wrap a local node-pty process as a RunTransport. `args` may be a verbatim
+ * command-line STRING: node-pty's argv→string join escapes quotes with CRT
+ * backslash rules, which cmd.exe's parser does not understand — so cmd
+ * invocations must bypass the join entirely (see shellFor). */
+function ptyTransport(file: string, args: string | string[], cwd: string): RunTransport {
   const proc = pty.spawn(file, args, {
     name: 'xterm-color',
     cols: 80,
@@ -78,6 +86,9 @@ interface ManagedRun {
   /** In-memory rolling transcript (capped) for gap-free live (re)connects. */
   transcript: string[];
   transcriptChars: number;
+  /** Current pty grid (spawn default until a client resizes it). */
+  cols: number;
+  rows: number;
   exited: boolean;
   finalStatus: RunFinalStatus | null;
   finalExitCode: number | null;
@@ -98,9 +109,19 @@ const BATCH_MAX_CHARS = 256 * 1024;
 // The DB still holds the full history for post-mortem; live reconnects see the tail.
 const MAX_TRANSCRIPT_CHARS = 2_000_000;
 
+/** Which Windows shell a command / terminal should use. Ignored on POSIX. */
+export type ShellKind = 'powershell' | 'cmd';
+
 /** Pick a shell + args that run `command` and stay attached to the pty. */
-export function shellFor(command: string): { file: string; args: string[] } {
+export function shellFor(command: string, shell: ShellKind = 'powershell'): { file: string; args: string | string[] } {
   if (process.platform === 'win32') {
+    if (shell === 'cmd') {
+      // /d: skip AutoRun; /s: strip the outer quotes only; /c: run + exit.
+      // A verbatim STRING, not an argv array: node-pty would join an array
+      // with CRT quote-escaping (\" ) that cmd.exe cannot parse, corrupting
+      // any command containing double quotes.
+      return { file: 'cmd.exe', args: `/d /s /c "${command}"` };
+    }
     // Prefer PowerShell 7+ (pwsh): it supports `&&` / `||` command chaining that
     // Windows PowerShell 5.1 (powershell.exe) PARSE-ERRORS on — very common in
     // detected/custom run commands. Fall back to powershell.exe when pwsh isn't
@@ -110,8 +131,8 @@ export function shellFor(command: string): { file: string; args: string[] } {
     const file = pwsh !== 'pwsh' ? pwsh : 'powershell.exe';
     return { file, args: ['-NoLogo', '-NoProfile', '-Command', command] };
   }
-  const shell = process.env.SHELL || 'bash';
-  return { file: shell, args: ['-lc', command] };
+  const posixShell = process.env.SHELL || 'bash';
+  return { file: posixShell, args: ['-lc', command] };
 }
 
 // NARUKAMI-internal / secret-bearing env vars that must NOT leak into the
@@ -182,7 +203,10 @@ function flushPending(m: ManagedRun): void {
   m.pendingChunks.length = 0;
   m.pendingChars = 0;
   appendTranscript(m, chunk);
-  for (const sub of m.subscribers) sub({ type: 'data', chunk });
+  // ONE event object shared by every subscriber, so the ws layer can serialize
+  // the wire payload once per batch instead of once per attached socket.
+  const event: RunnerEvent = { type: 'data', chunk };
+  for (const sub of m.subscribers) sub(event);
   m.logBuffer.push(chunk);
   scheduleFlush(m);
 }
@@ -234,15 +258,18 @@ export interface StartOptions {
   runId: string;
   command: string;
   cwd: string;
+  /** Windows shell to run the command in (default PowerShell). */
+  shell?: ShellKind;
 }
 
 /** A bare interactive shell (no command) — a project-scoped terminal. */
-export function interactiveShell(): { file: string; args: string[] } {
+export function interactiveShell(shell: ShellKind = 'powershell'): { file: string; args: string[] } {
   if (process.platform === 'win32') {
+    if (shell === 'cmd') return { file: 'cmd.exe', args: [] };
     return { file: 'powershell.exe', args: ['-NoLogo'] };
   }
-  const shell = process.env.SHELL || 'bash';
-  return { file: shell, args: ['-i'] };
+  const posixShell = process.env.SHELL || 'bash';
+  return { file: posixShell, args: ['-i'] };
 }
 
 /**
@@ -264,6 +291,8 @@ export function registerRun(runId: string, transport: RunTransport): void {
     batchTimer: null,
     transcript: [],
     transcriptChars: 0,
+    cols: 80, // both pty transports spawn at 80x30 (ptyTransport + admin broker)
+    rows: 30,
     exited: false,
     finalStatus: null,
     finalExitCode: null,
@@ -288,9 +317,12 @@ export function registerRun(runId: string, transport: RunTransport): void {
     managed.finalExitCode = exitCode ?? null;
 
     // Notify live clients immediately.
-    for (const sub of managed.subscribers) {
-      sub({ type: 'exit', status: managed.finalStatus, exitCode: managed.finalExitCode });
-    }
+    const exitEvent: RunnerEvent = {
+      type: 'exit',
+      status: managed.finalStatus,
+      exitCode: managed.finalExitCode,
+    };
+    for (const sub of managed.subscribers) sub(exitEvent);
 
     // Persist remaining logs + final status, THEN forget the run. Keeping the
     // record in the map until the DB write commits lets getFinalState() serve an
@@ -326,7 +358,7 @@ export function registerRun(runId: string, transport: RunTransport): void {
 }
 
 /** Spawn a local pty, wire it up, and track it. Throws if spawn fails. */
-function spawnManaged(runId: string, file: string, args: string[], cwd: string): { pid: number } {
+function spawnManaged(runId: string, file: string, args: string | string[], cwd: string): { pid: number } {
   const transport = ptyTransport(file, args, cwd);
   registerRun(runId, transport);
   return { pid: transport.pid };
@@ -334,13 +366,13 @@ function spawnManaged(runId: string, file: string, args: string[], cwd: string):
 
 /** Spawn a pty for `command`. Throws synchronously if the shell can't start. */
 export function startRun(opts: StartOptions): { pid: number } {
-  const { file, args } = shellFor(opts.command);
+  const { file, args } = shellFor(opts.command, opts.shell);
   return spawnManaged(opts.runId, file, args, opts.cwd);
 }
 
-/** Open a bare interactive shell (PowerShell / $SHELL) in `cwd`. */
-export function startShell(opts: { runId: string; cwd: string }): { pid: number } {
-  const { file, args } = interactiveShell();
+/** Open a bare interactive shell (PowerShell / cmd / $SHELL) in `cwd`. */
+export function startShell(opts: { runId: string; cwd: string; shell?: ShellKind }): { pid: number } {
+  const { file, args } = interactiveShell(opts.shell);
   return spawnManaged(opts.runId, file, args, opts.cwd);
 }
 
@@ -440,6 +472,7 @@ function scheduleClaudeInit(
 
   const attachment = attach(runId, (event) => {
     if (done) return;
+    if (event.type === 'resize') return; // grid change — irrelevant to injection
     if (event.type !== 'data') {
       finish(false); // session exited before we could inject
       return;
@@ -527,8 +560,21 @@ export function writeToRun(runId: string, data: string): boolean {
 export function resizeRun(runId: string, cols: number, rows: number): boolean {
   const m = runs.get(runId);
   if (!m || m.exited) return false;
+  // Clamp to the SAME bounds the clients clamp adoption to (TerminalTab /
+  // MobileTerminal): if the server accepted a grid clients refuse to adopt,
+  // the one-true-grid invariant would silently break for absurd sizes.
+  const c = Math.max(2, Math.min(500, Math.floor(cols)));
+  const r = Math.max(1, Math.min(300, Math.floor(rows)));
   try {
-    m.transport.resize(Math.max(1, Math.floor(cols)), Math.max(1, Math.floor(rows)));
+    if (c === m.cols && r === m.rows) return true; // no-op — don't reflow or re-broadcast
+    m.transport.resize(c, r);
+    m.cols = c;
+    m.rows = r;
+    // Fan the new grid out to every attached client (including the resizer —
+    // adopting its own size is a client-side no-op) so all views stay on the
+    // one true grid.
+    const resizeEvent: RunnerEvent = { type: 'resize', cols: c, rows: r };
+    for (const sub of m.subscribers) sub(resizeEvent);
     return true;
   } catch {
     return false;
@@ -552,6 +598,13 @@ export function stopRun(runId: string): boolean {
     // best effort — onExit will still fire if it was already dying
   }
   return true;
+}
+
+/** Current pty grid for a live run (null when not live). */
+export function getRunSize(runId: string): { cols: number; rows: number } | null {
+  const m = runs.get(runId);
+  if (!m || m.exited) return null;
+  return { cols: m.cols, rows: m.rows };
 }
 
 export function isRunning(runId: string): boolean {
@@ -587,6 +640,28 @@ export function getLiveTranscript(runId: string): string | null {
   if (!m || m.exited) return null;
   flushPending(m);
   return m.transcript.join('');
+}
+
+/**
+ * Tail of a live run's in-memory transcript: at least the last `maxChars`
+ * characters (never mid-chunk truncated — whole chunks are taken from the end,
+ * so the result may be slightly longer). The read endpoint only ever serves a
+ * bounded tail; joining the full ≤2MB transcript to keep ~3% of it allocated
+ * megabytes of garbage per orchestration read. Returns null when not live.
+ */
+export function getLiveTranscriptTail(runId: string, maxChars: number): string | null {
+  const m = runs.get(runId);
+  if (!m || m.exited) return null;
+  flushPending(m);
+  let take = 0;
+  let chars = 0;
+  for (let i = m.transcript.length - 1; i >= 0 && chars < maxChars; i -= 1) {
+    chars += m.transcript[i].length;
+    take += 1;
+  }
+  return take === m.transcript.length
+    ? m.transcript.join('')
+    : m.transcript.slice(m.transcript.length - take).join('');
 }
 
 /**

@@ -1,5 +1,7 @@
 import {
+  lazy,
   type PointerEvent as ReactPointerEvent,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -10,17 +12,28 @@ import { api, hasToken } from './api';
 import type { ActiveRun, Project, RestoredRun, RunCommand, RunStatus, Toast, UiSettings } from './types';
 import { ProjectSidebar } from './components/ProjectSidebar';
 import { ProjectPanel } from './components/ProjectPanel';
-import { CodeEditor } from './components/CodeEditor';
+
+// Lazy: CodeEditor drags in ALL of Monaco (its module-scope setup + 5 workers —
+// the bulk of the SPA bundle). Splitting it means popped-out terminal windows
+// and the phone share page never parse/execute megabytes of editor code to
+// render one xterm, and the main window pays for Monaco only when the Editor
+// view is first opened.
+const CodeEditor = lazy(() =>
+  import('./components/CodeEditor').then((m) => ({ default: m.CodeEditor })),
+);
 import { EodView } from './components/EodView';
 import { ArgusPanoptes } from './components/argus/ArgusPanoptes';
 import { CodeMap } from './components/CodeMap';
 import { Armory } from './components/Armory';
+import { BrowserTab } from './components/BrowserTab';
+import { DEFAULT_DEVICE_IDS, DEVICE_PRESETS } from './lib/browserView';
 import { TerminalTab } from './components/TerminalTab';
 import { ThemeSelector } from './components/ThemeSelector';
 import { HeaderCluster } from './components/HeaderCluster';
 import { Toasts } from './components/Toasts';
 import { Ic } from './components/icons';
 import { finishToastFor, fireNativeNotification, primeNotifications, shouldShowInAppToast, taskToast } from './lib/notify';
+import { desktop } from './lib/desktop';
 
 /** Theme variants — '' is Beni, the default blade-red. Values map to [data-theme];
  *  each accent mirrors the variant's --accent token for the picker swatch. */
@@ -43,7 +56,7 @@ export default function App() {
   const [activeTabByProject, setActiveTabByProject] = useState<Record<string, string>>({});
   // Views are peer tabs (Runner / Editor / EOD / Argus / Code Map). Argus is a
   // global read-only monitor; the rest are scoped to the selected project.
-  const [view, setView] = useState<'runner' | 'editor' | 'eod' | 'argus' | 'codemap' | 'armory'>('runner');
+  const [view, setView] = useState<'runner' | 'editor' | 'eod' | 'argus' | 'codemap' | 'armory' | 'browser'>('runner');
   // Terminal dock: docked bottom (resizable height) or right (resizable width),
   // plus minimize. All persisted server-side.
   const [dockPosition, setDockPosition] = useState<'bottom' | 'right'>('bottom');
@@ -51,6 +64,10 @@ export default function App() {
   const [dockWidth, setDockWidth] = useState<number>(480);
   const [dockMinimized, setDockMinimized] = useState<boolean>(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
+  // The terminal dock element + a highlight flag, for dragging a torn-off window
+  // back over it to re-dock (desktop shell only).
+  const dockRef = useRef<HTMLElement>(null);
+  const [dockHint, setDockHint] = useState<boolean>(false);
   // Theme variant ('' = Beni, the default blade-red). Persisted per device.
   const [theme, setTheme] = useState<string>(() => localStorage.getItem('narukami-theme') ?? '');
   useEffect(() => {
@@ -60,6 +77,12 @@ export default function App() {
   }, [theme]);
   // Last-open editor file per project (restored on reopen).
   const [editorFileByProject, setEditorFileByProject] = useState<Record<string, string>>({});
+  // Browser view: last committed preview URL per project (persisted) and the
+  // enabled device presets (global). Detected dev-server URLs are ephemeral —
+  // a stale port from a previous session would be worse than nothing.
+  const [browserUrlByProject, setBrowserUrlByProject] = useState<Record<string, string>>({});
+  const [browserDevices, setBrowserDevices] = useState<string[]>(DEFAULT_DEVICE_IDS);
+  const [devUrlByProject, setDevUrlByProject] = useState<Record<string, string>>({});
   // Inline tab rename.
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
@@ -138,11 +161,18 @@ export default function App() {
           ui.view === 'eod' ||
           ui.view === 'argus' ||
           ui.view === 'codemap' ||
-          ui.view === 'armory'
+          ui.view === 'armory' ||
+          ui.view === 'browser'
         )
           setView(ui.view);
         if (ui.activeTabByProject) setActiveTabByProject(ui.activeTabByProject);
         if (ui.editorFileByProject) setEditorFileByProject(ui.editorFileByProject);
+        if (ui.browserUrlByProject) setBrowserUrlByProject(ui.browserUrlByProject);
+        if (Array.isArray(ui.browserDevices)) {
+          // Drop ids that no longer match a preset (renames/removals).
+          const known = ui.browserDevices.filter((id) => DEVICE_PRESETS.some((d) => d.id === id));
+          if (known.length) setBrowserDevices(known);
+        }
         const savedSel =
           ui.selectedId && list.some((p) => p.id === ui.selectedId)
             ? ui.selectedId
@@ -171,6 +201,8 @@ export default function App() {
       sidebarCollapsed,
       activeTabByProject,
       editorFileByProject,
+      browserUrlByProject,
+      browserDevices,
     };
     const t = setTimeout(() => {
       void api.saveSettings({ ui }).catch(() => undefined);
@@ -186,6 +218,8 @@ export default function App() {
     sidebarCollapsed,
     activeTabByProject,
     editorFileByProject,
+    browserUrlByProject,
+    browserDevices,
   ]);
 
   // Drag the dock's inner edge to resize it. Docked bottom → drag the top edge
@@ -307,6 +341,18 @@ export default function App() {
     setEditorFileByProject((m) => (m[projectId] === filePath ? m : { ...m, [projectId]: filePath }));
   }, []);
 
+  const setBrowserUrl = useCallback((projectId: string, url: string) => {
+    setBrowserUrlByProject((m) => (m[projectId] === url ? m : { ...m, [projectId]: url }));
+  }, []);
+
+  // Stable (empty deps, reads via activeRunsRef) so memoized TerminalTabs
+  // don't re-render every time App does.
+  const handleDevUrl = useCallback((runId: string, url: string) => {
+    const run = activeRunsRef.current.find((r) => r.runId === runId);
+    if (!run) return;
+    setDevUrlByProject((m) => (m[run.projectId] === url ? m : { ...m, [run.projectId]: url }));
+  }, []);
+
   // Stable (useCallback, setters/refs only) so memoized TerminalTabs don't
   // re-render every time App does.
   const restartRun = useCallback(async (oldRunId: string, resume = false) => {
@@ -341,6 +387,126 @@ export default function App() {
   }, []);
 
   const continueRun = useCallback((runId: string) => void restartRun(runId, true), [restartRun]);
+
+  // Tear a terminal off into its own desktop window (move semantics): ask the
+  // shell to open it — spawned at the cursor when `pos` is given — and drop the
+  // tab from THIS window. The pty keeps running server-side; the window owns the
+  // live view until it's re-docked (dragged back or closed) via reclaimRun.
+  // Stable (reads the run from the setter's current value) so the memoized
+  // TerminalTabs aren't re-rendered by a changing onPopOut identity.
+  const popOut = useCallback((runId: string, pos?: { x: number; y: number }) => {
+    const bridge = desktop();
+    if (!bridge) return;
+    setActiveRuns((cur) => {
+      const run = cur.find((r) => r.runId === runId);
+      if (!run) return cur;
+      bridge.popOut(runId, pos);
+      const remaining = cur.filter((r) => r.runId !== runId);
+      setActiveTabByProject((m) => {
+        if (m[run.projectId] !== runId) return m;
+        const sibling = [...remaining].reverse().find((r) => r.projectId === run.projectId);
+        const next = { ...m };
+        if (sibling) next[run.projectId] = sibling.runId;
+        else delete next[run.projectId];
+        return next;
+      });
+      return remaining;
+    });
+  }, []);
+
+  // Re-dock a torn-off terminal (its window was dragged back over the dock, or
+  // closed). Read current metadata from the workspace by runId — not a stale
+  // snapshot — so a restart done in the torn-off window is reflected here.
+  const reclaimRun = useCallback(async (runId: string) => {
+    try {
+      const ws = await api.getWorkspace();
+      const r = ws.runs.find((x) => x.runId === runId);
+      if (!r) return; // ended while detached — nothing to re-dock
+      setActiveRuns((cur) =>
+        cur.some((x) => x.runId === runId)
+          ? cur
+          : [
+              ...cur,
+              {
+                runId: r.runId,
+                projectId: r.projectId,
+                projectName: r.projectName,
+                label: r.label,
+                customLabel: r.name ?? undefined,
+                kind: r.kind,
+                status: 'connecting',
+                exitCode: null,
+              },
+            ],
+      );
+      setActiveTabByProject((m) => ({ ...m, [r.projectId]: runId }));
+    } catch {
+      /* transient — the run stays live server-side and restores on reopen */
+    }
+  }, []);
+
+  useEffect(() => {
+    const bridge = desktop();
+    if (!bridge) return;
+    return bridge.onReclaim((runId) => void reclaimRun(runId));
+  }, [reclaimRun]);
+
+  // Highlight the dock while a torn-off window is dragged back over it.
+  useEffect(() => {
+    const bridge = desktop();
+    if (!bridge) return;
+    return bridge.onDockHint((active) => setDockHint(active));
+  }, []);
+
+  // Report the dock's on-screen rectangle to the shell so it can tell when a
+  // torn-off window is dragged back over it. Re-measured whenever the layout that
+  // affects the dock's size/position changes, and on window resize.
+  useEffect(() => {
+    const bridge = desktop();
+    if (!bridge) return;
+    const report = () => {
+      const el = dockRef.current;
+      const r = el?.getBoundingClientRect();
+      bridge.reportDockRect(
+        r && r.width > 0 && r.height > 0
+          ? { x: r.left, y: r.top, width: r.width, height: r.height }
+          : null,
+      );
+    };
+    report();
+    window.addEventListener('resize', report);
+    return () => window.removeEventListener('resize', report);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dockPosition, dockHeight, dockWidth, dockMinimized, sidebarCollapsed, view, selectedId, activeRuns.length]);
+
+  // Drag a terminal tab out of the strip to tear it off. We don't hijack the
+  // click: only a press that travels a real distance AND is released outside the
+  // dock detaches (at the cursor). A plain click still just selects the tab.
+  const beginTabDrag = (e: ReactPointerEvent, runId: string) => {
+    if (e.button !== 0 || !desktop()) return;
+    const start = { x: e.clientX, y: e.clientY };
+    const onMove = (ev: PointerEvent) => {
+      if (Math.hypot(ev.clientX - start.x, ev.clientY - start.y) > 8) {
+        document.body.classList.add('tab-tearing');
+      }
+    };
+    const onUp = (ev: PointerEvent) => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      document.body.classList.remove('tab-tearing');
+      const dist = Math.hypot(ev.clientX - start.x, ev.clientY - start.y);
+      const rect = dockRef.current?.getBoundingClientRect();
+      const outside =
+        !rect ||
+        ev.clientX < rect.left ||
+        ev.clientX > rect.right ||
+        ev.clientY < rect.top ||
+        ev.clientY > rect.bottom;
+      if (dist > 30 && outside) popOut(runId, { x: ev.screenX, y: ev.screenY });
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
 
   const addProject = async (path: string) => {
     setError(null);
@@ -404,11 +570,12 @@ export default function App() {
     }
   };
 
-  const openShell = async (project: Project, admin = false) => {
+  const openShell = async (project: Project, admin = false, shell: 'powershell' | 'cmd' = 'powershell') => {
     setError(null);
     try {
-      const { runId, elevated, pending } = await api.openShell(project.id, admin);
-      openRunTab(runId, project, admin ? 'shell (admin)' : 'shell', 'shell', {
+      const { runId, elevated, pending } = await api.openShell(project.id, admin, shell);
+      const label = admin ? 'shell (admin)' : shell === 'cmd' ? 'cmd' : 'shell';
+      openRunTab(runId, project, label, 'shell', {
         elevated: elevated ?? admin,
         pending: pending ?? admin,
       });
@@ -642,6 +809,12 @@ export default function App() {
                     Editor
                   </button>
                   <button
+                    className={`vs-btn ${view === 'browser' ? 'active' : ''}`}
+                    onClick={() => confirmLeaveEditor() && setView('browser')}
+                  >
+                    Browser
+                  </button>
+                  <button
                     className={`vs-btn ${view === 'eod' ? 'active' : ''}`}
                     onClick={() => confirmLeaveEditor() && setView('eod')}
                   >
@@ -701,14 +874,26 @@ export default function App() {
                   <div className="runner-scroll">
                     <Armory />
                   </div>
-                ) : (
-                  <CodeEditor
+                ) : view === 'browser' ? (
+                  <BrowserTab
                     key={selected.id}
                     project={selected}
-                    initialFile={editorFileByProject[selected.id]}
-                    onOpenFile={(p) => setEditorFile(selected.id, p)}
-                    onDirtyChange={setEditorDirty}
+                    initialUrl={browserUrlByProject[selected.id]}
+                    detectedUrl={devUrlByProject[selected.id] ?? null}
+                    devices={browserDevices}
+                    onUrlChange={setBrowserUrl}
+                    onDevicesChange={setBrowserDevices}
                   />
+                ) : (
+                  <Suspense fallback={<div className="empty">Loading editor…</div>}>
+                    <CodeEditor
+                      key={selected.id}
+                      project={selected}
+                      initialFile={editorFileByProject[selected.id]}
+                      onOpenFile={(p) => setEditorFile(selected.id, p)}
+                      onDirtyChange={setEditorDirty}
+                    />
+                  </Suspense>
                 )}
               </>
             ) : (
@@ -721,9 +906,10 @@ export default function App() {
         </div>
 
         <section
+          ref={dockRef}
           className={`terminals dock-${dockPosition} ${projectRuns.length ? 'open' : ''} ${
             dockMinimized ? 'minimized' : ''
-          }`}
+          } ${dockHint ? 'dock-hint' : ''}`}
           style={
             projectRuns.length && !dockMinimized
               ? dockPosition === 'right'
@@ -732,6 +918,7 @@ export default function App() {
               : undefined
           }
         >
+          {dockHint && <div className="dock-drop-hint">Drop to dock terminal</div>}
           {activeRuns.length > 0 && (
             <>
               {projectRuns.length > 0 && !dockMinimized && (
@@ -813,12 +1000,13 @@ export default function App() {
                         ) : (
                           <button
                             className="tab-btn"
+                            onPointerDown={(e) => beginTabDrag(e, r.runId)}
                             onClick={() => {
                               selectTab(r.runId);
                               if (dockMinimized) setDockMinimized(false);
                             }}
                             onDoubleClick={() => startRename(r)}
-                            title="Double-click to rename"
+                            title="Drag out to a window · double-click to rename"
                           >
                             <span className={`dot dot-${r.status}`} />
                             {r.elevated ? <><Ic name="shield" /> </> : null}
@@ -893,7 +1081,9 @@ export default function App() {
                       onRestart={restartRun}
                       onContinue={continueRun}
                       onActivity={onActivity}
+                      onDevUrl={handleDevUrl}
                       codeMapEmbed={codeMapEmbedByProject.get(r.projectId) ?? false}
+                      onPopOut={desktop() ? popOut : undefined}
                     />
                   </div>
                 ))}

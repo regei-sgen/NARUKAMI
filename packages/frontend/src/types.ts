@@ -6,6 +6,7 @@ export interface RunCommand {
   cwd: string | null;
   isDefault: boolean;
   source: string; // "detected" | "custom"
+  shell: 'powershell' | 'cmd'; // which Windows shell runs it (PS/CMD toggle)
   createdAt: string;
 }
 
@@ -69,6 +70,75 @@ export interface FileHead {
   path: string;
   committed: boolean; // false = new/untracked (diff against empty)
   content: string; // committed (HEAD) content
+}
+
+// Working-tree state of a file relative to the last commit — added (green),
+// modified (amber), or deleted (red). Drives the editor's change highlighting.
+export type GitChange = 'added' | 'modified' | 'deleted';
+
+export interface GitFileStatus {
+  path: string; // project-relative, POSIX separators
+  status: GitChange;
+}
+
+export interface GitStatus {
+  isRepo: boolean;
+  files: GitFileStatus[];
+}
+
+// A contiguous run of changed lines (1-based, inclusive) on the working-tree side.
+export interface DiffRange {
+  start: number;
+  end: number;
+  type: GitChange;
+}
+
+export interface GitDiff {
+  isRepo: boolean;
+  tracked: boolean; // false → untracked; the whole open file is treated as added
+  ranges: DiffRange[];
+}
+
+// --- mobile LAN share (QR access to a live terminal over the local network) ---
+export interface ShareResult {
+  id: string;
+  runId: string;
+  canInput: boolean;
+  expiresAt: number;
+  url: string; // the QR payload — contains the secret token, treat as private
+  relay: { host: string; port: number };
+}
+export interface PublicShare {
+  id: string;
+  runId: string;
+  canInput: boolean;
+  createdAt: number;
+  expiresAt: number;
+}
+// Share-scoped run metadata the phone sees (no master-token surface).
+export interface MobileRunInfo {
+  runId: string;
+  projectName: string;
+  kind: 'command' | 'shell' | 'claude';
+  label: string;
+  live: boolean;
+  status: string;
+  exitCode: number | null;
+  canInput: boolean;
+  expiresAt: number;
+  // Device gate: the desktop must allow THIS phone before the stream opens.
+  approval: 'pending' | 'approved' | 'denied';
+}
+// A phone that has knocked on a shared terminal (desktop-side monitor view).
+export interface MobileDeviceInfo {
+  deviceId: string;
+  runId: string;
+  ip: string;
+  userAgent: string;
+  state: 'pending' | 'approved' | 'denied';
+  firstSeen: number;
+  lastSeen: number;
+  connections: number; // live websocket count (0 = knocked but not streaming)
 }
 
 export type RunStatus = 'connecting' | 'running' | 'exited' | 'killed' | 'error';
@@ -151,7 +221,7 @@ export interface EodEntry {
 // Persisted UI layout (stored server-side under the 'ui' settings key).
 export interface UiSettings {
   selectedId?: string | null;
-  view?: 'runner' | 'editor' | 'eod' | 'argus' | 'codemap' | 'armory';
+  view?: 'runner' | 'editor' | 'eod' | 'argus' | 'codemap' | 'armory' | 'browser';
   dockPosition?: 'bottom' | 'right';
   dockHeight?: number;
   dockWidth?: number;
@@ -159,6 +229,8 @@ export interface UiSettings {
   sidebarCollapsed?: boolean;
   activeTabByProject?: Record<string, string>;
   editorFileByProject?: Record<string, string>;
+  browserUrlByProject?: Record<string, string>;
+  browserDevices?: string[]; // enabled device-preset ids (global, not per project)
 }
 
 export interface WorkspaceState {

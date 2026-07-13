@@ -4,6 +4,14 @@ import { isRunning, startClaude, startRun, startShell, stopRun } from '../servic
 import { startAdminShell } from '../services/brokerServer';
 import { AnalyzerError, diagnoseRun } from '../services/analyzer';
 
+// Effort injected into fresh Claude tabs when the caller doesn't pick one.
+// `ultracode` = xhigh + dynamic workflow fan-out — maximum thoroughness, by
+// the owner's explicit choice. Its parallel subagents' tool storms are the
+// dominant CPU cost of a busy Claude tab (NARUKAMI's own runtime is ~1%), so
+// anyone chasing "NARUKAMI CPU usage" should look here first, not at the
+// streaming pipeline. One constant so launch and restart can never disagree.
+const DEFAULT_CLAUDE_EFFORT = 'ultracode';
+
 export async function runRoutes(app: FastifyInstance): Promise<void> {
   // Start a run for one of a project's detected commands.
   app.post<{ Params: { id: string }; Body: { commandId?: string } }>(
@@ -34,7 +42,8 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
       });
 
       try {
-        const { pid } = startRun({ runId: run.id, command: cmd.command, cwd });
+        const shell = cmd.shell === 'cmd' ? 'cmd' : 'powershell';
+        const { pid } = startRun({ runId: run.id, command: cmd.command, cwd, shell });
         await prisma.run.update({ where: { id: run.id }, data: { pid } });
         return reply.code(201).send({ runId: run.id, pid });
       } catch (err) {
@@ -49,10 +58,11 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  // Open an interactive shell (PowerShell / $SHELL) rooted at the project dir.
+  // Open an interactive shell (PowerShell / cmd / $SHELL) rooted at the project
+  // dir. `shell: 'cmd'` (Windows only) opens cmd.exe instead of PowerShell.
   // `admin: true` (Windows only) opens an ELEVATED shell via the broker: it fires
   // a UAC prompt and the run goes live once the elevated agent connects back.
-  app.post<{ Params: { id: string }; Body: { admin?: boolean } }>(
+  app.post<{ Params: { id: string }; Body: { admin?: boolean; shell?: string } }>(
     '/api/projects/:id/shell',
     async (req, reply) => {
       const project = await prisma.project.findUnique({ where: { id: req.params.id } });
@@ -62,19 +72,30 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
       if (admin && process.platform !== 'win32') {
         return reply.code(400).send({ error: 'Admin shells are only supported on Windows.' });
       }
+      const shell = req.body?.shell === 'cmd' ? 'cmd' : 'powershell';
 
       const run = await prisma.run.create({
-        data: { projectId: project.id, kind: 'shell', dockOpen: true, status: 'running' },
+        // Name cmd tabs "cmd" so the dock distinguishes them from PowerShell;
+        // `shell` is the durable marker (a rename can overwrite the name).
+        data: {
+          projectId: project.id,
+          kind: 'shell',
+          name: shell === 'cmd' ? 'cmd' : null,
+          shell,
+          dockOpen: true,
+          status: 'running',
+        },
       });
 
       try {
         if (admin) {
           // No local pid — elevation is async. The tab shows "waiting for UAC"
           // until the broker connects (then /api/runs/:id reports live=true).
+          // Admin shells are always PowerShell (the broker's contract).
           await startAdminShell({ runId: run.id, cwd: project.path });
           return reply.code(201).send({ runId: run.id, elevated: true, pending: true });
         }
-        const { pid } = startShell({ runId: run.id, cwd: project.path });
+        const { pid } = startShell({ runId: run.id, cwd: project.path, shell });
         await prisma.run.update({ where: { id: run.id }, data: { pid } });
         return reply.code(201).send({ runId: run.id, pid, elevated: false });
       } catch (err) {
@@ -98,8 +119,9 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
 
       const resume = req.body?.continue === true;
       // Sanitize the effort level (slash-command arg) — word chars only.
-      const raw = typeof req.body?.effort === 'string' ? req.body.effort.trim() : 'ultracode';
-      const effort = /^[a-zA-Z0-9-]{1,32}$/.test(raw) ? raw : 'ultracode';
+      const raw =
+        typeof req.body?.effort === 'string' ? req.body.effort.trim() : DEFAULT_CLAUDE_EFFORT;
+      const effort = /^[a-zA-Z0-9-]{1,32}$/.test(raw) ? raw : DEFAULT_CLAUDE_EFFORT;
       const setEffort = req.body?.setEffort !== false; // default on
 
       // "Continue" resumes THIS project's most recent NARUKAMI Claude session by
@@ -206,6 +228,7 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
         commandId: old.commandId,
         kind: old.kind,
         name: old.name,
+        shell: old.shell,
         dockOpen: true,
         status: 'running',
       },
@@ -215,7 +238,12 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
       let pid: number;
       let claudeSessionId: string | undefined;
       if (old.kind === 'shell') {
-        ({ pid } = startShell({ runId: run.id, cwd: project.path }));
+        // A cmd shell tab restarts as cmd, not PowerShell.
+        ({ pid } = startShell({
+          runId: run.id,
+          cwd: project.path,
+          shell: old.shell === 'cmd' ? 'cmd' : 'powershell',
+        }));
       } else if (old.kind === 'claude') {
         // Resume reopens exactly THIS tab's own prior Claude session by id — so a
         // restarted Claude tab continues its own conversation, never a native one.
@@ -224,7 +252,7 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
           cwd: project.path,
           resumeSessionId: resume ? old.claudeSessionId ?? undefined : undefined,
           embedCodeMap: project.codeMapEmbed,
-          initInput: resume ? undefined : '/effort ultracode',
+          initInput: resume ? undefined : `/effort ${DEFAULT_CLAUDE_EFFORT}`,
         });
         pid = started.pid;
         claudeSessionId = started.sessionId;
@@ -237,6 +265,7 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
           runId: run.id,
           command: old.command.command,
           cwd: old.command.cwd || project.path,
+          shell: old.command.shell === 'cmd' ? 'cmd' : 'powershell',
         }));
       }
       // `claudeSessionId` is undefined for shell/command runs → Prisma leaves it null.

@@ -3,10 +3,13 @@ import { Terminal, type IDisposable } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { api, runWsUrl } from '../api';
+import { onWindowVisibility, windowHidden } from '../lib/visibility';
 import { normalizeStatus } from '../lib/runStatus';
+import { nextReconnectAction, type ReconnectAction } from '../lib/reconnect';
 import { detectDevUrl, pushWindow } from '../lib/devUrl';
-import type { ActiveRun, RunStatus } from '../types';
+import type { ActiveRun, MobileDeviceInfo, RunStatus } from '../types';
 import { Ic } from './icons';
+import { ShareQrModal } from './ShareQrModal';
 
 interface Props {
   run: ActiveRun;
@@ -18,8 +21,15 @@ interface Props {
   // output; `taskDone` is true on the working→idle edge IF the user had sent
   // input since the last idle (so booting/replay doesn't count as a task).
   onActivity?: (runId: string, working: boolean, taskDone: boolean) => void;
+  // Fires when a dev-server URL is detected in this run's output (command/shell
+  // runs only) — lets App feed the Browser view's per-project default URL.
+  onDevUrl?: (runId: string, url: string) => void;
   // Claude tabs only: this project's Code Map embed flag (for the map toggle).
   codeMapEmbed?: boolean;
+  // Detach this terminal into its own desktop window. Only supplied by the main
+  // app window when running under the Electron shell — omitted in a pop-out
+  // window (no re-detaching) and in the browser (no window to open).
+  onPopOut?: (runId: string) => void;
 }
 
 /**
@@ -122,24 +132,34 @@ function ClaudeToggles({ run, codeMapEmbed }: { run: ActiveRun; codeMapEmbed: bo
 const IDLE_MS = 5000;
 
 interface ServerMessage {
-  type: 'data' | 'exit' | 'error' | 'ready';
+  type: 'data' | 'exit' | 'error' | 'ready' | 'resize' | 'device';
   chunk?: string;
   status?: string;
   exitCode?: number | null;
   message?: string;
+  // 'resize': another client (e.g. a phone) changed the shared pty grid.
+  cols?: number;
+  rows?: number;
+  // 'device': a phone knocked on / connected to / left this run's share.
+  event?: string;
+  device?: MobileDeviceInfo;
 }
 
 // Memoized: App re-renders on every activity edge / status flip / dock drag
 // frame, and every open terminal would re-render with it. All props are stable
 // (primitives, per-run object identity, useCallback handlers), so memo cuts
 // that churn to the tabs whose run actually changed.
-export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity, codeMapEmbed }: Props) {
+export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity, onDevUrl, codeMapEmbed, onPopOut }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   // Detected local dev-server URL (command/shell runs) → the "Open" button.
   const urlWindowRef = useRef('');
   const [devUrl, setDevUrl] = useState<string | null>(null);
+  // Mobile-share QR modal (open per terminal).
+  const [sharing, setSharing] = useState(false);
+  // Phones seen on this run's share (pushed over the ws) → toolbar indicator.
+  const [devices, setDevices] = useState<Record<string, MobileDeviceInfo>>({});
 
   useEffect(() => {
     let disposed = false;
@@ -152,6 +172,8 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
     let ro: ResizeObserver | null = null;
     let dataDisposable: IDisposable | null = null;
     let onWinResize: (() => void) | null = null;
+    let onContextMenu: ((ev: MouseEvent) => void) | null = null;
+    let offVisibility: (() => void) | null = null;
 
     // Output-activity tracking for the "working" indicator + "task done" toast.
     let working = false;
@@ -160,8 +182,17 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
     let lastOutputAt = 0;
     // rAF handle coalescing refit work (see scheduleFit below).
     let fitRaf = 0;
+    // Trailing-debounce timer for pty resize notifications (see sendResize).
+    let resizeDebounce: ReturnType<typeof setTimeout> | null = null;
     // For elevated shells: the liveness poll timer while awaiting UAC + broker.
+    // Also reused to schedule reconnect attempts after a dropped socket.
     let pollTimer: ReturnType<typeof setTimeout> | null = null;
+    // Auto-reconnect: a dropped websocket does NOT kill the server-side pty, so
+    // rather than stranding the tab in 'error' we poll liveness and reattach.
+    // `isReconnect` makes the next open reset the terminal before the backend
+    // replays scrollback, so history isn't printed twice.
+    let reconnectAttempts = 0;
+    let isReconnect = false;
     // Idle detection without per-chunk timer churn: output only stamps
     // lastOutputAt; ONE timer re-arms itself for the remaining quiet gap when it
     // wakes early. Under heavy streaming this replaces a clearTimeout+setTimeout
@@ -210,6 +241,35 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
       termRef.current = t;
       fitRef.current = fit;
 
+      // Cursor blink repaints the terminal twice a second forever; with
+      // backgroundThrottling:false that continues while minimized. Follow the
+      // real window visibility instead (output rendering is unaffected — only
+      // the blink pauses).
+      t.options.cursorBlink = !windowHidden();
+      offVisibility = onWindowVisibility((hidden) => {
+        t.options.cursorBlink = !hidden;
+      });
+
+      // Clipboard keys. xterm maps plain Ctrl+V to the C0 byte \x16 and cancels
+      // the browser event, so the native paste never reaches its textarea — a
+      // dead shortcut in cmd/Claude tabs (PSReadLine's own ^V binding masked it
+      // in PowerShell). Returning false hands the combo back to the browser,
+      // whose paste event xterm forwards properly (bracketed-paste aware).
+      t.attachCustomKeyEventHandler((ev) => {
+        if (ev.type !== 'keydown') return true;
+        const key = ev.key.toLowerCase();
+        // Paste: Ctrl+V / Ctrl+Shift+V / Shift+Insert → browser default.
+        if (ev.ctrlKey && !ev.altKey && key === 'v') return false;
+        if (ev.shiftKey && !ev.ctrlKey && key === 'insert') return false;
+        // Copy: Ctrl+Shift+C / Ctrl+Insert copy the selection (plain Ctrl+C
+        // stays SIGINT — terminals must never lose it).
+        if (((ev.ctrlKey && ev.shiftKey && key === 'c') || (ev.ctrlKey && key === 'insert')) && t.hasSelection()) {
+          void navigator.clipboard?.writeText(t.getSelection()).catch(() => undefined);
+          return false;
+        }
+        return true;
+      });
+
       // Only fit a laid-out element; fit() on a zero-size (hidden) tab corrupts
       // xterm's render dimensions and throws later in the viewport scroll sync.
       const safeFit = () => {
@@ -223,6 +283,24 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
       };
 
       if (container) {
+        // conhost-style right-click (Windows terminal muscle memory): copy the
+        // selection if there is one, otherwise paste the clipboard. There is no
+        // native context menu on the xterm surface, so right-click was dead.
+        onContextMenu = (ev: MouseEvent) => {
+          ev.preventDefault();
+          if (t.hasSelection()) {
+            void navigator.clipboard?.writeText(t.getSelection()).catch(() => undefined);
+            t.clearSelection();
+            return;
+          }
+          void navigator.clipboard
+            ?.readText()
+            .then((text) => {
+              if (text) t.paste(text);
+            })
+            .catch(() => undefined); // permission denied → do nothing
+        };
+        container.addEventListener('contextmenu', onContextMenu);
         t.open(container);
         // GPU renderer: the default DOM renderer re-lays-out entire rows on
         // every write and is what makes several busy shells stutter. WebGL must
@@ -241,23 +319,67 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
 
       const openSocket = () => {
         if (disposed) return;
+        // Tear down the previous connection's per-socket listeners so reconnects
+        // don't stack duplicate handlers/observers.
+        if (dataDisposable) {
+          dataDisposable.dispose();
+          dataDisposable = null;
+        }
+        if (onWinResize) {
+          window.removeEventListener('resize', onWinResize);
+          onWinResize = null;
+        }
+        if (ro) {
+          ro.disconnect();
+          ro = null;
+        }
+        if (resizeDebounce) {
+          clearTimeout(resizeDebounce); // never push a stale grid on a dead socket
+          resizeDebounce = null;
+        }
         const socket = new WebSocket(runWsUrl(run.runId));
         ws = socket;
 
         // Only tell the pty about a resize when the grid actually changed:
         // ConPTY re-lays-out its whole buffer on every resize, so the
         // pixel-level ResizeObserver storm during a dock drag must not reach it.
+        // `lastCols/lastRows` track the pty's grid as WE know it — updated when
+        // we notify it AND when the server broadcasts another client's resize.
         let lastCols = 0;
         let lastRows = 0;
-        const sendResize = () => {
+        let lastPtySendAt = 0;
+        const pushResize = () => {
+          resizeDebounce = null;
           if (socket.readyState !== WebSocket.OPEN) return;
           if (t.cols === lastCols && t.rows === lastRows) return;
           lastCols = t.cols;
           lastRows = t.rows;
+          lastPtySendAt = Date.now();
           socket.send(JSON.stringify({ type: 'resize', cols: t.cols, rows: t.rows }));
+        };
+        // Leading + trailing: a lone refit (tab switch, maximize, open) reaches
+        // the pty immediately, but a dock-drag storm coalesces into one reflow
+        // shortly after the drag settles — ConPTY re-lays-out its whole buffer
+        // per resize, and a reflow per pointer-move garbles the repaint (the
+        // xterm grid itself still tracks every frame via safeFit).
+        const sendResize = () => {
+          if (t.cols === lastCols && t.rows === lastRows) return;
+          if (resizeDebounce) clearTimeout(resizeDebounce);
+          if (Date.now() - lastPtySendAt > 350) {
+            pushResize();
+            return;
+          }
+          resizeDebounce = setTimeout(pushResize, 150);
         };
 
         socket.onopen = () => {
+          // On a reconnect the backend replays the full scrollback as the first
+          // message — clear first so it repaints instead of duplicating.
+          if (isReconnect) {
+            t.reset();
+            isReconnect = false;
+          }
+          reconnectAttempts = 0;
           // Don't assume 'running' on open: a dead/restored run reaches the
           // server's replay path and gets an 'exit' (never 'ready'), so setting
           // running here flashed it briefly before correcting. Wait for the
@@ -292,8 +414,40 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
               urlWindowRef.current = pushWindow(urlWindowRef.current, msg.chunk);
               if (msg.chunk.includes('http')) {
                 const found = detectDevUrl(urlWindowRef.current);
-                if (found) setDevUrl((prev) => (prev === found ? prev : found));
+                if (found) {
+                  setDevUrl((prev) => (prev === found ? prev : found));
+                  onDevUrl?.(run.runId, found);
+                }
               }
+            }
+          } else if (
+            msg.type === 'resize' &&
+            typeof msg.cols === 'number' &&
+            typeof msg.rows === 'number'
+          ) {
+            // Another client (e.g. a phone that pressed "fit") resized the
+            // shared pty — adopt the one true grid so this view doesn't render
+            // mis-wrapped output. Record it as the pty's known size so we don't
+            // echo it straight back; the next LOCAL adjustment reclaims the grid.
+            const cols = Math.max(2, Math.min(500, Math.floor(msg.cols)));
+            const rows = Math.max(1, Math.min(300, Math.floor(msg.rows)));
+            lastCols = cols;
+            lastRows = rows;
+            if (t.cols !== cols || t.rows !== rows) t.resize(cols, rows);
+          } else if (msg.type === 'device' && msg.device) {
+            // Phone lifecycle on this run's share → the toolbar phone indicator.
+            // 'removed' (the run's shares all died) deletes the entry — keeping
+            // it around left permanent ghost "1 connected" badges.
+            const d = msg.device;
+            if (msg.event === 'removed') {
+              setDevices((prev) => {
+                if (!(d.deviceId in prev)) return prev;
+                const next = { ...prev };
+                delete next[d.deviceId];
+                return next;
+              });
+            } else {
+              setDevices((prev) => ({ ...prev, [d.deviceId]: d }));
             }
           } else if (msg.type === 'ready') {
             // Server confirmed the run is live — safe to show 'running'.
@@ -323,14 +477,15 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
           }
         };
 
-        socket.onerror = () => {
-          if (!disposed) t.write('\r\n\x1b[31m[websocket error — is the backend running?]\x1b[0m\r\n');
-        };
+        // Let onclose drive recovery — errors are always followed by a close.
+        socket.onerror = () => {};
 
-        // An abnormal close (backend crash/restart) never sends an exit message —
-        // surface it so the tab doesn't stay stuck 'running' forever.
+        // An abnormal close (backend hiccup/restart, transient network) never
+        // sends an exit message. The pty is still alive server-side, so try to
+        // reconnect instead of stranding the tab in 'error'.
         socket.onclose = () => {
-          if (!disposed && !gotExit) onStatus(run.runId, 'error', null);
+          if (disposed || gotExit) return;
+          scheduleReconnect();
         };
 
         // Coalesce refits to one per frame: during a dock-resize drag the
@@ -351,6 +506,57 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
         // Refit when the container becomes visible / changes size (tab switch).
         ro = new ResizeObserver(scheduleFit);
         if (container) ro.observe(container);
+      };
+
+      // Backoff schedule for reconnect attempts (ms). Caps out, then keeps
+      // retrying at the last interval so a long backend restart still recovers.
+      const RECONNECT_DELAYS = [250, 500, 1000, 1500, 2500, 4000];
+      // After this many consecutive failures we assume the backend is really gone
+      // and surface an error (the user can still Restart). Generous so ordinary
+      // hiccups always self-heal silently.
+      const MAX_RECONNECT = 40;
+
+      const scheduleReconnect = () => {
+        if (disposed || gotExit) return;
+        onStatus(run.runId, 'connecting', null);
+        const delay = RECONNECT_DELAYS[Math.min(reconnectAttempts, RECONNECT_DELAYS.length - 1)];
+        reconnectAttempts += 1;
+        if (pollTimer) clearTimeout(pollTimer);
+        pollTimer = setTimeout(() => void tryReconnect(), delay);
+      };
+
+      const tryReconnect = async () => {
+        if (disposed || gotExit) return;
+        let action: ReconnectAction;
+        try {
+          const info = await api.getRun(run.runId);
+          if (disposed || gotExit) return;
+          action = nextReconnectAction(info, reconnectAttempts, MAX_RECONNECT);
+          if (action.kind === 'reconnect') {
+            isReconnect = true; // reset + repaint on the next open
+            openSocket();
+            return;
+          }
+          if (action.kind === 'settle') {
+            // The process ended while we were disconnected — replay its final
+            // history and settle on the real status (don't reconnect to a corpse).
+            const hist = (info.logs ?? []).map((l) => l.chunk).join('');
+            t.reset();
+            if (hist) t.write(hist);
+            gotExit = true;
+            onStatus(run.runId, action.status, action.exitCode);
+            return;
+          }
+        } catch {
+          // Backend momentarily unreachable — retry until the cap, then give up.
+          action = reconnectAttempts >= MAX_RECONNECT ? { kind: 'giveup' } : { kind: 'retry' };
+        }
+        if (action.kind === 'giveup') {
+          onStatus(run.runId, 'error', null);
+          t.write('\r\n\x1b[31m[disconnected — Restart to reconnect]\x1b[0m\r\n');
+          return;
+        }
+        scheduleReconnect();
       };
 
       // An elevated (admin) shell isn't live until the broker connects back after
@@ -393,10 +599,13 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
       disposed = true;
       cancelAnimationFrame(raf);
       if (fitRaf) cancelAnimationFrame(fitRaf);
+      if (resizeDebounce) clearTimeout(resizeDebounce);
       if (pollTimer) clearTimeout(pollTimer);
       if (idleTimer) clearTimeout(idleTimer);
       if (working) onActivity?.(run.runId, false, false); // tab unmounting → clear working
+      if (offVisibility) offVisibility();
       if (onWinResize) window.removeEventListener('resize', onWinResize);
+      if (onContextMenu) containerRef.current?.removeEventListener('contextmenu', onContextMenu);
       if (ro) ro.disconnect();
       if (dataDisposable) dataDisposable.dispose();
       if (ws) {
@@ -421,6 +630,10 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
   };
 
   const stoppable = run.status === 'running' || run.status === 'connecting';
+  // Phone share monitor (fed by ws 'device' pushes): live streams + knocks.
+  const deviceList = Object.values(devices);
+  const connectedPhones = deviceList.filter((d) => d.connections > 0).length;
+  const pendingPhones = deviceList.filter((d) => d.state === 'pending').length;
 
   return (
     <div className="terminal-tab">
@@ -442,8 +655,58 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
           {run.status}
           {run.exitCode != null ? ` (${run.exitCode})` : ''}
         </span>
+        {(connectedPhones > 0 || pendingPhones > 0) && (
+          <button
+            className={`term-devices${pendingPhones > 0 ? ' waiting' : ''}`}
+            title={
+              pendingPhones > 0
+                ? `${pendingPhones} phone${pendingPhones > 1 ? 's' : ''} awaiting approval — click to review`
+                : `${connectedPhones} phone${connectedPhones > 1 ? 's' : ''} connected — click to manage`
+            }
+            onClick={() => setSharing(true)}
+          >
+            <Ic name="qr" /> {pendingPhones > 0 ? `${pendingPhones} waiting` : connectedPhones}
+          </button>
+        )}
         {run.kind === 'claude' && (
           <ClaudeToggles run={run} codeMapEmbed={codeMapEmbed ?? false} />
+        )}
+        {onPopOut && (
+          <button
+            className="btn term-action term-popout"
+            title="Open this terminal in its own window (drag it back to re-dock)"
+            aria-label="Pop terminal out to its own window"
+            onClick={() => onPopOut(run.runId)}
+          >
+            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+              <path
+                d="M6.5 3.5H3.5A1 1 0 0 0 2.5 4.5V12.5A1 1 0 0 0 3.5 13.5H11.5A1 1 0 0 0 12.5 12.5V9.5"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.3"
+                strokeLinecap="round"
+              />
+              <path
+                d="M9.5 2.5H13.5V6.5M13.5 2.5L8 8"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            Pop out
+          </button>
+        )}
+        {stoppable && (
+          <button
+            className="btn term-action term-share"
+            title="Share this terminal to your phone via QR (same network)"
+            aria-label="Share terminal to phone"
+            onClick={() => setSharing(true)}
+          >
+            <Ic name="qr" /> Share
+          </button>
         )}
         {stoppable ? (
           <>
@@ -491,6 +754,13 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
         )}
       </div>
       <div className="terminal-surface" ref={containerRef} />
+      {sharing && (
+        <ShareQrModal
+          runId={run.runId}
+          label={run.customLabel ?? run.label}
+          onClose={() => setSharing(false)}
+        />
+      )}
     </div>
   );
 });

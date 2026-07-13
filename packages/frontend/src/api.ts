@@ -16,7 +16,13 @@ import type {
   FileContent,
   FileHead,
   GitBranch,
+  GitDiff,
+  GitStatus,
   MemoryGraph,
+  MobileDeviceInfo,
+  MobileRunInfo,
+  PublicShare,
+  ShareResult,
   MemoryNoteDetail,
   Project,
   ProjectTree,
@@ -30,7 +36,10 @@ import type {
 // In the packaged desktop app the backend serves this SPA and injects the token
 // (window.__NARUKAMI__) — so we talk to it same-origin. In dev (Vite on :5173)
 // we fall back to the loopback backend on :4000 + the build-time env token.
-const injected = (window as unknown as { __NARUKAMI__?: { token?: string } }).__NARUKAMI__;
+const injected =
+  typeof window !== 'undefined'
+    ? (window as unknown as { __NARUKAMI__?: { token?: string } }).__NARUKAMI__
+    : undefined;
 const SAME_ORIGIN = injected ? window.location.origin : null;
 
 const API_BASE = SAME_ORIGIN ?? 'http://127.0.0.1:4000';
@@ -121,11 +130,19 @@ export const api = {
 
   // admin: open an ELEVATED shell (Windows) — fires UAC; goes live once the
   // elevated broker connects back. `pid` is absent until then.
-  openShell: (projectId: string, admin = false) =>
+  // shell: 'cmd' opens cmd.exe instead of PowerShell (non-admin only).
+  openShell: (projectId: string, admin = false, shell: 'powershell' | 'cmd' = 'powershell') =>
     request<{ runId: string; pid?: number; elevated?: boolean; pending?: boolean }>(
       `/api/projects/${projectId}/shell`,
-      { method: 'POST', body: JSON.stringify({ admin }) },
+      { method: 'POST', body: JSON.stringify({ admin, shell }) },
     ),
+
+  // Flip which Windows shell a run command executes in (the PS/CMD toggle).
+  setCommandShell: (commandId: string, shell: 'powershell' | 'cmd') =>
+    request<RunCommand>(`/api/commands/${commandId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ shell }),
+    }),
 
   // Run details + liveness (used to poll a pending elevated shell until it's live).
   getRun: (runId: string) =>
@@ -186,6 +203,13 @@ export const api = {
   getFileHead: (projectId: string, filePath: string) =>
     request<FileHead>(`/api/projects/${projectId}/git/file-head?path=${encodeURIComponent(filePath)}`),
 
+  // Git working-tree status (changed files) for the file-tree change markers.
+  getGitStatus: (projectId: string) => request<GitStatus>(`/api/projects/${projectId}/git/status`),
+
+  // Changed line ranges for one file, for the editor's diff gutter.
+  getGitDiff: (projectId: string, filePath: string) =>
+    request<GitDiff>(`/api/projects/${projectId}/git/diff?path=${encodeURIComponent(filePath)}`),
+
   // --- workspace / session restore ---
   getWorkspace: () => request<WorkspaceState>('/api/workspace'),
 
@@ -214,6 +238,27 @@ export const api = {
       method: 'POST',
       ...(resume ? { body: JSON.stringify({ continue: true }) } : {}),
     }),
+
+  // --- mobile LAN share (desktop side — master-token-gated) ---
+  // Create a QR share for one live terminal → { url, relay, expiresAt, ... }.
+  shareRun: (runId: string, opts: { canInput?: boolean; ttlMs?: number } = {}) =>
+    request<ShareResult>(`/api/runs/${runId}/share`, {
+      method: 'POST',
+      body: JSON.stringify(opts),
+    }),
+  listShares: () =>
+    request<{
+      shares: PublicShare[];
+      relay: { host: string; port: number } | null;
+      devices: MobileDeviceInfo[];
+    }>('/api/shares'),
+  revokeShare: (id: string) => request<{ ok: boolean }>(`/api/shares/${id}`, { method: 'DELETE' }),
+  // Allow or deny (deny also kicks) a phone that knocked on a shared terminal.
+  setDeviceApproval: (runId: string, deviceId: string, action: 'allow' | 'deny') =>
+    request<{ device: MobileDeviceInfo }>(
+      `/api/runs/${encodeURIComponent(runId)}/devices/${encodeURIComponent(deviceId)}`,
+      { method: 'POST', body: JSON.stringify({ action }) },
+    ),
 
   // --- end-of-day reports (cross-project, per day) ---
   getEodActive: (day?: string) =>
@@ -325,3 +370,67 @@ export const api = {
   // --- Armory (read-only inventory of skills / hooks / memory / agents / commands) ---
   getArmory: () => request<Armory>('/api/armory'),
 };
+
+// ── mobile share side (phone) ────────────────────────────────────────────────
+// The phone loads a TOKENLESS page over the LAN relay, so it must derive its
+// origin from window.location — NOT from SAME_ORIGIN (which is gated on the
+// master-token injection that a phone never receives). Its credential is the
+// per-terminal share token from the QR's `?m=` param.
+
+function mobileOrigin(): string {
+  return typeof window !== 'undefined' ? window.location.origin : API_BASE;
+}
+
+/**
+ * This phone's stable self-identity for the device Allow/Deny gate. Random,
+ * minted once, kept in localStorage so approval survives reloads/reconnects
+ * (but a different phone — different localStorage — must knock for itself).
+ */
+function randomDeviceId(): string {
+  // crypto.randomUUID is SECURE-CONTEXT-only and the phone page is plain HTTP
+  // over the LAN relay — build the id from getRandomValues (always available).
+  // (TS's lib types declare randomUUID unconditionally, hence the widening.)
+  const c = crypto as Crypto & { randomUUID?: () => string };
+  if (typeof c.randomUUID === 'function') return c.randomUUID();
+  const bytes = new Uint8Array(16);
+  c.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+export function mobileDeviceId(): string {
+  const KEY = 'narukami-device-id';
+  try {
+    const existing = localStorage.getItem(KEY);
+    if (existing) return existing;
+    const id = randomDeviceId();
+    localStorage.setItem(KEY, id);
+    return id;
+  } catch {
+    // Storage unavailable (private mode edge cases) — a per-load id still works,
+    // it just re-prompts the desktop after a full reload.
+    return randomDeviceId();
+  }
+}
+
+/** WS URL for a shared terminal, authenticated with the share token (not master). */
+export function mobileWsUrl(runId: string, shareToken: string): string {
+  const wsBase = mobileOrigin().replace(/^http/, 'ws');
+  return `${wsBase}/ws/runs/${encodeURIComponent(runId)}?token=${encodeURIComponent(shareToken)}&device=${encodeURIComponent(mobileDeviceId())}`;
+}
+
+/** Share-scoped run metadata + liveness (drives the mobile reconnect loop). */
+export async function getMobileRun(runId: string, shareToken: string): Promise<MobileRunInfo> {
+  const url = `${mobileOrigin()}/api/mobile/run?run=${encodeURIComponent(runId)}&m=${encodeURIComponent(shareToken)}&device=${encodeURIComponent(mobileDeviceId())}`;
+  const res = await fetch(url);
+  const text = await res.text();
+  let body: unknown;
+  try {
+    body = text ? JSON.parse(text) : undefined;
+  } catch {
+    body = undefined;
+  }
+  if (!res.ok) {
+    throw new Error((body as ErrorBody | undefined)?.error ?? `Request failed (${res.status})`);
+  }
+  return body as MobileRunInfo;
+}

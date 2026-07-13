@@ -7,7 +7,7 @@ interface Props {
   project: Project;
   onAnalyze: (id: string) => Promise<{ project: Project; analysis: AnalyzerResult }>;
   onRun: (project: Project, command: RunCommand) => void;
-  onShell: (project: Project, admin?: boolean) => void;
+  onShell: (project: Project, admin?: boolean, shell?: 'powershell' | 'cmd') => void;
   onClaude: (project: Project) => void;
   onContinueClaude: (project: Project) => void;
   onChanged: () => void | Promise<void>;
@@ -91,6 +91,17 @@ export function ProjectPanel({
     }
   };
 
+  // The PS/CMD toggle: flips which Windows shell this command executes in.
+  const toggleShell = async (c: RunCommand) => {
+    setErr(null);
+    try {
+      await api.setCommandShell(c.id, c.shell === 'cmd' ? 'powershell' : 'cmd');
+      await onChanged();
+    } catch (e) {
+      setErr((e as Error).message);
+    }
+  };
+
   return (
     <div className="panel">
       <div className="toolbar">
@@ -102,8 +113,19 @@ export function ProjectPanel({
         </div>
         <div className="tb-right">
           {/* One uniform look for the action row — only Analyze keeps its blade shape. */}
-          <button className="btn btn-action" onClick={() => onShell(project)}>
+          <button
+            className="btn btn-action"
+            title="Open an interactive PowerShell in the project dir"
+            onClick={() => onShell(project)}
+          >
             <Ic name="shell" /> Shell
+          </button>
+          <button
+            className="btn btn-action"
+            title="Open an interactive Command Prompt (cmd.exe) in the project dir"
+            onClick={() => onShell(project, false, 'cmd')}
+          >
+            <Ic name="shell" /> CMD
           </button>
           <button
             className="btn btn-action"
@@ -164,6 +186,17 @@ export function ProjectPanel({
                 <code className="cmd-text">{c.command}</code>
               </div>
               <div className="cmd-actions">
+                <button
+                  className={`shell-toggle${c.shell === 'cmd' ? ' cmd' : ''}`}
+                  title={
+                    c.shell === 'cmd'
+                      ? 'Runs in Command Prompt (cmd.exe) — click to run in PowerShell'
+                      : 'Runs in PowerShell — click to run in Command Prompt (cmd.exe)'
+                  }
+                  onClick={() => void toggleShell(c)}
+                >
+                  {c.shell === 'cmd' ? 'CMD' : 'PS'}
+                </button>
                 <button className="btn btn-run" onClick={() => onRun(project, c)}>
                   <Ic name="play" /> Run
                 </button>

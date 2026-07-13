@@ -36,6 +36,7 @@ model RunCommand {
   cwd        String?  // defaults to project.path if null
   isDefault  Boolean  @default(false)
   source     String   @default("detected") // detected (from analyze) | custom (user-added)
+  shell      String   @default("powershell") // Windows shell to run in: powershell | cmd
   createdAt  DateTime @default(now())
 
   runs       Run[]
@@ -49,6 +50,7 @@ model Run {
   command     RunCommand? @relation(fields: [commandId], references: [id], onDelete: SetNull)
   kind        String      @default("command") // shell | claude | command
   name        String?     // user-renamed tab label (persisted)
+  shell       String?     // kind='shell' only: powershell | cmd (restart fidelity)
   dockOpen    Boolean     @default(false)     // is this an open tab in the workspace (restored on reopen)
   pid         Int?
   claudeSessionId String?  // kind='claude' only: the NARUKAMI-assigned Claude session UUID (--session-id). Own id, kept separate from any native-CLI session; resumes target this id, never `claude --continue`.

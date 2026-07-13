@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
+import { usePollWhileVisible } from '../lib/usePoll';
 import type { ActiveRun, VitalsFeed } from '../types';
 
 const POLL_MS = 5000;
@@ -107,11 +108,9 @@ export const HeaderCluster = memo(function HeaderCluster({ runs, workingIds, onF
     }
   }, []);
 
-  useEffect(() => {
-    void load();
-    const id = setInterval(() => void load(), POLL_MS);
-    return () => clearInterval(id);
-  }, [load]);
+  // Paused while the window is hidden — the history ring lives server-side,
+  // so the sparklines simply catch up on the immediate visible-again refresh.
+  usePollWhileVisible(load, POLL_MS);
 
   const history = feed?.history ?? [];
   // Stable per feed tick, so the memoized Sparks skip repaints between polls.

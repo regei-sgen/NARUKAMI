@@ -1,11 +1,11 @@
 import 'dotenv/config';
 import fs from 'node:fs';
 import path from 'node:path';
-import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
-import { ALLOWED_ORIGINS, HOST, PORT } from './config';
-import { getToken, isAllowedHost, requireAuth } from './auth';
+import { HOST, PORT } from './config';
+import { getToken, isAllowedHost, isAllowedOrigin, isLoopbackHost, requireAuth } from './auth';
 import { projectRoutes } from './routes/projects';
 import { runRoutes } from './routes/runs';
 import { fileRoutes } from './routes/files';
@@ -17,6 +17,8 @@ import { godclaudeRoutes } from './routes/godclaude';
 import { vitalsRoutes } from './routes/vitals';
 import { codeGraphRoutes } from './routes/codeGraph';
 import { armoryRoutes } from './routes/armory';
+import { shareRoutes } from './routes/share';
+import { reconcileRelay } from './services/mobileShare';
 import { setupWebSocket } from './ws';
 import { pruneOldRunLogs, reconcileStaleRuns } from './services/runner';
 import { startVitalsSampler } from './services/vitals';
@@ -99,6 +101,20 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
     logger: {
       level: 'info',
       redact: ['req.headers.authorization', 'req.headers.cookie'],
+      serializers: {
+        // The share/master tokens ride in the URL query (a QR loads `/?m=<token>`
+        // and the phone polls `/api/mobile/run?m=<token>`; the WS uses `?token=`).
+        // Fastify logs req.url, so without this the secret lands in the backend
+        // log. Mask those params before the URL is serialized.
+        req(req: { method: string; url: string; headers: Record<string, unknown> }) {
+          const host = req.headers.host;
+          return {
+            method: req.method,
+            url: req.url.replace(/([?&](?:m|token)=)[^&]+/g, '$1***'),
+            host: typeof host === 'string' ? host : undefined,
+          };
+        },
+      },
     },
   });
 
@@ -118,21 +134,15 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
   });
 
   await app.register(cors, {
+    // A missing Origin (same-origin navigation, curl) is allowed; otherwise defer
+    // to the shared allow-list — loopback always, plus the LAN relay's own IP
+    // while a share is active. Vite marks the built module/CSS assets `crossorigin`,
+    // so the phone's browser sends an Origin header even same-origin: this MUST
+    // accept the relay origin or every asset 500s (isAllowedOrigin now does).
     origin: (origin, cb) => {
-      if (!origin || ALLOWED_ORIGINS.has(origin)) {
+      if (!origin || isAllowedOrigin(origin)) {
         cb(null, true);
         return;
-      }
-      // Accept any loopback origin — the packaged desktop app serves the SPA from
-      // the backend itself, so the renderer's origin is http://127.0.0.1:<port>.
-      try {
-        const h = new URL(origin).hostname;
-        if (h === '127.0.0.1' || h === 'localhost' || h === '[::1]') {
-          cb(null, true);
-          return;
-        }
-      } catch {
-        /* fall through */
       }
       cb(new Error('Origin not allowed by CORS'), false);
     },
@@ -155,6 +165,11 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
     }
     if (req.method === 'OPTIONS') return;
     if (!req.url.startsWith('/api')) return;
+    // Phone endpoints authenticate with a per-terminal share token themselves
+    // (the phone never has the master token) — exempt them from master auth. Every
+    // OTHER /api route stays master-token-gated, so a LAN client can reach ONLY
+    // the scoped mobile surface.
+    if (req.url.startsWith('/api/mobile/')) return;
     await requireAuth(req, reply);
   });
 
@@ -169,6 +184,7 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
   await app.register(vitalsRoutes);
   await app.register(codeGraphRoutes);
   await app.register(armoryRoutes);
+  await app.register(shareRoutes);
 
   // Packaged desktop mode: serve the built frontend from this same server so the
   // renderer is same-origin. The bearer token is injected into index.html so the
@@ -181,12 +197,18 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
       '</head>',
       `<script>window.__NARUKAMI__=${JSON.stringify({ token })};</script></head>`,
     );
-    const sendIndex = (reply: FastifyReply) => reply.type('text/html').send(injected);
-    app.get('/', async (_req, reply) => sendIndex(reply));
+    // SECURITY: inject the master token ONLY for a loopback (this-machine)
+    // requester. A LAN client — a phone reaching us through the share relay —
+    // gets the RAW, tokenless page; it authenticates with its scoped share token
+    // instead (read from the `?m=` query by the mobile view). Handing the master
+    // token to a LAN device would grant it full RCE, so this gate is critical.
+    const sendIndex = (req: FastifyRequest, reply: FastifyReply) =>
+      reply.type('text/html').send(isLoopbackHost(req.headers.host) ? injected : rawHtml);
+    app.get('/', async (req, reply) => sendIndex(req, reply));
     // SPA fallback for any non-API GET that isn't a real asset file.
     app.setNotFoundHandler((req, reply) => {
       if (req.method === 'GET' && !req.url.startsWith('/api') && !req.url.startsWith('/ws')) {
-        sendIndex(reply);
+        sendIndex(req, reply);
       } else {
         reply.code(404).send({ error: 'Not found' });
       }
@@ -205,6 +227,12 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
 
   // Header vitals: sample whole-machine CPU/MEM in the background.
   startVitalsSampler();
+
+  // Tear the LAN share relay down when its shares expire: activeShareCount()
+  // sweeps expired tokens, and reconcileRelay stops the relay once none remain —
+  // so a share simply timing out also closes the LAN, never leaving it open past
+  // an active share. (Explicit revoke reconciles immediately in the route.)
+  setInterval(() => void reconcileRelay(), 30_000).unref();
 
   return { app, token, host, port: boundPort };
 }

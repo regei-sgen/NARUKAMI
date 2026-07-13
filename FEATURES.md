@@ -97,7 +97,7 @@ PTY details:
 ### 4.7 Restart & Continue
 - `POST /api/runs/:runId/restart` — spawn a **fresh** process of the same kind with clean logs and a new runId, carrying over the custom name; closes the old row.
 - **Claude "Continue"**: `continue:true` on `/claude` or `/restart` launches `claude --continue`, reopening the most recent conversation in that directory, and skips the `/effort` injection so the restored session is untouched.
-- Non-resume Claude launches inject an initial slash command (default `/effort ultracode`) — but **only after** the TUI settles and **never** while a folder-trust prompt is showing (the trust gate is detected and never auto-answered).
+- Non-resume Claude launches inject an initial slash command (default `/effort ultracode` — note its parallel subagent fan-out is the dominant CPU cost of a busy Claude tab, all grouped under NARUKAMI's process tree in Task Manager) — but **only after** the TUI settles and **never** while a folder-trust prompt is showing (the trust gate is detected and never auto-answered).
 
 ### 4.8 Log persistence & replay
 - Live output is streamed immediately and buffered, flushed to `RunLog` every ~300 ms.
@@ -174,6 +174,37 @@ A **"🛡 Shell (Admin)"** button opens a real elevated PowerShell **streamed in
 ### 4.15 Workspace persistence
 - `GET /api/workspace` — restore all open terminal tabs (with live/exited status) + persisted UI settings.
 - `POST /api/settings` — bulk-upsert UI state (dock size, selected project, active view, last-open editor file, …) as one row per key.
+
+### 4.16 Mobile share via QR (same-LAN)
+A **"⚌ Share"** button on any live terminal turns it into a QR code your phone scans to open that terminal in a mobile browser — both devices on the same network. The master token never leaves the machine.
+
+**How it works:**
+1. `POST /api/runs/:runId/share {canInput?, ttlMs?}` mints a **per-terminal share token** (scoped to exactly that runId, TTL default 4h, clamped 1min–24h) and starts an **on-demand LAN relay** — a raw `net` TCP proxy bound to the machine's LAN IP that pipes to the loopback backend (HTTP + WS pass through untouched). Returns the QR URL `http://<lan-ip>:<relay-port>/?m=<token>&run=<runId>`.
+2. The phone loads that URL. The backend serves the SPA **without** the master token (injected only for loopback Hosts — `isLoopbackHost` in `auth.ts`); the mobile view (`MobileTerminal.tsx`, routed on `?m=` in `main.tsx`) authenticates with the scoped share token instead.
+3. The phone opens `ws /ws/runs/:runId?token=<shareToken>`; `ws.ts` accepts the master token OR a share token scoped to that runId, and drops input for a read-only (`canInput:false`) share.
+
+**Security model** (all verified end-to-end through a real relay):
+- **LAN reachability is opt-in + refcounted.** The relay runs only while a share is active; the last revoke/expiry stops it (`mobileShare.reconcileRelay`), which also revokes shares whose run has ended. `stopRelay` force-drops live sockets (hard kill).
+- **The master token is never handed to the LAN** — a phone gets a tokenless page; only loopback gets the injected token.
+- **Host/Origin guards accept the LAN IP ONLY while sharing** (`auth.ts`, gated on `activeLanAddress()`), and only the exact bound IP — a DNS-rebinding page sends its domain, not the raw IP, so it stays rejected. CORS uses the same `isAllowedOrigin` (Vite marks assets `crossorigin`, so the browser sends an Origin header even same-origin).
+- **Share tokens are scoped** — a token for run A can't open run B; `/api/mobile/*` is the only LAN-reachable API surface (every other `/api` route stays master-gated).
+- **Read-only mode** (`canInput:false`) drops all input server-side (a mirror can watch but not type).
+- **Secrets are masked in logs** — the token rides in the URL query, so the request-log serializer masks `m=`/`token=`.
+
+**Mobile UX** (`MobileTerminal.tsx`): full-screen xterm sized with `100dvh` + safe-area insets, a touch key bar for the keys a soft keyboard lacks (Esc / Tab / Ctrl-C / arrows), auto-reconnect on screen-lock (reuses `nextReconnectAction`), and a "view-only" badge for read-only shares. Requires the backend to serve the SPA (desktop app / built frontend) — the relay forwards the phone to it.
+
+**Limitation:** `detectLanIp()` picks the first private IPv4; on a machine with VPN / VirtualBox / WSL adapters it may choose a non-reachable interface. Plain HTTP on the LAN (no TLS) — the scoped, short-TTL, revocable token bounds the exposure.
+
+### 4.17 Idle/hidden efficiency
+NARUKAMI's own runtime stays ~1% CPU even while a Claude tab streams (the visible load in Task Manager is the Claude workload itself plus everything terminals spawn, all grouped under NARUKAMI.exe). The app-side waste that DID exist is engineered out:
+
+- **Real visibility signal**: the shell needs `backgroundThrottling:false` (live terminals must never stall), but that pins the Page Visibility API to `visible`. The Electron main now forwards true minimize/restore over IPC (`narukami:visibility`); `lib/visibility.ts` fans it out (with a `visibilitychange` fallback in plain browsers).
+- **Polls pause while hidden** (and refresh instantly on restore): header vitals (5s), editor git status/diff (3s, spawns git), editor branch (3.5s, spawns git), Code Map changes (2.5s, spawns git), GODCLAUDE status/memory-graph (5s/30s, can spawn Electron-as-node). CSS pulse animations pause via a `win-hidden` root class; xterm cursor blink stops.
+- **Graph loops park**: GraphGlobe got GraphFlat's idle-stop (full rate only while settling/interacting, ~12fps when only the glow pulses, 0 when static), and both park entirely while the window is hidden.
+- **Fewer git spawns**: repo-prefix / repo-ness / tracked-ness are TTL-cached (15s) in `gitStatus.ts`, cutting the editor's steady-state poll from ~5 spawns per tick to 2.
+- **Preview CDP capture is lifecycle-scoped**: the Browser view's debugger enables Runtime/Network only while a preview is watched (+ a grace window preserving the unwatch→rewatch replay race) and buffers only replayable methods — previously every terminal WS frame was serialized cross-process forever after the first Browser-view open.
+- **Monaco is code-split**: the entry chunk dropped ~3.9MB → ~0.7MB; pop-out terminal windows and the phone share page never parse the editor bundle.
+- **Fan-out serializes once**: one pty batch is JSON.stringify'd once no matter how many sockets mirror the terminal; the orchestration read endpoint joins only the tail window it returns instead of the full ≤2MB transcript.
 
 ---
 

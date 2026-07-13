@@ -16,7 +16,12 @@ const stage = path.join(desktop, 'dist-app');
 fs.rmSync(stage, { recursive: true, force: true });
 fs.mkdirSync(stage, { recursive: true });
 
-fs.copyFileSync(path.join(desktop, 'dist-main', 'main.js'), path.join(stage, 'main.js'));
+// Copy every compiled main-process module (main.js, preload.js, and any modules
+// they require like framingHeaders.js) so no runtime `require('./…')` is missing.
+const mainOut = path.join(desktop, 'dist-main');
+for (const f of fs.readdirSync(mainOut)) {
+  if (f.endsWith('.js')) fs.copyFileSync(path.join(mainOut, f), path.join(stage, f));
+}
 fs.writeFileSync(
   path.join(stage, 'package.json'),
   JSON.stringify({ name: 'narukami-app', version: '1.0.0', main: 'main.js', private: true }, null, 2),

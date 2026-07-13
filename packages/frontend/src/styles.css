@@ -788,6 +788,70 @@ body {
   color: var(--yellow);
 }
 
+/* --- git change markers in the file tree --- */
+/* file name recolored by working-tree state; a folder that contains a change
+   gets a light-red tint so collapsed dirs still point at what's modified. */
+.ft-file.changed-added .ft-name {
+  color: var(--green);
+}
+.ft-file.changed-modified .ft-name {
+  color: var(--yellow);
+}
+.ft-file.changed-deleted .ft-name {
+  color: var(--red);
+  text-decoration: line-through;
+  opacity: 0.75;
+}
+.ft-dir.changed-dir .ft-name {
+  color: var(--accent-2);
+}
+/* trailing status dot (glows in its status color) */
+.ft-status-dot {
+  margin-left: auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  box-shadow: 0 0 6px currentColor;
+}
+.ft-status-dot.added {
+  color: var(--green);
+  background: var(--green);
+}
+.ft-status-dot.modified {
+  color: var(--yellow);
+  background: var(--yellow);
+}
+.ft-status-dot.deleted {
+  color: var(--red);
+  background: var(--red);
+}
+.ft-status-dot.dir {
+  color: var(--accent-2);
+  background: var(--accent-2);
+  opacity: 0.7;
+  box-shadow: none;
+}
+
+/* --- editor diff gutter (Monaco decorations, painted from git diff) --- */
+/* vertical stripe in the line-decorations margin, left of the code */
+.nk-diff-add-gutter {
+  border-left: 3px solid var(--green);
+}
+.nk-diff-modify-gutter {
+  border-left: 3px solid var(--yellow);
+}
+.nk-diff-del-gutter {
+  border-left: 3px solid var(--red);
+}
+/* subtle whole-line tint for added / modified lines */
+.nk-diff-add-line {
+  background: rgba(53, 224, 138, 0.07);
+}
+.nk-diff-modify-line {
+  background: rgba(255, 176, 32, 0.07);
+}
+
 .editor-main {
   flex: 1;
   min-width: 0;
@@ -1246,6 +1310,7 @@ body {
   flex-direction: column;
   flex-shrink: 0;
   min-height: 0;
+  position: relative; /* anchor the re-dock drop-hint overlay */
 }
 /* right dock: full-height vertical panel; the resize handle lives in the gutter. */
 .terminals.dock-right {
@@ -1608,6 +1673,68 @@ body.resizing-h * {
   margin-left: auto;
   padding: 4px 10px;
 }
+.term-popout {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-dim);
+}
+.term-popout:hover {
+  color: var(--text);
+}
+.term-popout svg {
+  display: block;
+}
+
+/* While a tab is being torn out, show a grabbing cursor everywhere so the drag
+   reads as a drag (the tab strip itself keeps native text off during it). */
+body.tab-tearing,
+body.tab-tearing * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+
+/* Dock drop target highlight while a torn-off window is dragged back over it. */
+.terminals.dock-hint {
+  outline: 2px dashed var(--accent, #ff2d3c);
+  outline-offset: -2px;
+}
+.dock-drop-hint {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background: rgba(255, 45, 60, 0.08);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  letter-spacing: 0.3px;
+}
+
+/* --- pop-out window: a single detached terminal, full-window --- */
+.popout-app {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: #050506;
+}
+.popout-app .terminal-tab {
+  flex: 1;
+  min-height: 0;
+}
+.popout-empty {
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
 .terminal-surface {
   flex: 1;
   min-height: 0;
@@ -2718,4 +2845,618 @@ body.resizing-h * {
   .hdrc-val {
     width: auto;
   }
+}
+
+/* ============================================================================
+   Mobile LAN share — QR modal (desktop) + phone terminal view
+   ============================================================================ */
+
+/* --- generic modal (first modal in the app; kept minimal + local) --- */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(2px);
+}
+.modal {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  width: min(92vw, 380px);
+  max-height: 90vh;
+  overflow: auto;
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.modal-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 14px;
+}
+.modal-close {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.modal-close:hover {
+  color: var(--text);
+}
+
+/* --- share modal body --- */
+.share-body,
+.share-error {
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
+}
+.share-qr {
+  width: 240px;
+  height: 240px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #fff; /* QR needs a light quiet-zone to scan reliably */
+  border-radius: 8px;
+  padding: 8px;
+}
+.share-qr img {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.share-qr-placeholder {
+  color: #444;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.share-instructions {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin: 0;
+}
+.share-instructions strong {
+  color: var(--text);
+}
+.share-url {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  word-break: break-all;
+  background: var(--bg-well);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  width: 100%;
+}
+.share-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.share-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.share-expiry {
+  color: var(--text-dim);
+}
+.share-actions {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+}
+.share-error .share-hint {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.term-share {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+/* PS/CMD toggle on a runner command row: which Windows shell executes it. */
+.shell-toggle {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(80, 160, 255, 0.45);
+  color: #6fb1ff;
+  background: transparent;
+  cursor: pointer;
+  min-width: 42px;
+}
+.shell-toggle.cmd {
+  border-color: rgba(240, 200, 80, 0.5);
+  color: var(--yellow);
+}
+.shell-toggle:hover {
+  filter: brightness(1.25);
+}
+
+/* Toolbar monitor: phones streaming (or knocking on) this terminal's share. */
+.term-devices {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(53, 224, 138, 0.4);
+  background: transparent;
+  color: var(--green);
+  font-family: var(--mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+.term-devices.waiting {
+  color: var(--yellow);
+  border-color: rgba(240, 200, 80, 0.5);
+  animation: waiting-pulse 1.2s ease-in-out infinite;
+}
+
+/* Device rows (Allow/Deny + connection monitor) in the share modal. */
+.share-devices {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.share-devices-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+}
+.share-device {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-2);
+}
+.share-device.pending {
+  border-color: rgba(240, 200, 80, 0.5);
+}
+.share-device-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.share-device-ip {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text);
+}
+.share-device-ua {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.share-device-state {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.share-device-state.connected {
+  color: var(--green);
+  border-color: rgba(53, 224, 138, 0.4);
+}
+.share-device-state.pending {
+  color: var(--yellow);
+  border-color: rgba(240, 200, 80, 0.5);
+  animation: waiting-pulse 1.2s ease-in-out infinite;
+}
+.share-device-state.denied {
+  color: var(--red);
+  border-color: var(--border-red);
+}
+.share-device .btn {
+  padding: 4px 10px;
+  flex-shrink: 0;
+}
+
+/* --- phone terminal view (loaded on the phone via ?m=) --- */
+.mobile-term {
+  /* dvh tracks the mobile browser's shrinking viewport when the URL bar / soft
+     keyboard appear — vh does not, and would clip the terminal. */
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-well);
+  /* respect the notch / home indicator on iOS */
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
+    env(safe-area-inset-left);
+  box-sizing: border-box;
+}
+.mobile-term-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  flex-shrink: 0;
+}
+.mobile-term-title {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mobile-term-badge {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.mobile-term-surface {
+  flex: 1;
+  min-height: 0;
+  padding: 4px 6px;
+  overflow: hidden;
+}
+.mobile-term-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 14px;
+  padding: 24px;
+  text-align: center;
+  line-height: 1.7;
+}
+.mobile-term-waiting {
+  animation: waiting-pulse 1.6s ease-in-out infinite;
+}
+@keyframes waiting-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+/* iOS Safari auto-zooms the page when focusing any input whose font-size is
+   under 16px — including xterm's invisible helper textarea, so tapping the
+   shared terminal zoomed/panned the whole view. The textarea is unrendered;
+   forcing its font-size costs nothing visually and kills the zoom. */
+.xterm-helper-textarea {
+  font-size: 16px !important;
+}
+/* key bar for keys a phone soft-keyboard doesn't have */
+.mobile-keybar {
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+.mobile-keybar button {
+  flex: 1 0 auto;
+  min-width: 44px; /* 44px touch target (WCAG / iOS HIG) */
+  min-height: 44px;
+  background: var(--bg-well);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 14px;
+  cursor: pointer;
+}
+.mobile-keybar button:active {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* Browser view: side-by-side responsive preview */
+.browser-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.browser-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-2);
+  flex-shrink: 0;
+}
+.browser-url {
+  flex: 1;
+  min-width: 120px;
+  background: var(--bg-well);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  border-radius: var(--r-btn);
+  padding: 6px 10px;
+  outline: none;
+}
+.browser-url:focus {
+  border-color: var(--accent);
+}
+.browser-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  border-radius: var(--r-btn);
+  padding: 6px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.browser-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.browser-btn:disabled {
+  color: var(--text-dim);
+  cursor: default;
+}
+.browser-detected {
+  color: var(--accent);
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.browser-devices {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.browser-dev-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  padding: 4px 10px;
+  border-radius: var(--r-btn);
+  cursor: pointer;
+  font-size: 11px;
+  font-family: var(--mono);
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+  white-space: nowrap;
+}
+.browser-dev-btn:hover {
+  color: var(--text);
+  background: var(--glass-bg);
+  border-color: var(--glass-border);
+}
+.browser-dev-btn.active {
+  color: #fff;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0) 60%),
+    color-mix(in srgb, var(--accent) var(--tint-med), transparent);
+  border-color: var(--border-red);
+}
+.browser-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.browser-strip {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 16px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.browser-frame {
+  flex-shrink: 0;
+}
+.browser-frame-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 0 2px 6px;
+}
+.browser-frame-name {
+  color: var(--text);
+}
+.browser-frame-clip {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  /* Deliberately white (not a theme token): a loading iframe is transparent
+     and a dark backdrop reads as a broken page. */
+  background: #fff;
+}
+.browser-frame-clip iframe {
+  border: 0;
+  display: block;
+}
+.browser-empty {
+  flex: 1;
+  align-self: center;
+  text-align: center;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 13px;
+  padding: 24px;
+}
+.browser-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.browser-log-badge {
+  background: var(--accent);
+  color: #fff;
+  border-radius: 999px;
+  font-size: 10px;
+  padding: 1px 6px;
+  margin-left: 2px;
+}
+.browser-logs {
+  height: 200px;
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+  background: var(--bg-well);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.browser-logs-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-2);
+  flex-shrink: 0;
+}
+.browser-log-tab {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  padding: 3px 10px;
+  border-radius: var(--r-btn);
+  cursor: pointer;
+  font-size: 11px;
+  font-family: var(--mono);
+}
+.browser-log-tab.active {
+  color: var(--text);
+  border-color: var(--border);
+  background: var(--bg-3);
+}
+.browser-logs-spacer {
+  flex: 1;
+}
+.browser-logs-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 8px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.browser-log-row {
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-all;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+.browser-log-row.err {
+  color: #ff6b6b;
+}
+.browser-log-row.warn {
+  color: #e6b450;
+}
+.browser-log-row.dim {
+  color: var(--text-dim);
+}
+.browser-log-count {
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 10px;
+  padding: 0 6px;
+  flex-shrink: 0;
+}
+.browser-net-status {
+  width: 34px;
+  flex-shrink: 0;
+  color: var(--text-dim);
+}
+.browser-log-row.err .browser-net-status {
+  color: inherit;
+}
+.browser-net-method {
+  width: 44px;
+  flex-shrink: 0;
+  color: var(--text-dim);
+}
+.browser-net-url {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.browser-net-detail {
+  flex-shrink: 0;
+  color: var(--text-dim);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── window hidden (minimized) ───────────────────────────────────────────────
+   lib/visibility.ts toggles this class on <html> from the Electron main
+   process's minimize/restore signal (backgroundThrottling:false pins the Page
+   Visibility API to 'visible', so CSS/JS can't detect hidden on their own).
+   Freeze every infinite pulse/spinner animation — with throttling disabled
+   they otherwise composite frames forever for a window nobody can see. */
+.win-hidden * {
+  animation-play-state: paused !important;
 }

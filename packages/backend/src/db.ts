@@ -10,6 +10,8 @@ export const prisma = new PrismaClient();
 const ADDITIVE_COLUMNS: ReadonlyArray<{ table: string; column: string; ddl: string }> = [
   { table: 'Run', column: 'claudeSessionId', ddl: 'ALTER TABLE "Run" ADD COLUMN "claudeSessionId" TEXT' },
   { table: 'Project', column: 'codeMapEmbed', ddl: 'ALTER TABLE "Project" ADD COLUMN "codeMapEmbed" BOOLEAN NOT NULL DEFAULT 0' },
+  { table: 'RunCommand', column: 'shell', ddl: `ALTER TABLE "RunCommand" ADD COLUMN "shell" TEXT NOT NULL DEFAULT 'powershell'` },
+  { table: 'Run', column: 'shell', ddl: 'ALTER TABLE "Run" ADD COLUMN "shell" TEXT' },
 ];
 
 /**
