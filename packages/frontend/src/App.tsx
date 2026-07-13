@@ -12,6 +12,7 @@ import { ProjectSidebar } from './components/ProjectSidebar';
 import { ProjectPanel } from './components/ProjectPanel';
 import { CodeEditor } from './components/CodeEditor';
 import { EodView } from './components/EodView';
+import { SgaRelease } from './components/SgaRelease';
 import { ArgusPanoptes } from './components/argus/ArgusPanoptes';
 import { CodeMap } from './components/CodeMap';
 import { Armory } from './components/Armory';
@@ -43,7 +44,7 @@ export default function App() {
   const [activeTabByProject, setActiveTabByProject] = useState<Record<string, string>>({});
   // Views are peer tabs (Runner / Editor / EOD / Argus / Code Map). Argus is a
   // global read-only monitor; the rest are scoped to the selected project.
-  const [view, setView] = useState<'runner' | 'editor' | 'eod' | 'argus' | 'codemap' | 'armory'>('runner');
+  const [view, setView] = useState<'runner' | 'editor' | 'eod' | 'release' | 'argus' | 'codemap' | 'armory'>('runner');
   // Terminal dock: docked bottom (resizable height) or right (resizable width),
   // plus minimize. All persisted server-side.
   const [dockPosition, setDockPosition] = useState<'bottom' | 'right'>('bottom');
@@ -136,6 +137,7 @@ export default function App() {
           ui.view === 'runner' ||
           ui.view === 'editor' ||
           ui.view === 'eod' ||
+          ui.view === 'release' ||
           ui.view === 'argus' ||
           ui.view === 'codemap' ||
           ui.view === 'armory'
@@ -648,6 +650,12 @@ export default function App() {
                     EOD
                   </button>
                   <button
+                    className={`vs-btn ${view === 'release' ? 'active' : ''}`}
+                    onClick={() => confirmLeaveEditor() && setView('release')}
+                  >
+                    Release
+                  </button>
+                  <button
                     className={`vs-btn ${view === 'argus' ? 'active' : ''}`}
                     onClick={() => confirmLeaveEditor() && setView('argus')}
                   >
@@ -682,6 +690,15 @@ export default function App() {
                 ) : view === 'eod' ? (
                   <div className="runner-scroll">
                     <EodView />
+                  </div>
+                ) : view === 'release' ? (
+                  <div className="runner-scroll">
+                    <SgaRelease
+                      key={selected.id}
+                      project={selected}
+                      projects={projects}
+                      onSelectProject={setSelectedId}
+                    />
                   </div>
                 ) : view === 'argus' ? (
                   // Argus is global (no project key) — it stays mounted across

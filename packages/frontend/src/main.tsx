@@ -14,11 +14,13 @@ import { IconDefs } from './components/icons';
 import './styles.css';
 import './components/argus/argus.css';
 import '@xterm/xterm/css/xterm.css';
-import { applyTheme, cachedThemeId } from './lib/themes';
-
-// Apply the last-used theme before first paint so reloads don't flash the default.
-// The server-persisted theme reconciles once the workspace loads (see App boot).
-applyTheme(cachedThemeId());
+// Apply the last-used theme variant before first paint so reloads don't flash the
+// default. Uses the SAME [data-theme] mechanism + storage key ('narukami-theme') as
+// App/ThemeSelector. NOTE: writing inline CSS custom-props here (the old applyTheme
+// from lib/themes) put them on <html>, which overrides the :root[data-theme='…']
+// rules in styles.css and froze the accent — that dead-locked the header picker.
+const savedTheme = localStorage.getItem('narukami-theme');
+if (savedTheme) document.documentElement.setAttribute('data-theme', savedTheme);
 
 const rootEl = document.getElementById('root');
 if (!rootEl) throw new Error('Root element #root not found');

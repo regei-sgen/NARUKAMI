@@ -57,9 +57,18 @@ export function codeGraphBinInstalled(): boolean {
   return path.isAbsolute(bin) ? fs.existsSync(bin) : false;
 }
 
-/** The engine's own name for a repo: path segments joined by '-'. */
+/**
+ * The engine's own name for a repo. The engine slugifies the path: every run of
+ * non-alphanumeric characters — the drive colon, path separators, AND spaces —
+ * collapses to a single '-', with leading/trailing dashes trimmed. Splitting on
+ * separators alone (the old behavior) left spaces intact, so a path like
+ * `C:\Users\Mark Jimuel\repo` derived `…-Mark Jimuel-…` and never matched the
+ * engine's stored `…-Mark-Jimuel-…` — every query then returned an empty graph
+ * for any user whose home directory contains a space. Verified against v0.9.0's
+ * list_projects (`C:\Users\Mark Jimuel\Documents\SGEN` → `C-Users-Mark-Jimuel-Documents-SGEN`).
+ */
 export function engineProjectName(absPath: string): string {
-  return absPath.split(/[\\/:]+/).filter(Boolean).join('-');
+  return absPath.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 }
 
 /** Parse the engine's stdout, tolerating a leading `level=…` log line. */

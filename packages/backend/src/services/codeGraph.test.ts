@@ -85,6 +85,27 @@ describe('parseProps', () => {
   });
 });
 
+describe('engineProjectName', () => {
+  it('joins simple path segments with dashes', () => {
+    expect(engineProjectName('C:/repo/demo')).toBe('C-repo-demo');
+    expect(engineProjectName('C:\\repo\\demo')).toBe('C-repo-demo');
+  });
+
+  it('slugifies spaces to dashes to match the engine (regression: a space in the user path left the Code Map empty)', () => {
+    // The engine stores `C:\Users\Mark Jimuel\Documents\SGEN` as
+    // `C-Users-Mark-Jimuel-Documents-SGEN` (every non-alphanumeric run → one '-').
+    // Verified against v0.9.0 list_projects. Deriving with the space intact never
+    // matched, so query_graph returned "project not found" → 0 nodes.
+    expect(engineProjectName('C:\\Users\\Mark Jimuel\\Documents\\SGEN')).toBe(
+      'C-Users-Mark-Jimuel-Documents-SGEN',
+    );
+  });
+
+  it('collapses consecutive separators and trims leading/trailing dashes', () => {
+    expect(engineProjectName('/home/a  b//c/')).toBe('home-a-b-c');
+  });
+});
+
 describe('getNodeDetail', () => {
   const REPO = 'C:/repo/demo'; // engineProjectName → 'C-repo-demo'
 

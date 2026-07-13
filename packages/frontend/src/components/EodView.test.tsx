@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { addDays, todayKey } from '../lib/eod';
 
 const { getEodActive, listEodReports } = vi.hoisted(() => ({
   getEodActive: vi.fn(),
@@ -47,5 +48,19 @@ describe('EodView', () => {
     const boxes = await screen.findAllByRole('checkbox');
     expect(boxes).toHaveLength(2);
     expect((boxes[0] as HTMLInputElement).checked).toBe(true);
+  });
+
+  it('defaults to today/today and a quick preset widens the request to the range', async () => {
+    render(<EodView />);
+    await screen.findByText('Dashboard.sgen.com'); // initial load settled
+    const today = todayKey();
+    // Mount fetched the single day (today, today).
+    expect(getEodActive).toHaveBeenCalledWith(today, today);
+
+    getEodActive.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: '7 days' }));
+    await waitFor(() => expect(getEodActive).toHaveBeenCalled());
+    // 7-day inclusive window ending today: from = today-6, to = today.
+    expect(getEodActive).toHaveBeenLastCalledWith(addDays(today, -6), today);
   });
 });

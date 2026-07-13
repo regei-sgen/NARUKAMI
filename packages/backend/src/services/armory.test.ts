@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { collectArmory, flattenHooks, parseFrontmatter } from './armory';
+import { collectArmory, flattenHooks, parseFrontmatter, pluginSkillSources } from './armory';
 
 describe('parseFrontmatter', () => {
   it('grabs top-level keys, strips quotes, keeps the first of duplicates', () => {
@@ -33,6 +33,33 @@ describe('flattenHooks', () => {
   it('is empty for no/invalid hooks', () => {
     expect(flattenHooks({}, 'global')).toEqual([]);
     expect(flattenHooks(null, 'global')).toEqual([]);
+  });
+});
+
+describe('pluginSkillSources', () => {
+  it('maps installed_plugins.json (v2) entries to {label, dir} skill sources', () => {
+    const json = {
+      version: 2,
+      plugins: {
+        'superpowers@claude-plugins-official': [
+          { scope: 'user', installPath: 'C:\\plug\\superpowers\\6.1.1', version: '6.1.1' },
+        ],
+        'chrome-devtools-mcp@claude-plugins-official': [
+          { scope: 'user', installPath: 'C:\\plug\\cdt\\1.5.0', version: '1.5.0' },
+        ],
+      },
+    };
+    const src = pluginSkillSources(json);
+    expect(src).toHaveLength(2);
+    expect(src[0].label).toBe('superpowers');
+    expect(src[0].dir.replace(/\\/g, '/')).toBe('C:/plug/superpowers/6.1.1/skills');
+    expect(src[1].label).toBe('chrome-devtools-mcp');
+  });
+
+  it('is fail-soft on junk shapes', () => {
+    expect(pluginSkillSources(null)).toEqual([]);
+    expect(pluginSkillSources({})).toEqual([]);
+    expect(pluginSkillSources({ plugins: { bad: 'not-an-array', worse: [{ noPath: 1 }] } })).toEqual([]);
   });
 });
 
@@ -83,5 +110,26 @@ describe('collectArmory over a fixture ~/.claude + project', () => {
     expect(a.memory.some((m) => m.name === 'pin' && m.type === 'feedback' && m.project === 'x')).toBe(true);
     expect(a.commands.some((c) => c.name === 'deploy' && c.scope === 'project' && c.project === 'proj')).toBe(true);
     expect(a.counts.skills).toBe(2);
+  });
+
+  it('collects skills from installed PLUGINS (installed_plugins.json → <installPath>/skills)', () => {
+    // Fixture plugin install: cache dir with one skill + the v2 manifest pointing at it.
+    const plugDir = path.join(cdir, 'plugins', 'cache', 'mkt', 'superpowers', '6.1.1');
+    fs.mkdirSync(path.join(plugDir, 'skills', 'test-driven-development'), { recursive: true });
+    fs.writeFileSync(
+      path.join(plugDir, 'skills', 'test-driven-development', 'SKILL.md'),
+      '---\nname: test-driven-development\ndescription: RED-GREEN-REFACTOR\n---\nx',
+    );
+    fs.writeFileSync(
+      path.join(cdir, 'plugins', 'installed_plugins.json'),
+      JSON.stringify({ version: 2, plugins: { 'superpowers@mkt': [{ scope: 'user', installPath: plugDir, version: '6.1.1' }] } }),
+    );
+
+    const a = collectArmory([]);
+    const sp = a.skills.find((s) => s.name === 'test-driven-development');
+    expect(sp).toBeTruthy();
+    expect(sp?.scope).toBe('plugin');
+    expect(sp?.project).toBe('superpowers'); // chip label = plugin name
+    expect(a.counts.skills).toBe(1);
   });
 });

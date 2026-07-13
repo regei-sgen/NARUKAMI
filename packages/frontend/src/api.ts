@@ -16,10 +16,16 @@ import type {
   FileContent,
   FileHead,
   GitBranch,
+  GitChanges,
   MemoryGraph,
   MemoryNoteDetail,
   Project,
   ProjectTree,
+  ReleaseCommitResult,
+  ReleaseDoc,
+  ReleasePreflight,
+  ReleasePushResult,
+  ReleaseZipDirResult,
   RestoredRun,
   RunCommand,
   UiSettings,
@@ -186,6 +192,40 @@ export const api = {
   getFileHead: (projectId: string, filePath: string) =>
     request<FileHead>(`/api/projects/${projectId}/git/file-head?path=${encodeURIComponent(filePath)}`),
 
+  // --- editor git source control (Changes tab) ---
+  getGitChanges: (projectId: string) =>
+    request<GitChanges>(`/api/projects/${projectId}/git/changes`),
+
+  stageFile: (projectId: string, filePath: string) =>
+    request<{ ok: boolean }>(`/api/projects/${projectId}/git/stage`, {
+      method: 'POST',
+      body: JSON.stringify({ path: filePath }),
+    }),
+
+  unstageFile: (projectId: string, filePath: string) =>
+    request<{ ok: boolean }>(`/api/projects/${projectId}/git/unstage`, {
+      method: 'POST',
+      body: JSON.stringify({ path: filePath }),
+    }),
+
+  discardFile: (projectId: string, filePath: string, untracked: boolean) =>
+    request<{ ok: boolean }>(`/api/projects/${projectId}/git/discard`, {
+      method: 'POST',
+      body: JSON.stringify({ path: filePath, untracked }),
+    }),
+
+  commitChanges: (projectId: string, message: string) =>
+    request<{ ok: boolean; head: string }>(`/api/projects/${projectId}/git/commit`, {
+      method: 'POST',
+      body: JSON.stringify({ message }),
+    }),
+
+  stageAll: (projectId: string) =>
+    request<{ ok: boolean }>(`/api/projects/${projectId}/git/stage-all`, { method: 'POST' }),
+
+  unstageAll: (projectId: string) =>
+    request<{ ok: boolean }>(`/api/projects/${projectId}/git/unstage-all`, { method: 'POST' }),
+
   // --- workspace / session restore ---
   getWorkspace: () => request<WorkspaceState>('/api/workspace'),
 
@@ -215,14 +255,19 @@ export const api = {
       ...(resume ? { body: JSON.stringify({ continue: true }) } : {}),
     }),
 
-  // --- end-of-day reports (cross-project, per day) ---
-  getEodActive: (day?: string) =>
-    request<EodActiveResponse>(`/api/eod/active${day ? `?day=${encodeURIComponent(day)}` : ''}`),
+  // --- end-of-day reports (cross-project, over a single day or a date range) ---
+  getEodActive: (from?: string, to?: string) => {
+    const qs = new URLSearchParams();
+    if (from) qs.set('from', from);
+    if (to ?? from) qs.set('to', to ?? (from as string));
+    const q = qs.toString();
+    return request<EodActiveResponse>(`/api/eod/active${q ? `?${q}` : ''}`);
+  },
 
-  generateEodReport: (day: string, paths: string[], note?: string) =>
+  generateEodReport: (from: string, to: string, paths: string[], note?: string) =>
     request<EodReportDoc>('/api/eod/report', {
       method: 'POST',
-      body: JSON.stringify({ day, paths, note }),
+      body: JSON.stringify({ from, to, paths, note }),
     }),
 
   listEodReports: () => request<EodReportDoc[]>('/api/eod/reports'),
@@ -231,6 +276,39 @@ export const api = {
 
   deleteEodReport: (id: string) =>
     request<{ ok: boolean }>(`/api/eod/reports/${id}`, { method: 'DELETE' }),
+
+  // --- SGA Release (one-click release-zip + AI patch notes for the SGA repo) ---
+  releasePreflight: (projectId: string) =>
+    request<ReleasePreflight>(`/api/projects/${projectId}/release/preflight`),
+
+  createRelease: (projectId: string, body: { version?: string; includeDirty?: boolean }) =>
+    request<ReleaseDoc>(`/api/projects/${projectId}/release`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  generateReleaseNotes: (releaseId: string) =>
+    request<ReleaseDoc>(`/api/releases/${releaseId}/notes`, { method: 'POST' }),
+
+  listReleases: (projectId: string) => request<ReleaseDoc[]>(`/api/projects/${projectId}/releases`),
+
+  // Commit the version bump (only the 3 version files, automatic message).
+  commitRelease: (projectId: string) =>
+    request<ReleaseCommitResult>(`/api/projects/${projectId}/release/commit`, { method: 'POST' }),
+
+  // Push the current branch (creates the origin upstream on first push).
+  pushRelease: (projectId: string) =>
+    request<ReleasePushResult>(`/api/projects/${projectId}/release/push`, { method: 'POST' }),
+
+  // Persist the permanent zip output folder ('' resets to the home-dir default).
+  setReleaseZipDir: (dir: string) =>
+    request<ReleaseZipDirResult>('/api/release/zip-dir', {
+      method: 'POST',
+      body: JSON.stringify({ dir }),
+    }),
+
+  deleteRelease: (releaseId: string) =>
+    request<{ ok: boolean }>(`/api/releases/${releaseId}`, { method: 'DELETE' }),
 
   saveSettings: (patch: { ui?: UiSettings } & Record<string, unknown>) =>
     request<{ ok: boolean; saved: number }>('/api/settings', {
@@ -325,3 +403,32 @@ export const api = {
   // --- Armory (read-only inventory of skills / hooks / memory / agents / commands) ---
   getArmory: () => request<Armory>('/api/armory'),
 };
+
+/**
+ * Download a release zip through the browser. A plain <a href> can't carry the
+ * Authorization header, so fetch → blob → synthetic anchor click.
+ */
+export async function downloadReleaseZip(releaseId: string, filename: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/releases/${releaseId}/zip`, {
+    headers: { Authorization: `Bearer ${TOKEN ?? ''}` },
+  });
+  if (!res.ok) {
+    let message = `Download failed (${res.status})`;
+    try {
+      const body = (await res.json()) as ErrorBody;
+      if (body.error) message = body.error;
+    } catch {
+      // keep the status message
+    }
+    throw new Error(message);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}

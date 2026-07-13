@@ -4,6 +4,7 @@ import '../lib/monaco-setup'; // side-effect: offline workers + narukami theme +
 import { api } from '../api';
 import type { FileNode, GitBranch, Project } from '../types';
 import { Ic } from './icons';
+import { ChangesPanel } from './ChangesPanel';
 
 interface Props {
   project: Project;
@@ -202,6 +203,9 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
+  // Sidebar tab: file Explorer (tree + search) or git Changes (source control).
+  const [leftTab, setLeftTab] = useState<'explorer' | 'changes'>('explorer');
+
   // Search: by file name (client-side filter of the tree) or by code (backend grep).
   const [searchMode, setSearchMode] = useState<'name' | 'code'>('name');
   const [query, setQuery] = useState('');
@@ -351,6 +355,30 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
     [project.id, onOpenFile],
   );
 
+  // Open a changed file from the Changes panel in the side-by-side diff. A
+  // deleted file has no working copy: load HEAD and diff it against empty.
+  const openDiff = useCallback(
+    async (filePath: string, deleted: boolean) => {
+      setShowDiff(true);
+      if (deleted) {
+        setCurrentPath(filePath);
+        setContent('');
+        setOriginal('');
+        try {
+          const r = await api.getFileHead(project.id, filePath);
+          setHeadContent(r.content);
+          setHeadCommitted(r.committed);
+        } catch {
+          setHeadContent('');
+          setHeadCommitted(false);
+        }
+        return;
+      }
+      await openPath(filePath);
+    },
+    [openPath, project.id],
+  );
+
   // Flattened file paths for the name-search filter (rebuilt when the tree changes).
   const flatFiles = useMemo(() => {
     const out: string[] = [];
@@ -478,7 +506,23 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
   return (
     <div className="editor-view">
       <aside className="file-tree">
-        {loadingTree ? (
+        <div className="ft-tabs">
+          <button
+            className={`ft-tab ${leftTab === 'explorer' ? 'active' : ''}`}
+            onClick={() => setLeftTab('explorer')}
+          >
+            Explorer
+          </button>
+          <button
+            className={`ft-tab ${leftTab === 'changes' ? 'active' : ''}`}
+            onClick={() => setLeftTab('changes')}
+          >
+            Changes
+          </button>
+        </div>
+        {leftTab === 'changes' ? (
+          <ChangesPanel projectId={project.id} currentPath={currentPath} onOpenDiff={openDiff} />
+        ) : loadingTree ? (
           <div className="ft-note">Loading tree…</div>
         ) : treeErr ? (
           <div className="ft-note ft-err">{treeErr}</div>

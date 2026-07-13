@@ -25,6 +25,7 @@ model Project {
   runs        Run[]
   analyses    Analysis[]
   eodEntries  EodEntry[]
+  releases    Release[]
 }
 
 model RunCommand {
@@ -104,6 +105,27 @@ model EodEntry {
 
   @@unique([projectId, day])
   @@index([projectId, day])
+}
+
+// SGA Release: one release-zip build of the SG Claude Assistant repo (bump the
+// three version files → git-archive zip → AI patch notes). The zip lands at
+// ~/sgen-claude-chat-v<version>.zip; summary/notes are generated on demand
+// (claude -p) after the zip and stay re-copyable from the history.
+model Release {
+  id            String   @id @default(cuid())
+  projectId     String
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  version       String   // SemVer the release was cut as (also in the zip filename)
+  zipPath       String   // absolute path of the produced zip
+  zipBytes      Int
+  headCommit    String?  // repo HEAD at build time — next release's git-log boundary
+  dirtyIncluded Boolean  @default(false) // uncommitted changes were knowingly shipped
+  summary       String?  // Patch Note Summary (plain-language, AI)
+  notes         String?  // Patch Note Description (one line per change, AI)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([projectId, createdAt])
 }
 
 // End-of-Day REPORT: one cross-project markdown report per day, generated (AI)

@@ -1,8 +1,14 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
 import type { EodActiveProject, EodReportDoc } from '../types';
-import { todayKey } from '../lib/eod';
+import { addDays, parseRangeKey, prettyRange, rangeKey, todayKey } from '../lib/eod';
 import { Ic } from './icons';
+
+/** A saved report's stored key ('YYYY-MM-DD' or 'from_to') → human heading. */
+function reportTitle(dayKey: string): string {
+  const { from, to } = parseRangeKey(dayKey);
+  return prettyRange(from, to);
+}
 
 /**
  * Convert the report markdown to Slack mrkdwn so it can be pasted straight into
@@ -44,7 +50,8 @@ export function renderSlack(slack: string): ReactNode[] {
 }
 
 export function EodView() {
-  const [day, setDay] = useState<string>(todayKey());
+  const [from, setFrom] = useState<string>(todayKey());
+  const [to, setTo] = useState<string>(todayKey());
   const [active, setActive] = useState<EodActiveProject[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [note, setNote] = useState('');
@@ -62,18 +69,18 @@ export function EodView() {
     }
   }, []);
 
-  // On day change: detect active projects (default all selected) + load any saved
-  // report already generated for that day.
-  const loadDay = useCallback(async (d: string) => {
+  // On range change: detect projects active anywhere in [from, to] (default all
+  // selected) + load any saved report already generated for that exact range.
+  const loadRange = useCallback(async (f: string, t: string) => {
     setLoadingActive(true);
     setErr(null);
     setReport(null);
     try {
-      const [res, saved] = await Promise.all([api.getEodActive(d), api.listEodReports()]);
+      const [res, saved] = await Promise.all([api.getEodActive(f, t), api.listEodReports()]);
       setActive(res.projects);
       setSelected(new Set(res.projects.map((p) => p.path)));
       setReports(saved);
-      setReport(saved.find((r) => r.day === d) ?? null);
+      setReport(saved.find((r) => r.day === rangeKey(f, t)) ?? null);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -82,8 +89,16 @@ export function EodView() {
   }, []);
 
   useEffect(() => {
-    void loadDay(day);
-  }, [day, loadDay]);
+    void loadRange(from, to);
+  }, [from, to, loadRange]);
+
+  // Quick preset: the last n+1 days ending today (n=0 → today only). Both setters
+  // batch into one render, so the effect above runs once with the new pair.
+  const setPreset = useCallback((n: number) => {
+    const t = todayKey();
+    setTo(t);
+    setFrom(addDays(t, -n));
+  }, []);
 
   const toggle = (path: string) =>
     setSelected((cur) => {
@@ -99,7 +114,7 @@ export function EodView() {
     setGenerating(true);
     setErr(null);
     try {
-      const r = await api.generateEodReport(day, paths, note.trim() || undefined);
+      const r = await api.generateEodReport(from, to, paths, note.trim() || undefined);
       setReport(r);
       await loadReports();
     } catch (e) {
@@ -109,8 +124,11 @@ export function EodView() {
     }
   };
 
-  const openSaved = async (r: EodReportDoc) => {
-    setDay(r.day); // triggers loadDay, which will pick up this saved report
+  const openSaved = (r: EodReportDoc) => {
+    // Set the pickers to the report's stored range; the effect reloads + selects it.
+    const { from: f, to: t } = parseRangeKey(r.day);
+    setFrom(f);
+    setTo(t);
   };
 
   const removeReport = async (id: string) => {
@@ -168,9 +186,9 @@ export function EodView() {
           ) : (
             <ul className="eod-saved-list">
               {reports.map((r) => (
-                <li key={r.id} className={`eod-saved-item${r.day === day ? ' active' : ''}`}>
-                  <button className="eod-saved-day" onClick={() => void openSaved(r)}>
-                    <span>{r.day}</span>
+                <li key={r.id} className={`eod-saved-item${r.day === rangeKey(from, to) ? ' active' : ''}`}>
+                  <button className="eod-saved-day" onClick={() => openSaved(r)}>
+                    <span>{reportTitle(r.day)}</span>
                     <span className="eod-saved-count">{r.projects.length} proj</span>
                   </button>
                   <button className="btn-icon eod-saved-del" title="Delete report" onClick={() => void removeReport(r.id)}>
@@ -193,21 +211,41 @@ export function EodView() {
             </div>
             <div className="eod-controls">
               <label className="eod-daypick">
-                Day
-                <input type="date" value={day} max={todayKey()} onChange={(e) => setDay(e.target.value || todayKey())} />
+                From
+                <input
+                  type="date"
+                  value={from}
+                  max={to}
+                  onChange={(e) => setFrom(e.target.value || to)}
+                />
               </label>
+              <label className="eod-daypick">
+                To
+                <input
+                  type="date"
+                  value={to}
+                  min={from}
+                  max={todayKey()}
+                  onChange={(e) => setTo(e.target.value || todayKey())}
+                />
+              </label>
+              <div className="eod-presets" role="group" aria-label="Quick ranges">
+                <button type="button" className="btn btn-ghost eod-preset" onClick={() => setPreset(0)}>Today</button>
+                <button type="button" className="btn btn-ghost eod-preset" onClick={() => setPreset(6)}>7 days</button>
+                <button type="button" className="btn btn-ghost eod-preset" onClick={() => setPreset(29)}>30 days</button>
+              </div>
               <button
                 className="btn btn-ghost eod-refresh"
-                onClick={() => void loadDay(day)}
+                onClick={() => void loadRange(from, to)}
                 disabled={loadingActive}
-                title="Re-scan Claude sessions, runs and commits for this day"
+                title="Re-scan Claude sessions, runs and commits for this range"
               >
                 {loadingActive ? <><Ic name="refresh" /> Detecting…</> : <><Ic name="refresh" /> Refresh</>}
               </button>
             </div>
 
             {!loadingActive && active.length === 0 ? (
-              <div className="muted eod-empty">No project activity detected on {day}.</div>
+              <div className="muted eod-empty">No project activity detected in {prettyRange(from, to)}.</div>
             ) : (
               <ul className="eod-active">
                 {active.map((p) => (
@@ -254,7 +292,7 @@ export function EodView() {
           {report && (
             <section className="eod-card eod-report">
               <div className="eod-card-head">
-                <span><b className="eod-step">03</b> Report · {report.day}</span>
+                <span><b className="eod-step">03</b> Report · {reportTitle(report.day)}</span>
                 <span className="eod-report-btns">
                   <button className="btn" onClick={copy}>Copy for Slack</button>
                   <button className="btn" onClick={download}>Download .txt</button>
