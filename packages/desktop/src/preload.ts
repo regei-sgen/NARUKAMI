@@ -39,37 +39,6 @@ contextBridge.exposeInMainWorld('narukami', {
     return () => ipcRenderer.removeListener('narukami:dockhint', handler);
   },
 
-  // --- Browser view tear-off ---
-  popOutBrowser: (projectId: string, pos?: { x: number; y: number }): void => {
-    ipcRenderer.send('narukami:browser-popout', projectId, pos);
-  },
-  bringBackBrowser: (projectId: string): void => {
-    ipcRenderer.send('narukami:browser-bringback', projectId);
-  },
-  reportBrowserDockRect: (rect: Rect | null): void => {
-    ipcRenderer.send('narukami:browser-dockrect', rect);
-  },
-  onBrowserReclaim: (cb: (projectId: string) => void): (() => void) => {
-    const handler = (_e: unknown, projectId: string): void => cb(projectId);
-    ipcRenderer.on('narukami:browser-reclaim', handler);
-    return () => ipcRenderer.removeListener('narukami:browser-reclaim', handler);
-  },
-  onBrowserDockHint: (cb: (active: boolean) => void): (() => void) => {
-    const handler = (_e: unknown, active: boolean): void => cb(active);
-    ipcRenderer.on('narukami:browser-dockhint', handler);
-    return () => ipcRenderer.removeListener('narukami:browser-dockhint', handler);
-  },
-
-  // --- Per-viewport pop-out ---
-  popOutViewport: (params: {
-    projectId: string;
-    browserId: string;
-    vpId: string;
-    pos?: { x: number; y: number };
-  }): void => {
-    ipcRenderer.send('narukami:viewport-popout', params);
-  },
-
   // Restart the app (used when toggling phone/LAN sharing, which rebinds the
   // backend's network interface at startup).
   relaunch: (): void => {

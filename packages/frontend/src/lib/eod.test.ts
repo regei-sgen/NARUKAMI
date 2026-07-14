@@ -1,6 +1,58 @@
 import { describe, it, expect } from 'vitest';
-import { computeStats, fmtDuration, fmtTime, isOk, statusClass } from './eod';
-import type { EodItem } from '../types';
+import {
+  compilesFromMemory,
+  computeStats,
+  featureSource,
+  fmtDuration,
+  fmtTime,
+  isOk,
+  memorySourceLabel,
+  statusClass,
+} from './eod';
+import type { EodCommit, EodItem, MemoryDoc } from '../types';
+
+const commit = (over: Partial<EodCommit> = {}): EodCommit => ({
+  hash: 'abc123',
+  subject: 'feat: x',
+  body: '',
+  filesChanged: 1,
+  ...over,
+});
+const mem = (over: Partial<MemoryDoc> = {}): MemoryDoc => ({
+  source: 'memory',
+  name: 'a.md',
+  content: 'x',
+  truncated: false,
+  ...over,
+});
+
+describe('featureSource', () => {
+  it('prefers git commits when present', () => {
+    expect(featureSource({ commits: [commit()], memory: [mem()] })).toBe('git');
+  });
+  it('falls back to memory when there are no commits', () => {
+    expect(featureSource({ commits: [], memory: [mem()] })).toBe('memory');
+  });
+  it('is none when neither source has content', () => {
+    expect(featureSource({ commits: [], memory: [] })).toBe('none');
+  });
+});
+
+describe('compilesFromMemory', () => {
+  it('true only for a known non-git project', () => {
+    expect(compilesFromMemory({ git: false })).toBe(true);
+    expect(compilesFromMemory({ git: true })).toBe(false);
+    expect(compilesFromMemory(null)).toBe(false); // unknown yet → keep the git label
+  });
+});
+
+describe('memorySourceLabel', () => {
+  it('labels each source', () => {
+    expect(memorySourceLabel('index')).toBe('index');
+    expect(memorySourceLabel('memory')).toBe('memory');
+    expect(memorySourceLabel('claude-md')).toBe('CLAUDE.md');
+  });
+});
 
 function item(over: Partial<EodItem> = {}): EodItem {
   return {

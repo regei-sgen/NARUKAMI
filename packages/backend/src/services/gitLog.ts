@@ -81,6 +81,24 @@ export async function gitCommitsForDay(
   }
 }
 
+/**
+ * True if `projectPath` is inside a git work tree. Used to decide whether the
+ * EOD should compile "features" from git commits or fall back to Claude memory.
+ * False on any failure (missing git, not a repo, path gone).
+ */
+export async function isGitRepo(projectPath: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['-C', projectPath, 'rev-parse', '--is-inside-work-tree'],
+      { timeout: GIT_TIMEOUT_MS, windowsHide: true },
+    );
+    return stdout.trim() === 'true';
+  } catch {
+    return false;
+  }
+}
+
 // A commit for the Blueprint "Changelog" — same as Commit plus the author date
 // (ISO 8601) and author name, so the UI can filter by a date/time range.
 export interface LogCommit extends Commit {

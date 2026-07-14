@@ -3,6 +3,19 @@ import { prisma } from '../db';
 import { isRunning, startClaude, startRun, startShell, stopRun } from '../services/runner';
 import { startAdminShell } from '../services/brokerServer';
 import { AnalyzerError, diagnoseRun } from '../services/analyzer';
+import {
+  availableShells,
+  shellKindFromLabel,
+  shellLabel,
+  type ShellKind,
+} from '../services/shells';
+
+const SHELL_KINDS: ShellKind[] = ['powershell', 'cmd', 'gitbash'];
+function parseShellKind(v: unknown): ShellKind | undefined {
+  return typeof v === 'string' && (SHELL_KINDS as string[]).includes(v)
+    ? (v as ShellKind)
+    : undefined;
+}
 
 export async function runRoutes(app: FastifyInstance): Promise<void> {
   // Start a run for one of a project's detected commands.
@@ -47,10 +60,16 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  // Open an interactive shell (PowerShell / $SHELL) rooted at the project dir.
-  // `admin: true` (Windows only) opens an ELEVATED shell via the broker: it fires
-  // a UAC prompt and the run goes live once the elevated agent connects back.
-  app.post<{ Params: { id: string }; Body: { admin?: boolean } }>(
+  // Which interactive shells this machine can open (for the terminal's shell
+  // menu). Machine-global, so it takes no project.
+  app.get('/api/shells', async () => ({ shells: availableShells() }));
+
+  // Open an interactive shell rooted at the project dir. `kind` picks the Windows
+  // shell (powershell | cmd | gitbash; default powershell). `admin: true`
+  // (Windows only) opens an ELEVATED shell via the broker: it fires a UAC prompt
+  // and the run goes live once the elevated agent connects back. Admin is
+  // PowerShell-only for now (the broker spawns an elevated powershell.exe).
+  app.post<{ Params: { id: string }; Body: { admin?: boolean; kind?: string } }>(
     '/api/projects/:id/shell',
     async (req, reply) => {
       const project = await prisma.project.findUnique({ where: { id: req.params.id } });
@@ -60,9 +79,21 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
       if (admin && process.platform !== 'win32') {
         return reply.code(400).send({ error: 'Admin shells are only supported on Windows.' });
       }
+      const kind = parseShellKind(req.body?.kind) ?? 'powershell';
+      if (admin && kind !== 'powershell') {
+        return reply.code(400).send({ error: 'Admin shells are PowerShell-only.' });
+      }
 
+      // Store the shell label as the Run name so restart + reload recover the
+      // kind (see the restart handler below), and the tab shows the right name.
       const run = await prisma.run.create({
-        data: { projectId: project.id, kind: 'shell', dockOpen: true, status: 'running' },
+        data: {
+          projectId: project.id,
+          kind: 'shell',
+          name: shellLabel(kind),
+          dockOpen: true,
+          status: 'running',
+        },
       });
 
       try {
@@ -72,7 +103,7 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
           await startAdminShell({ runId: run.id, cwd: project.path });
           return reply.code(201).send({ runId: run.id, elevated: true, pending: true });
         }
-        const { pid } = startShell({ runId: run.id, cwd: project.path });
+        const { pid } = startShell({ runId: run.id, cwd: project.path, kind });
         await prisma.run.update({ where: { id: run.id }, data: { pid } });
         return reply.code(201).send({ runId: run.id, pid, elevated: false });
       } catch (err) {
@@ -189,7 +220,12 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
     try {
       let pid: number;
       if (old.kind === 'shell') {
-        ({ pid } = startShell({ runId: run.id, cwd: project.path }));
+        // Reopen the same shell type: the kind is encoded in the Run name.
+        ({ pid } = startShell({
+          runId: run.id,
+          cwd: project.path,
+          kind: shellKindFromLabel(old.name),
+        }));
       } else if (old.kind === 'claude') {
         ({ pid } = startClaude({
           runId: run.id,

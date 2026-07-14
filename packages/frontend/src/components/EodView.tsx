@@ -1,7 +1,16 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
-import type { EodEntry, EodItem, Project } from '../types';
-import { computeStats, fmtDuration, fmtTime, statusClass, todayKey } from '../lib/eod';
+import type { EodEntry, EodItem, EodSources, Project } from '../types';
+import {
+  compilesFromMemory,
+  computeStats,
+  featureSource,
+  fmtDuration,
+  fmtTime,
+  memorySourceLabel,
+  statusClass,
+  todayKey,
+} from '../lib/eod';
 
 interface Props {
   project: Project;
@@ -11,6 +20,7 @@ const KIND_ICON: Record<string, string> = { shell: '⌨', claude: '✦', command
 
 export function EodView({ project }: Props) {
   const [entries, setEntries] = useState<EodEntry[]>([]);
+  const [sources, setSources] = useState<EodSources | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [note, setNote] = useState('');
@@ -24,7 +34,12 @@ export function EodView({ project }: Props) {
     setLoading(true);
     setErr(null);
     try {
-      setEntries(await api.listEod(project.id));
+      const [list, src] = await Promise.all([
+        api.listEod(project.id),
+        api.getEodSources(project.id).catch(() => null),
+      ]);
+      setEntries(list);
+      if (src) setSources(src);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -33,8 +48,13 @@ export function EodView({ project }: Props) {
   }, [project.id]);
 
   useEffect(() => {
+    setSources(null);
     void load();
   }, [load]);
+
+  // A non-git project compiles its "features" from Claude memory instead of commits.
+  const fromMemory = compilesFromMemory(sources);
+  const memoryCount = sources?.memory.length ?? 0;
 
   // Replace one entry in place (after note/summary edits) without a full reload.
   const patchEntry = (e: EodEntry) => setEntries((cur) => cur.map((x) => (x.id === e.id ? e : x)));
@@ -92,6 +112,14 @@ export function EodView({ project }: Props) {
         <h2>End of Day</h2>
         <div className="muted">
           {project.name} · keeps the last 10 days · compiles today's finished runs
+          {fromMemory && (
+            <>
+              {' · '}
+              <span className="eod-src-badge" title="Not a git repo — features come from this project's Claude memory">
+                no git · using Claude memory{memoryCount ? ` (${memoryCount})` : ''}
+              </span>
+            </>
+          )}
         </div>
       </div>
 
@@ -110,8 +138,21 @@ export function EodView({ project }: Props) {
           rows={2}
           spellCheck
         />
-        <button className="btn btn-claude eod-compile-btn" onClick={compile} disabled={compiling}>
-          {compiling ? 'Compiling…' : '✦ Compile today'}
+        <button
+          className="btn btn-claude eod-compile-btn"
+          onClick={compile}
+          disabled={compiling}
+          title={
+            fromMemory
+              ? "Snapshot today's runs and this project's Claude memory"
+              : "Snapshot today's finished runs + git commits"
+          }
+        >
+          {compiling
+            ? 'Compiling…'
+            : fromMemory
+              ? '✦ Compile from Claude memory'
+              : '✦ Compile today'}
         </button>
       </div>
 
@@ -171,44 +212,79 @@ export function EodView({ project }: Props) {
                       {KIND_ICON[k] ?? '•'} {n}
                     </span>
                   ))}
-                  {e.commits.length > 0 && (
+                  {e.commits.length > 0 ? (
                     <span className="eod-stat eod-featchip">
                       ✚ {e.commits.length} {e.commits.length === 1 ? 'feature' : 'features'}
                     </span>
+                  ) : (
+                    e.memory.length > 0 && (
+                      <span className="eod-stat eod-featchip eod-memchip">
+                        ✦ {e.memory.length} memory
+                      </span>
+                    )
                   )}
                 </div>
 
                 {open && (
                   <div className="eod-body">
-                    {/* Features/changes added that day, from git commits. */}
-                    <div className="eod-features">
-                      <div className="eod-features-head">
-                        Features added
-                        <span className="eod-features-count">{e.commits.length}</span>
-                      </div>
-                      {e.commits.length === 0 ? (
-                        <div className="muted eod-features-empty">
-                          No commits recorded for this day (not a git repo, or nothing committed).
+                    {/* Features/changes added that day: git commits when the project
+                        is a git repo, otherwise the project's Claude memory. */}
+                    {featureSource(e) === 'memory' ? (
+                      <div className="eod-features">
+                        <div className="eod-features-head">
+                          Claude memory
+                          <span className="eod-features-count">{e.memory.length}</span>
+                          <span className="eod-features-src">no git repo</span>
                         </div>
-                      ) : (
-                        <ul className="eod-commits">
-                          {e.commits.map((c) => (
-                            <li key={c.hash} className="eod-commit">
-                              <div className="eod-commit-top">
-                                <span className="eod-commit-subject">{c.subject}</span>
-                                {c.filesChanged != null && (
-                                  <span className="eod-commit-files">
-                                    {c.filesChanged} {c.filesChanged === 1 ? 'file' : 'files'}
-                                  </span>
-                                )}
-                                <code className="eod-commit-hash">{c.hash}</code>
+                        <ul className="eod-memory">
+                          {e.memory.map((m) => (
+                            <li key={m.name} className="eod-mem-doc">
+                              <div className="eod-mem-top">
+                                <span className="eod-mem-name">{m.name}</span>
+                                <span className={`eod-mem-src eod-mem-src-${m.source}`}>
+                                  {memorySourceLabel(m.source)}
+                                </span>
                               </div>
-                              {c.body && <pre className="eod-commit-body">{c.body}</pre>}
+                              <pre className="eod-mem-content">
+                                {m.content}
+                                {m.truncated ? '\n…(truncated)' : ''}
+                              </pre>
                             </li>
                           ))}
                         </ul>
-                      )}
-                    </div>
+                      </div>
+                    ) : (
+                      <div className="eod-features">
+                        <div className="eod-features-head">
+                          Features added
+                          <span className="eod-features-count">{e.commits.length}</span>
+                        </div>
+                        {e.commits.length === 0 ? (
+                          <div className="muted eod-features-empty">
+                            No commits recorded for this day (not a git repo, or nothing committed).
+                            {e.git === false &&
+                              ' No Claude memory found for this project either.'}
+                          </div>
+                        ) : (
+                          <ul className="eod-commits">
+                            {e.commits.map((c) => (
+                              <li key={c.hash} className="eod-commit">
+                                <div className="eod-commit-top">
+                                  <span className="eod-commit-subject">{c.subject}</span>
+                                  {c.filesChanged != null && (
+                                    <span className="eod-commit-files">
+                                      {c.filesChanged} {c.filesChanged === 1 ? 'file' : 'files'}
+                                    </span>
+                                  )}
+                                  <code className="eod-commit-hash">{c.hash}</code>
+                                </div>
+                                {c.body && <pre className="eod-commit-body">{c.body}</pre>}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    )}
 
                     {e.items.length === 0 ? (
                       <div className="muted">No finished runs recorded for this day.</div>

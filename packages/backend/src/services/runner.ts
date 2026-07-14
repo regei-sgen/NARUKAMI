@@ -3,6 +3,11 @@ import path from 'node:path';
 import * as pty from 'node-pty';
 import { prisma } from '../db';
 import { buildClaudeMcpArgs } from './mcpConfig';
+import { resolveExecutable } from './resolveExecutable';
+import { interactiveShellFor, shellLabel, type ShellKind } from './shells';
+
+// Re-export so existing importers of `resolveExecutable` from runner keep working.
+export { resolveExecutable };
 
 export type RunFinalStatus = 'exited' | 'killed' | 'error';
 
@@ -84,32 +89,6 @@ export function shellFor(command: string): { file: string; args: string[] } {
   return { file: shell, args: ['-lc', command] };
 }
 
-/**
- * Resolve an executable to a full path via PATH + PATHEXT. Unlike libuv's
- * execFile, node-pty's spawn does NOT search PATH/PATHEXT for a bare name on
- * Windows, so `claude` must be resolved to `…\claude.exe` before spawning.
- * Returns the bare name if not found (let spawn surface a clear error).
- */
-export function resolveExecutable(name: string): string {
-  const isWin = process.platform === 'win32';
-  const sep = isWin ? ';' : ':';
-  const exts = isWin
-    ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';')
-    : [''];
-  const dirs = (process.env.PATH || '').split(sep).filter(Boolean);
-  for (const dir of dirs) {
-    for (const ext of exts) {
-      const candidate = path.join(dir, name + ext);
-      try {
-        if (fs.statSync(candidate).isFile()) return candidate;
-      } catch {
-        /* not here — keep looking */
-      }
-    }
-  }
-  return name;
-}
-
 /** process.env minus undefined values (node-pty wants Record<string,string>). */
 export function cleanEnv(): Record<string, string> {
   const out: Record<string, string> = {};
@@ -172,10 +151,17 @@ export interface StartOptions {
   cwd: string;
 }
 
-/** A bare interactive shell (no command) — a project-scoped terminal. */
-export function interactiveShell(): { file: string; args: string[] } {
+/**
+ * A bare interactive shell (no command) — a project-scoped terminal. On Windows
+ * the caller can pick which shell (PowerShell / CMD / Git Bash); elsewhere it's
+ * the login `$SHELL`. Returns null if the requested Windows shell isn't installed
+ * (e.g. Git Bash on a machine without Git for Windows).
+ */
+export function interactiveShell(
+  kind: ShellKind = 'powershell',
+): { file: string; args: string[] } | null {
   if (process.platform === 'win32') {
-    return { file: 'powershell.exe', args: ['-NoLogo'] };
+    return interactiveShellFor(kind);
   }
   const shell = process.env.SHELL || 'bash';
   return { file: shell, args: ['-i'] };
@@ -253,10 +239,16 @@ export function startRun(opts: StartOptions): { pid: number } {
   return spawnManaged(opts.runId, file, args, opts.cwd);
 }
 
-/** Open a bare interactive shell (PowerShell / $SHELL) in `cwd`. */
-export function startShell(opts: { runId: string; cwd: string }): { pid: number } {
-  const { file, args } = interactiveShell();
-  return spawnManaged(opts.runId, file, args, opts.cwd);
+/** Open a bare interactive shell in `cwd`. `kind` picks the Windows shell
+ *  (default PowerShell); throws a clear error if that shell isn't installed. */
+export function startShell(opts: { runId: string; cwd: string; kind?: ShellKind }): { pid: number } {
+  const spec = interactiveShell(opts.kind ?? 'powershell');
+  if (!spec) {
+    throw new Error(
+      `${shellLabel(opts.kind ?? 'powershell')} was not found on this machine — install it, then retry.`,
+    );
+  }
+  return spawnManaged(opts.runId, spec.file, spec.args, opts.cwd);
 }
 
 /** Remove ANSI escape sequences so text markers can be matched. */

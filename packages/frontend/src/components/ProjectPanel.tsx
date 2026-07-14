@@ -1,13 +1,14 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { api } from '../api';
-import type { AnalyzerResult, Project, RunCommand } from '../types';
+import type { AnalyzerResult, AvailableShell, Project, RunCommand, ShellKind } from '../types';
 import { PhoneShare } from './PhoneShare';
 
 interface Props {
   project: Project;
+  shells: AvailableShell[];
   onAnalyze: (id: string) => Promise<{ project: Project; analysis: AnalyzerResult }>;
   onRun: (project: Project, command: RunCommand) => void;
-  onShell: (project: Project, admin?: boolean) => void;
+  onShell: (project: Project, opts?: { admin?: boolean; kind?: ShellKind }) => void;
   onClaude: (project: Project) => void;
   onContinueClaude: (project: Project) => void;
   onChanged: () => void | Promise<void>;
@@ -15,6 +16,7 @@ interface Props {
 
 export function ProjectPanel({
   project,
+  shells,
   onAnalyze,
   onRun,
   onShell,
@@ -26,6 +28,21 @@ export function ProjectPanel({
   const [analysis, setAnalysis] = useState<AnalyzerResult | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [showPhone, setShowPhone] = useState(false);
+  const [shellMenu, setShellMenu] = useState(false);
+  const shellRef = useRef<HTMLDivElement>(null);
+
+  // Close the shell menu on any outside click.
+  useEffect(() => {
+    if (!shellMenu) return;
+    const onDoc = (e: MouseEvent) => {
+      if (shellRef.current && !shellRef.current.contains(e.target as Node)) setShellMenu(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [shellMenu]);
+
+  // Only offer installed shells; if the probe hasn't returned yet, offer PowerShell.
+  const shellOptions = shells.filter((s) => s.available);
 
   // manual add
   const [label, setLabel] = useState('');
@@ -112,13 +129,46 @@ export function ProjectPanel({
           >
             📱 Phone
           </button>
-          <button className="btn btn-shell" onClick={() => onShell(project)}>
-            ⌨ Shell
-          </button>
+          <div className="btn-split" ref={shellRef}>
+            <button
+              className="btn btn-shell btn-split-main"
+              title="Open a terminal (PowerShell). Use ▾ to pick another shell."
+              onClick={() => onShell(project)}
+            >
+              ⌨ Shell
+            </button>
+            {shellOptions.length > 1 && (
+              <button
+                className="btn btn-shell btn-split-caret"
+                title="Choose a shell"
+                aria-label="Choose a shell"
+                onClick={() => setShellMenu((v) => !v)}
+              >
+                ▾
+              </button>
+            )}
+            {shellMenu && (
+              <div className="shell-menu" role="menu">
+                {shellOptions.map((s) => (
+                  <button
+                    key={s.kind}
+                    className="shell-menu-item"
+                    role="menuitem"
+                    onClick={() => {
+                      setShellMenu(false);
+                      onShell(project, { kind: s.kind });
+                    }}
+                  >
+                    ⌨ {s.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           <button
             className="btn btn-shell"
             title="Open an elevated PowerShell (Administrator) — triggers a UAC prompt"
-            onClick={() => onShell(project, true)}
+            onClick={() => onShell(project, { admin: true })}
           >
             🛡 Shell (Admin)
           </button>

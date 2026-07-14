@@ -39,23 +39,6 @@ export interface AnalyzerResult {
   warnings: string[];
 }
 
-// Cross-browser accuracy advisor: where the embedded Chromium preview diverges
-// from the real target browser (Safari/Firefox/…). 'catalog' findings come from
-// the curated reference; 'claude' findings are specific to this project's code.
-export interface AccuracyFinding {
-  area: string;
-  severity: 'high' | 'medium' | 'low';
-  note: string;
-  fix: string;
-  source: 'catalog' | 'claude';
-}
-
-export interface AccuracyReport {
-  engine: string;
-  summary: string;
-  findings: AccuracyFinding[];
-}
-
 export interface FileNode {
   name: string;
   path: string; // project-relative, POSIX separators
@@ -104,11 +87,22 @@ export interface GitDiff {
 
 export type RunStatus = 'connecting' | 'running' | 'exited' | 'killed' | 'error';
 
+// The interactive shells a Windows terminal can open. (Non-Windows reports a
+// single generic entry under 'powershell'.)
+export type ShellKind = 'powershell' | 'cmd' | 'gitbash';
+
+// One shell the machine can open, from GET /api/shells — drives the shell menu.
+export interface AvailableShell {
+  kind: ShellKind;
+  label: string;
+  available: boolean;
+}
+
 export interface ActiveRun {
   runId: string;
   projectId: string;
   projectName: string;
-  label: string; // command label, "shell", or "claude"
+  label: string; // command label, shell label ("PowerShell"/"Git Bash"/…), or "claude"
   customLabel?: string; // user-renamed tab name (persisted, overrides label)
   kind: 'command' | 'shell' | 'claude';
   status: RunStatus;
@@ -166,6 +160,22 @@ export interface EodCommit {
   filesChanged: number | null;
 }
 
+// One Claude memory document: the project's accumulated Claude Code memory, used
+// as the EOD "features" source for projects that aren't backed by git.
+export type MemorySource = 'index' | 'memory' | 'claude-md';
+export interface MemoryDoc {
+  source: MemorySource; // 'index' = MEMORY.md, 'memory' = a memory/*.md file, 'claude-md' = project CLAUDE.md
+  name: string;
+  content: string;
+  truncated: boolean;
+}
+
+// The "features" sources a project can compile its EOD from.
+export interface EodSources {
+  git: boolean; // project is a git repo → compile from commits
+  memory: MemoryDoc[]; // project's Claude memory → compile from it when there's no git
+}
+
 // A saved End-of-Day entry: what a project finished on one local day.
 export interface EodEntry {
   id: string;
@@ -173,6 +183,8 @@ export interface EodEntry {
   day: string; // 'YYYY-MM-DD'
   items: EodItem[];
   commits: EodCommit[]; // features/changes committed that day (recomputed from git)
+  memory: MemoryDoc[]; // project's Claude memory (recomputed on read; the no-git "features" source)
+  git: boolean; // whether the project is a git repo
   note: string | null;
   summary: string | null; // AI-generated narrative (on demand)
   createdAt: string;

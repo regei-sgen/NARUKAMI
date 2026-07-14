@@ -1,7 +1,8 @@
 import type {
-  AccuracyReport,
   AnalyzerResult,
+  AvailableShell,
   EodEntry,
+  EodSources,
   FileContent,
   GitDiff,
   GitStatus,
@@ -9,6 +10,7 @@ import type {
   ProjectTree,
   RestoredRun,
   RunCommand,
+  ShellKind,
   UiSettings,
   UsageReport,
   UsageWindows,
@@ -35,11 +37,6 @@ export function hasToken(): boolean {
 
 export function runWsUrl(runId: string): string {
   return `${WS_BASE}/ws/runs/${encodeURIComponent(runId)}?token=${encodeURIComponent(TOKEN ?? '')}`;
-}
-
-// Real-render stream (Playwright Firefox/WebKit frames) for the Browser view.
-export function renderWsUrl(): string {
-  return `${WS_BASE}/ws/render?token=${encodeURIComponent(TOKEN ?? '')}`;
 }
 
 interface ErrorBody {
@@ -98,22 +95,6 @@ export const api = {
       body: JSON.stringify({ request: requestText, isDefault }),
     }),
 
-  // Browser view: where the embedded Chromium preview diverges from the real
-  // target browser. Runs the curated catalog + Claude over the project source.
-  checkBrowserAccuracy: (projectId: string, url: string, engine: string) =>
-    request<{ report: AccuracyReport }>(`/api/projects/${projectId}/browser/accuracy`, {
-      method: 'POST',
-      body: JSON.stringify({ url, engine }),
-    }),
-
-  // Which real render engines (Firefox/WebKit) are downloaded and ready.
-  getRenderStatus: () => request<{ firefox: boolean; webkit: boolean }>('/api/render/status'),
-
-  // One-time download of the real Firefox + WebKit engines (a few minutes).
-  installRenderBrowsers: () =>
-    request<{ ok: boolean; firefox: boolean; webkit: boolean }>('/api/render/install', {
-      method: 'POST',
-    }),
 
   deleteCommand: (commandId: string) =>
     request<void>(`/api/commands/${commandId}`, { method: 'DELETE' }),
@@ -124,12 +105,16 @@ export const api = {
       body: JSON.stringify({ commandId }),
     }),
 
-  // admin: open an ELEVATED shell (Windows) — fires UAC; goes live once the
-  // elevated broker connects back. `pid` is absent until then.
-  openShell: (projectId: string, admin = false) =>
+  // Which shells this machine can open (PowerShell / CMD / Git Bash), for the menu.
+  getShells: () => request<{ shells: AvailableShell[] }>('/api/shells'),
+
+  // Open an interactive shell. `kind` picks the Windows shell (default PowerShell);
+  // `admin` opens an ELEVATED shell (Windows, PowerShell-only) — fires UAC and goes
+  // live once the elevated broker connects back. `pid` is absent until then.
+  openShell: (projectId: string, opts: { admin?: boolean; kind?: ShellKind } = {}) =>
     request<{ runId: string; pid?: number; elevated?: boolean; pending?: boolean }>(
       `/api/projects/${projectId}/shell`,
-      { method: 'POST', body: JSON.stringify({ admin }) },
+      { method: 'POST', body: JSON.stringify({ admin: opts.admin ?? false, kind: opts.kind }) },
     ),
 
   // Run details + liveness (used to poll a pending elevated shell until it's live).
@@ -211,6 +196,11 @@ export const api = {
 
   // --- end-of-day snapshots ---
   listEod: (projectId: string) => request<EodEntry[]>(`/api/projects/${projectId}/eod`),
+
+  // whether the project is a git repo + its Claude memory (drives which compile
+  // the EOD offers: git commits, or Claude memory when there's no git).
+  getEodSources: (projectId: string) =>
+    request<EodSources>(`/api/projects/${projectId}/eod/sources`),
 
   compileEod: (projectId: string, note?: string) =>
     request<EodEntry>(`/api/projects/${projectId}/eod/compile`, {

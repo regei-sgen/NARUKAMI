@@ -1,4 +1,4 @@
-import type { EodItem } from '../types';
+import type { EodEntry, EodItem, MemorySource } from '../types';
 
 /** Local 'YYYY-MM-DD' key for today (matches the backend's day key). */
 export function todayKey(): string {
@@ -46,6 +46,29 @@ export interface DayStats {
   spanStart: string | null;
   spanEnd: string | null;
   byKind: Record<string, number>;
+}
+
+/**
+ * Which source to show as an EOD entry's "features": git commits when the day
+ * has any, else the project's Claude memory when it has any, else nothing.
+ * Pure so the choice is unit-tested independently of the view.
+ */
+export function featureSource(entry: Pick<EodEntry, 'commits' | 'memory'>): 'git' | 'memory' | 'none' {
+  if (entry.commits.length > 0) return 'git';
+  if (entry.memory.length > 0) return 'memory';
+  return 'none';
+}
+
+/** Whether the compile action should pull from Claude memory (non-git project). */
+export function compilesFromMemory(sources: { git: boolean } | null): boolean {
+  return sources != null && !sources.git;
+}
+
+/** Short human label for a memory doc's origin, for the memory section header. */
+export function memorySourceLabel(source: MemorySource): string {
+  if (source === 'index') return 'index';
+  if (source === 'claude-md') return 'CLAUDE.md';
+  return 'memory';
 }
 
 /** Roll a day's items into the summary stats shown in the EOD strip. */

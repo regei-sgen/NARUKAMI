@@ -13,12 +13,10 @@ import { workspaceRoutes } from './routes/workspace';
 import { eodRoutes } from './routes/eod';
 import { telemetryRoutes } from './routes/telemetry';
 import { terminalRoutes } from './routes/terminals';
-import { renderRoutes } from './routes/render';
 import { shareRoutes } from './routes/share';
 import { changelogRoutes } from './routes/changelog';
 import { setupWebSocket } from './ws';
 import { reconcileStaleRuns } from './services/runner';
-import { shutdownRender } from './services/playwrightRender';
 import { setBaseUrl } from './services/serverInfo';
 import {
   hostAllowed,
@@ -157,7 +155,6 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
   await app.register(eodRoutes);
   await app.register(telemetryRoutes);
   await app.register(terminalRoutes);
-  await app.register(renderRoutes);
   await app.register(shareRoutes);
   await app.register(changelogRoutes);
 
@@ -214,7 +211,6 @@ async function main(): Promise<void> {
 
   const shutdown = async (): Promise<void> => {
     try {
-      await shutdownRender();
       await disconnectDb();
     } finally {
       process.exit(0);

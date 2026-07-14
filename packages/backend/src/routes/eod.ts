@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../db';
 import { AnalyzerError, summarizeDay } from '../services/analyzer';
-import { commitsToText, gitCommitsForDay, type Commit } from '../services/gitLog';
+import { commitsToText, gitCommitsForDay, isGitRepo, type Commit } from '../services/gitLog';
+import { memoryToText, readProjectMemory, type MemoryDoc } from '../services/claudeMemory';
 
 // Keep the newest N days of EOD entries per project; older ones are pruned.
 const RETENTION_DAYS = 10;
@@ -96,8 +97,20 @@ function serialize(
     updatedAt: Date;
   },
   commits: Commit[] = [],
+  memory: MemoryDoc[] = [],
+  git = false,
 ) {
-  return { ...entry, items: parseItems(entry.items), commits };
+  return { ...entry, items: parseItems(entry.items), commits, memory, git };
+}
+
+/** Whether this project keeps its history in git, plus its Claude memory docs —
+ *  the two "features" sources the EOD can compile from. */
+async function projectSources(projectPath: string): Promise<{ git: boolean; memory: MemoryDoc[] }> {
+  const [git, memory] = await Promise.all([
+    isGitRepo(projectPath),
+    readProjectMemory(projectPath),
+  ]);
+  return { git, memory };
 }
 
 export async function eodRoutes(app: FastifyInstance): Promise<void> {
@@ -111,13 +124,24 @@ export async function eodRoutes(app: FastifyInstance): Promise<void> {
       orderBy: { day: 'desc' },
     });
     // Recompute each day's commits from git on read (no schema/storage needed;
-    // git history is immutable). One git call per kept day (≤10) — cheap.
+    // git history is immutable). One git call per kept day (≤10) — cheap. The
+    // Claude memory + git flag are current-state, so read them once per request.
+    const { git, memory } = await projectSources(project.path);
     return Promise.all(
       entries.map(async (e) => {
         const { start, end } = boundsForDayKey(e.day);
-        return serialize(e, await gitCommitsForDay(project.path, start, end));
+        return serialize(e, await gitCommitsForDay(project.path, start, end), memory, git);
       }),
     );
+  });
+
+  // The "features" sources available for a project before compiling: whether it
+  // is a git repo, and its Claude memory docs. Drives the EOD compile button so
+  // a non-git project offers "Compile from Claude memory" instead.
+  app.get<{ Params: { id: string } }>('/api/projects/:id/eod/sources', async (req, reply) => {
+    const project = await prisma.project.findUnique({ where: { id: req.params.id } });
+    if (!project) return reply.code(404).send({ error: 'Project not found.' });
+    return projectSources(project.path);
   });
 
   // Compile (or re-compile) today's EOD for a project: snapshot every run that
@@ -167,7 +191,8 @@ export async function eodRoutes(app: FastifyInstance): Promise<void> {
       });
 
       const commits = await gitCommitsForDay(project.path, start, end);
-      return reply.code(201).send(serialize(entry, commits));
+      const { git, memory } = await projectSources(project.path);
+      return reply.code(201).send(serialize(entry, commits, memory, git));
     },
   );
 
@@ -187,7 +212,8 @@ export async function eodRoutes(app: FastifyInstance): Promise<void> {
       });
       const { start, end } = boundsForDayKey(existing.day);
       const commits = await gitCommitsForDay(existing.project.path, start, end);
-      return serialize(entry, commits);
+      const { git, memory } = await projectSources(existing.project.path);
+      return serialize(entry, commits, memory, git);
     },
   );
 
@@ -204,6 +230,10 @@ export async function eodRoutes(app: FastifyInstance): Promise<void> {
     const { start, end } = boundsForDayKey(entry.day);
     const commits = await gitCommitsForDay(entry.project.path, start, end);
     const commitsText = commitsToText(commits);
+    const { git, memory } = await projectSources(entry.project.path);
+    // Feed memory to the summary when git gives no signal (non-git project / no
+    // commits that day), so there's still something to summarize from.
+    const memoryText = commits.length === 0 ? memoryToText(memory) : '';
 
     try {
       const summary = await summarizeDay(
@@ -212,12 +242,13 @@ export async function eodRoutes(app: FastifyInstance): Promise<void> {
         runsText,
         commitsText,
         entry.note ?? '',
+        memoryText,
       );
       const updated = await prisma.eodEntry.update({
         where: { id: entry.id },
         data: { summary: summary || null },
       });
-      return serialize(updated, commits);
+      return serialize(updated, commits, memory, git);
     } catch (err) {
       if (err instanceof AnalyzerError) {
         return reply.code(502).send({ error: err.message });

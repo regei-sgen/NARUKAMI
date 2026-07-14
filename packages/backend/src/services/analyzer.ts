@@ -315,21 +315,28 @@ export async function summarizeDay(
   runsText: string,
   commitsText: string,
   note: string,
+  memoryText = '',
 ): Promise<string> {
+  const hasCommits = commitsText.trim().length > 0;
   const prompt = `You are writing a short end-of-day work summary for a software project, for ${day}.
 
 Features/changes committed to git today (subject + details per commit):
 """
-${commitsText.slice(-9000) || '(no commits today)'}
+${commitsText.slice(-9000) || '(no commits today — this project may not use git)'}
 """
 
+${memoryText ? `Accumulated Claude project memory (what this project is and what's been done — use this as the source when there are no commits):\n"""\n${memoryText.slice(-9000)}\n"""\n` : ''}
 Runs that finished in the project today (label · kind · status · duration):
 """
 ${runsText.slice(-6000) || '(no finished runs recorded)'}
 """
 
 ${note ? `The developer's own note for the day:\n"""\n${note.slice(0, 2000)}\n"""\n` : ''}
-Write a concise, factual end-of-day summary (2-5 sentences, plain text, no markdown, no bullet list). Lead with the features/changes that were added (from the commits); mention notable run failures if any. If there's very little signal, say so briefly. Do not invent specifics that aren't supported by the data.`;
+Write a concise, factual end-of-day summary (2-5 sentences, plain text, no markdown, no bullet list). ${
+    hasCommits
+      ? 'Lead with the features/changes that were added (from the commits);'
+      : 'Since there are no git commits, summarize from the Claude project memory and the day’s runs;'
+  } mention notable run failures if any. If there's very little signal, say so briefly. Do not invent specifics that aren't supported by the data.`;
 
   const stdout = await runClaude(prompt, projectPath);
   return unwrapEnvelope(stdout).trim();

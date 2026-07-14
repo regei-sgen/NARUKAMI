@@ -44,9 +44,13 @@ describe('shellFor', () => {
 });
 
 describe('interactiveShell', () => {
-  it('is a bare PowerShell on Windows', () => {
+  it('defaults to PowerShell (-NoLogo) on Windows', () => {
     setPlatform('win32');
-    expect(interactiveShell()).toEqual({ file: 'powershell.exe', args: ['-NoLogo'] });
+    const spec = interactiveShell();
+    expect(spec).not.toBeNull();
+    // file is the resolved powershell path (or the bare name if PATH lookup missed).
+    expect(spec!.file.toLowerCase()).toContain('powershell');
+    expect(spec!.args).toEqual(['-NoLogo']);
   });
   it('is an interactive $SHELL on POSIX', () => {
     setPlatform('linux');

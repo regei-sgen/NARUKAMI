@@ -4,7 +4,6 @@ import path from 'node:path';
 import fs from 'node:fs';
 import net from 'node:net';
 import type { AddressInfo } from 'node:net';
-import { parseViewportPopoutParams, viewportPopoutKey } from './popout';
 
 const PACKAGED = app.isPackaged;
 
@@ -90,22 +89,15 @@ const popouts = new Map<string, BrowserWindow>();
 // win.id → the runId a torn-off window currently shows. Kept current across a
 // restart (which re-keys the run) so the right runId is re-docked.
 const windowRunId = new Map<number, string>();
-// projectId → the window its Browser view was torn off into.
-const browserPopouts = new Map<string, BrowserWindow>();
-// Per-viewport pop-out windows, keyed by `${projectId}::${browserId}::${vpId}` so
-// many can be open simultaneously (unlike the single whole-board window/project).
-const viewportPopouts = new Map<string, BrowserWindow>();
 interface Rect {
   x: number;
   y: number;
   width: number;
   height: number;
 }
-// Drop zones the main window reports in its own content-viewport coordinates,
-// converted to screen space on demand for drag-back detection: the terminal dock
-// and the Browser view's drop area.
+// The terminal dock drop zone, reported by the main window in its own content-
+// viewport coordinates and converted to screen space on demand for drag-back.
 let dockViewportRect: Rect | null = null;
-let browserDockRect: Rect | null = null;
 
 const PRELOAD = path.join(__dirname, 'preload.js');
 
@@ -135,10 +127,6 @@ const setDockHint = (active: boolean): void => sendMain('narukami:dockhint', act
 // renderer side, so calling it from both the drop and the close path is safe.
 const reclaim = (runId: string): void => sendMain('narukami:reclaim', runId);
 
-const cursorOverBrowser = (): boolean => cursorInRect(toScreenRect(browserDockRect));
-const setBrowserHint = (active: boolean): void => sendMain('narukami:browser-dockhint', active);
-const reclaimBrowser = (projectId: string): void => sendMain('narukami:browser-reclaim', projectId);
-
 async function createWindow(): Promise<BrowserWindow> {
   const win = new BrowserWindow({
     width: 1440,
@@ -152,9 +140,6 @@ async function createWindow(): Promise<BrowserWindow> {
       preload: PRELOAD,
       contextIsolation: true,
       nodeIntegration: false,
-      // Enable <webview> so the Browser view can embed the running app at many
-      // viewports (out-of-process frames that ignore X-Frame-Options).
-      webviewTag: true,
     },
   });
   win.setMenuBarVisibility(false);
@@ -230,114 +215,6 @@ function createTerminalWindow(runId: string, pos?: { x: number; y: number }): vo
   });
 
   void win.loadURL(`${appUrl}?popout=${encodeURIComponent(runId)}`);
-}
-
-/**
- * Tear the whole Browser view off into its own window. The board is stateless
- * (a URL + viewport selection persisted per project), so the window just loads
- * the SPA with `?popout=browser&project=<id>` and renders the board full-window.
- * The main view shows a placeholder meanwhile; dragging this window back over it
- * — or closing it — re-docks the Browser view.
- */
-function createBrowserWindow(projectId: string, pos?: { x: number; y: number }): void {
-  const existing = browserPopouts.get(projectId);
-  if (existing && !existing.isDestroyed()) {
-    existing.focus();
-    return;
-  }
-
-  const win = new BrowserWindow({
-    width: 1200,
-    height: 820,
-    minWidth: 480,
-    minHeight: 360,
-    ...(pos ? { x: Math.round(pos.x - 80), y: Math.round(pos.y - 12) } : {}),
-    backgroundColor: '#0a0a0c',
-    title: 'NARUKAMI — browser',
-    autoHideMenuBar: true,
-    webPreferences: {
-      preload: PRELOAD,
-      contextIsolation: true,
-      nodeIntegration: false,
-      webviewTag: true, // the board embeds the app at each viewport
-    },
-  });
-  win.setMenuBarVisibility(false);
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url);
-    return { action: 'deny' };
-  });
-  browserPopouts.set(projectId, win);
-
-  let redocked = false;
-  win.on('move', () => setBrowserHint(cursorOverBrowser()));
-  win.on('moved', () => {
-    if (cursorOverBrowser()) {
-      redocked = true;
-      setBrowserHint(false);
-      reclaimBrowser(projectId);
-      win.close();
-    } else {
-      setBrowserHint(false);
-    }
-  });
-  win.on('closed', () => {
-    browserPopouts.delete(projectId);
-    if (!redocked) reclaimBrowser(projectId);
-    setBrowserHint(false);
-  });
-
-  void win.loadURL(`${appUrl}?popout=browser&project=${encodeURIComponent(projectId)}`);
-}
-
-/**
- * Open ONE device viewport of a browser tab in its own full-window view. Mirror
- * semantics — the viewport stays in the board; this is an additional window. Many
- * can coexist (keyed by project+browser+viewport); re-invoking the same one just
- * focuses it. No drag-back/redock: these are throwaway preview windows, closed to
- * dismiss.
- */
-function createViewportWindow(
-  projectId: string,
-  browserId: string,
-  vpId: string,
-  pos?: { x: number; y: number },
-): void {
-  const wkey = viewportPopoutKey(projectId, browserId, vpId);
-  const existing = viewportPopouts.get(wkey);
-  if (existing && !existing.isDestroyed()) {
-    existing.focus();
-    return;
-  }
-
-  const win = new BrowserWindow({
-    width: 1180,
-    height: 900,
-    minWidth: 320,
-    minHeight: 320,
-    ...(pos ? { x: Math.round(pos.x - 80), y: Math.round(pos.y - 12) } : {}),
-    backgroundColor: '#0a0a0c',
-    title: 'NARUKAMI — viewport',
-    autoHideMenuBar: true,
-    webPreferences: {
-      preload: PRELOAD,
-      contextIsolation: true,
-      nodeIntegration: false,
-      webviewTag: true, // renders the app at one device viewport
-    },
-  });
-  win.setMenuBarVisibility(false);
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url);
-    return { action: 'deny' };
-  });
-  viewportPopouts.set(wkey, win);
-  win.on('closed', () => viewportPopouts.delete(wkey));
-
-  const qs =
-    `?popout=viewport&project=${encodeURIComponent(projectId)}` +
-    `&browser=${encodeURIComponent(browserId)}&vp=${encodeURIComponent(vpId)}`;
-  void win.loadURL(`${appUrl}${qs}`);
 }
 
 /**
@@ -423,35 +300,6 @@ ipcMain.on('narukami:runchanged', (_e, oldRunId: unknown, newRunId: unknown) => 
   popouts.delete(oldRunId);
   popouts.set(newRunId, win);
   windowRunId.set(win.id, newRunId);
-});
-
-// --- Browser view tear-off ---
-ipcMain.on('narukami:browser-popout', (_e, projectId: unknown, pos: unknown) => {
-  if (typeof projectId !== 'string' || !projectId) return;
-  const p =
-    pos && typeof pos === 'object' && 'x' in pos && 'y' in pos
-      ? { x: Number((pos as { x: number }).x), y: Number((pos as { y: number }).y) }
-      : undefined;
-  createBrowserWindow(projectId, p && Number.isFinite(p.x) && Number.isFinite(p.y) ? p : undefined);
-});
-
-// "Bring back" from the main window's placeholder — close the torn-off window,
-// which re-docks via its close handler.
-ipcMain.on('narukami:browser-bringback', (_e, projectId: unknown) => {
-  if (typeof projectId !== 'string') return;
-  const win = browserPopouts.get(projectId);
-  if (win && !win.isDestroyed()) win.close();
-});
-
-ipcMain.on('narukami:browser-dockrect', (_e, rect: unknown) => {
-  browserDockRect = parseRect(rect);
-});
-
-// --- Per-viewport pop-out (one device → its own window; many can coexist) ---
-ipcMain.on('narukami:viewport-popout', (_e, params: unknown) => {
-  const p = parseViewportPopoutParams(params);
-  if (!p) return;
-  createViewportWindow(p.projectId, p.browserId, p.vpId, p.pos);
 });
 
 // Restart the whole app. Used when toggling "phone access" (LAN sharing): that
