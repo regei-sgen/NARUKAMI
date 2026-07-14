@@ -5,11 +5,32 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import { api, runWsUrl } from '../api';
 import { onWindowVisibility, windowHidden } from '../lib/visibility';
 import { normalizeStatus } from '../lib/runStatus';
+import { scanForMarker } from '../lib/wrapupMarker';
 import { nextReconnectAction, type ReconnectAction } from '../lib/reconnect';
 import { detectDevUrl, pushWindow } from '../lib/devUrl';
 import type { ActiveRun, MobileDeviceInfo, RunStatus } from '../types';
 import { Ic } from './icons';
 import { ShareQrModal } from './ShareQrModal';
+
+// The forced wrap-up gate (claude tabs only). While a run is being wrapped up,
+// `wrapupPhase` is non-null and the tab's own Stop/close is replaced by the
+// wrap-up affordances: an indicator while the injected prompt runs, then a
+// "Close now" once the completion marker is seen. `pending` = injected, not yet
+// seen working; `working` = seen working after inject; `ready` = marker seen.
+export type WrapupPhase = 'pending' | 'working' | 'ready';
+
+// A one-shot request to inject a submitted line into THIS run's pty over the
+// existing ws input channel. `nonce` changes per request so the effect refires.
+export interface InjectSignal {
+  text: string; // the prompt line (submitted by a separate, delayed \r)
+  nonce: number;
+}
+
+// The injected wrap-up prompt asks the session to print this exact line ONLY when
+// the wrap-up (log consolidation + memory) is genuinely finished. The gate reaches
+// "Close now" solely on seeing this in the session's OUTPUT — never on a mere
+// idle, which fires early.
+export const WRAPUP_DONE_MARKER = '<<NARUKAMI:WRAPUP-DONE>>';
 
 interface Props {
   run: ActiveRun;
@@ -30,6 +51,14 @@ interface Props {
   // app window when running under the Electron shell — omitted in a pop-out
   // window (no re-detaching) and in the browser (no window to open).
   onPopOut?: (runId: string) => void;
+  // Forced wrap-up gate (claude tabs). Stop delegates to onRequestWrapup instead
+  // of killing immediately; while wrapupPhase is set the tab shows the gate UI.
+  onRequestWrapup?: (runId: string) => void;
+  wrapupPhase?: WrapupPhase | null;
+  onWrapupClose?: (runId: string) => void; // "Close now" — respects Stop/close origin
+  onWrapupForceClose?: (runId: string) => void; // always-available safety valve
+  injectSignal?: InjectSignal | null; // one-shot pty injection for this run
+  onWrapupComplete?: (runId: string) => void; // fired when the injected wrap-up prints its done-marker
 }
 
 /**
@@ -149,10 +178,26 @@ interface ServerMessage {
 // frame, and every open terminal would re-render with it. All props are stable
 // (primitives, per-run object identity, useCallback handlers), so memo cuts
 // that churn to the tabs whose run actually changed.
-export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity, onDevUrl, codeMapEmbed, onPopOut }: Props) {
+export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity, onDevUrl, codeMapEmbed, onPopOut, onRequestWrapup, wrapupPhase, onWrapupClose, onWrapupForceClose, injectSignal, onWrapupComplete }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  // Live ws handle, exposed to the injection effect (below) so the wrap-up prompt
+  // can be sent over the SAME input channel keystrokes use. Null between mounts.
+  const wsRef = useRef<WebSocket | null>(null);
+  // Guards against a double-send of the same injection (React StrictMode mounts
+  // the effect twice in dev; a re-render must not re-inject the same nonce).
+  const lastInjectedNonce = useRef<number | null>(null);
+  // Wrap-up completion detection: after injecting the wrap-up prompt we watch the
+  // pty OUTPUT for WRAPUP_DONE_MARKER. wrapInjectAt gates a grace window that skips
+  // the prompt's own input echo; wrapFired makes it one-shot; wrapCarry stitches a
+  // marker split across two chunks. onWrapupComplete via a ref (the ws.onmessage
+  // closure is created once at mount and would otherwise capture a stale prop).
+  const wrapInjectAtRef = useRef(0);
+  const wrapFiredRef = useRef(false);
+  const wrapCarryRef = useRef('');
+  const onWrapupCompleteRef = useRef(onWrapupComplete);
+  onWrapupCompleteRef.current = onWrapupComplete;
   // Detected local dev-server URL (command/shell runs) → the "Open" button.
   const urlWindowRef = useRef('');
   const [devUrl, setDevUrl] = useState<string | null>(null);
@@ -339,6 +384,7 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
         }
         const socket = new WebSocket(runWsUrl(run.runId));
         ws = socket;
+        wsRef.current = socket;
 
         // Only tell the pty about a resize when the grid actually changed:
         // ConPTY re-lays-out its whole buffer on every resize, so the
@@ -409,6 +455,18 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
           if (msg.type === 'data' && typeof msg.chunk === 'string') {
             t.write(msg.chunk);
             bumpActivity();
+            // Wrap-up completion: fire only on the marker appearing in OUTPUT, and only
+            // after a 5s grace (skips the prompt's immediate input echo, which contains
+            // the marker text). The literal marker has no ANSI inside it, so a raw scan
+            // is safe; the scan's carry stitches a marker split across chunk boundaries.
+            if (wrapInjectAtRef.current > 0 && !wrapFiredRef.current) {
+              const scan = scanForMarker(wrapCarryRef.current, msg.chunk, WRAPUP_DONE_MARKER);
+              if (Date.now() - wrapInjectAtRef.current > 5000 && scan.found) {
+                wrapFiredRef.current = true;
+                onWrapupCompleteRef.current?.(run.runId);
+              }
+              wrapCarryRef.current = scan.carry;
+            }
             // Cheap dev-server URL sniffing (claude output is not a server's).
             if (run.kind !== 'claude') {
               urlWindowRef.current = pushWindow(urlWindowRef.current, msg.chunk);
@@ -608,6 +666,7 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
       if (onContextMenu) containerRef.current?.removeEventListener('contextmenu', onContextMenu);
       if (ro) ro.disconnect();
       if (dataDisposable) dataDisposable.dispose();
+      wsRef.current = null;
       if (ws) {
         try {
           ws.close();
@@ -621,7 +680,50 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [run.runId]);
 
+  // Inject the wrap-up prompt into the pty over the SAME input frame keystrokes use
+  // ({type:'input',data}). CRITICAL: send the prompt text FIRST, then Enter as a SEPARATE,
+  // slightly-delayed keystroke. A trailing \r glued onto the text frame is swallowed by the
+  // CLI's bracketed-paste handling — it lands as a literal newline in the input box instead
+  // of submitting (the bug: the prompt got typed but never sent). A discrete CR after the
+  // paste settles actually submits it. Fail-soft throughout; the Force-close valve still
+  // lets the user close a stuck tab if any send is skipped.
+  useEffect(() => {
+    const sig = injectSignal;
+    if (!sig) return;
+    if (lastInjectedNonce.current === sig.nonce) return;
+    lastInjectedNonce.current = sig.nonce;
+    // Arm wrap-up completion detection for the output scanner (above).
+    wrapInjectAtRef.current = Date.now();
+    wrapFiredRef.current = false;
+    wrapCarryRef.current = '';
+    const socket = wsRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    const text = sig.text.replace(/[\r\n]+$/, ''); // paste the text without a trailing newline
+    try {
+      socket.send(JSON.stringify({ type: 'input', data: text }));
+      window.setTimeout(() => {
+        const s = wsRef.current;
+        if (s && s.readyState === WebSocket.OPEN) {
+          try {
+            s.send(JSON.stringify({ type: 'input', data: '\r' }));
+          } catch {
+            /* fail-soft */
+          }
+        }
+      }, 250);
+    } catch {
+      /* fail-soft — Force-close remains available */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [injectSignal?.nonce]);
+
   const stop = async () => {
+    // Claude tabs: don't kill immediately — run the forced wrap-up gate first.
+    // Shell/command tabs keep the immediate stop.
+    if (run.kind === 'claude' && onRequestWrapup) {
+      onRequestWrapup(run.runId);
+      return;
+    }
     try {
       await api.stopRun(run.runId);
     } catch {
@@ -708,7 +810,34 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
             <Ic name="qr" /> Share
           </button>
         )}
-        {stoppable ? (
+        {wrapupPhase ? (
+          <div className="wrapup-gate term-action">
+            {wrapupPhase === 'ready' ? (
+              <>
+                <span className="wrapup-indicator done">✓ wrapped up</span>
+                <button
+                  className="btn btn-primary wrapup-close"
+                  title="End this session now"
+                  onClick={() => onWrapupClose?.(run.runId)}
+                >
+                  Close now
+                </button>
+              </>
+            ) : (
+              <span className="wrapup-indicator">
+                <span className="wrapup-spinner" aria-hidden="true" />
+                wrapping up — logging + memory…
+              </span>
+            )}
+            <button
+              className="btn btn-ghost wrapup-force"
+              title="Close anyway, even if the session is stuck (the verdict was already recorded)"
+              onClick={() => onWrapupForceClose?.(run.runId)}
+            >
+              Force close
+            </button>
+          </div>
+        ) : stoppable ? (
           <>
             {run.kind !== 'claude' && devUrl && (
               <button

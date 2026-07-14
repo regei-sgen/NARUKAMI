@@ -21,6 +21,7 @@ import { vitalsRoutes } from './routes/vitals';
 import { codeGraphRoutes } from './routes/codeGraph';
 import { armoryRoutes } from './routes/armory';
 import { shareRoutes } from './routes/share';
+import { changelogRoutes } from './routes/changelog';
 import { reconcileRelay } from './services/mobileShare';
 import { setupWebSocket } from './ws';
 import { pruneOldRunLogs, reconcileStaleRuns } from './services/runner';
@@ -191,6 +192,7 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
   await app.register(codeGraphRoutes);
   await app.register(armoryRoutes);
   await app.register(shareRoutes);
+  await app.register(changelogRoutes);
 
   // Packaged desktop mode: serve the built frontend from this same server so the
   // renderer is same-origin. The bearer token is injected into index.html so the
@@ -199,9 +201,18 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
     const dir = opts.frontendDir;
     await app.register(fastifyStatic, { root: dir, prefix: '/', index: false, wildcard: false });
     const rawHtml = fs.readFileSync(path.join(dir, 'index.html'), 'utf8');
+    // NARUKAMI_ACE_FINGERPRINT=1 (set by scripts/start-prod.js): also emit the
+    // window.__WORKSTATION__ marker the Ace OS supervisor fingerprints on
+    // GET / (ace-desktop src/ports.js identify()) so it ADOPTS this server on
+    // :4000 instead of refusing the port. Loopback-injected page only — which
+    // is the only page identify() ever sees.
+    const aceMarker =
+      process.env.NARUKAMI_ACE_FINGERPRINT === '1'
+        ? `window.__WORKSTATION__=${JSON.stringify({ token })};`
+        : '';
     const injected = rawHtml.replace(
       '</head>',
-      `<script>window.__NARUKAMI__=${JSON.stringify({ token })};</script></head>`,
+      `<script>window.__NARUKAMI__=${JSON.stringify({ token })};${aceMarker}</script></head>`,
     );
     // SECURITY: inject the master token ONLY for a loopback (this-machine)
     // requester. A LAN client — a phone reaching us through the share relay —

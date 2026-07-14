@@ -1,5 +1,7 @@
 import {
   lazy,
+  type CSSProperties,
+  type DragEvent as ReactDragEvent,
   type PointerEvent as ReactPointerEvent,
   Suspense,
   useCallback,
@@ -9,7 +11,7 @@ import {
   useState,
 } from 'react';
 import { api, hasToken } from './api';
-import type { ActiveRun, Project, RestoredRun, RunCommand, RunStatus, Toast, UiSettings } from './types';
+import type { ActiveRun, Project, RestoredRun, RunCommand, RunStatus, Toast, UiSettings, WrapupVerdict } from './types';
 import { ProjectSidebar } from './components/ProjectSidebar';
 import { ProjectPanel } from './components/ProjectPanel';
 
@@ -26,9 +28,10 @@ import { SgaRelease } from './components/SgaRelease';
 import { ArgusPanoptes } from './components/argus/ArgusPanoptes';
 import { CodeMap } from './components/CodeMap';
 import { Armory } from './components/Armory';
+import { Changelog } from './components/Changelog';
 import { BrowserTab } from './components/BrowserTab';
 import { DEFAULT_DEVICE_IDS, DEVICE_PRESETS } from './lib/browserView';
-import { TerminalTab } from './components/TerminalTab';
+import { TerminalTab, type InjectSignal, type WrapupPhase, WRAPUP_DONE_MARKER } from './components/TerminalTab';
 import { ThemeSelector } from './components/ThemeSelector';
 import { HeaderCluster } from './components/HeaderCluster';
 import { Toasts } from './components/Toasts';
@@ -47,6 +50,14 @@ const THEMES: ReadonlyArray<{ value: string; label: string; accent: string }> = 
   { value: 'sakura', label: 'Sakura', accent: '#ff5c8a' },
 ];
 
+// Which action opened the forced wrap-up: Stop (end process, keep the tab for
+// Restart/Continue) or ✕ (drop the tab entirely) — "Close now" honours it.
+type WrapupOrigin = 'stop' | 'close';
+interface WrapupEntry {
+  phase: WrapupPhase;
+  origin: WrapupOrigin;
+}
+
 export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -57,7 +68,7 @@ export default function App() {
   const [activeTabByProject, setActiveTabByProject] = useState<Record<string, string>>({});
   // Views are peer tabs (Runner / Editor / EOD / Argus / Code Map). Argus is a
   // global read-only monitor; the rest are scoped to the selected project.
-  const [view, setView] = useState<'runner' | 'editor' | 'eod' | 'release' | 'argus' | 'codemap' | 'armory' | 'browser'>('runner');
+  const [view, setView] = useState<'runner' | 'editor' | 'eod' | 'release' | 'argus' | 'codemap' | 'armory' | 'browser' | 'changelog'>('runner');
   // Terminal dock: docked bottom (resizable height) or right (resizable width),
   // plus minimize. All persisted server-side.
   const [dockPosition, setDockPosition] = useState<'bottom' | 'right'>('bottom');
@@ -65,6 +76,17 @@ export default function App() {
   const [dockWidth, setDockWidth] = useState<number>(480);
   const [dockMinimized, setDockMinimized] = useState<boolean>(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
+  // S|S split view: the terminal dock shows two side-by-side panes (primary =
+  // activeTab, secondary = secondaryTab; splitRatio = the primary's fraction).
+  // Persisted server-side with the rest of the UI layout. While the split is ON,
+  // tab chips become HTML5-draggable into the right pane and the pointer
+  // tear-off gesture pauses (the two drag interactions can't share a tab).
+  const [splitView, setSplitView] = useState<boolean>(false);
+  const [secondaryTab, setSecondaryTab] = useState<string | null>(null);
+  const [splitRatio, setSplitRatio] = useState<number>(0.5);
+  const dragRunId = useRef<string | null>(null);
+  const [paneDropActive, setPaneDropActive] = useState(false);
+  const termStackRef = useRef<HTMLDivElement>(null);
   // The terminal dock element + a highlight flag, for dragging a torn-off window
   // back over it to re-dock (desktop shell only).
   const dockRef = useRef<HTMLElement>(null);
@@ -110,6 +132,23 @@ export default function App() {
   // Gate settings-persistence until after the initial workspace has been applied,
   // so restoring state doesn't immediately re-save (and clobber) it.
   const booted = useRef(false);
+  // ── Forced wrap-up gate (claude tabs only). A Stop/✕ on a claude tab first
+  // opens a modal (verdict required + optional notes); on submit we record the
+  // verdict server-side, inject a wrap-up prompt into the pty, and gate the real
+  // close until the session prints the completion marker. wrapupModalRunId
+  // drives the modal; wrappingUp tracks the gated-close phase per run;
+  // injectSignal is the one-shot prompt injection for a single run.
+  const [wrapupModalRunId, setWrapupModalRunId] = useState<string | null>(null);
+  const [wrapupOrigin, setWrapupOrigin] = useState<WrapupOrigin>('close');
+  const [wrapupVerdict, setWrapupVerdict] = useState<WrapupVerdict | null>(null);
+  const [wrapupNotes, setWrapupNotes] = useState('');
+  const [wrappingUp, setWrappingUp] = useState<Record<string, WrapupEntry>>({});
+  const [injectSignal, setInjectSignal] = useState<(InjectSignal & { runId: string }) | null>(null);
+  // Mirror of wrappingUp for identity-stable callbacks (memoized TerminalTabs).
+  const wrappingUpRef = useRef<Record<string, WrapupEntry>>({});
+  useEffect(() => {
+    wrappingUpRef.current = wrappingUp;
+  }, [wrappingUp]);
 
   const refresh = useCallback(async () => {
     try {
@@ -156,6 +195,10 @@ export default function App() {
         if (typeof ui.dockWidth === 'number' && ui.dockWidth >= 240) setDockWidth(ui.dockWidth);
         if (typeof ui.dockMinimized === 'boolean') setDockMinimized(ui.dockMinimized);
         if (typeof ui.sidebarCollapsed === 'boolean') setSidebarCollapsed(ui.sidebarCollapsed);
+        if (typeof ui.splitView === 'boolean') setSplitView(ui.splitView);
+        if (typeof ui.secondaryTab === 'string' && ui.secondaryTab) setSecondaryTab(ui.secondaryTab);
+        if (typeof ui.splitRatio === 'number' && ui.splitRatio >= 0.2 && ui.splitRatio <= 0.8)
+          setSplitRatio(ui.splitRatio);
         if (
           ui.view === 'runner' ||
           ui.view === 'editor' ||
@@ -164,7 +207,8 @@ export default function App() {
           ui.view === 'argus' ||
           ui.view === 'codemap' ||
           ui.view === 'armory' ||
-          ui.view === 'browser'
+          ui.view === 'browser' ||
+          ui.view === 'changelog'
         )
           setView(ui.view);
         if (ui.activeTabByProject) setActiveTabByProject(ui.activeTabByProject);
@@ -201,6 +245,9 @@ export default function App() {
       dockWidth,
       dockMinimized,
       sidebarCollapsed,
+      splitView,
+      secondaryTab,
+      splitRatio,
       activeTabByProject,
       editorFileByProject,
       browserUrlByProject,
@@ -218,6 +265,9 @@ export default function App() {
     dockWidth,
     dockMinimized,
     sidebarCollapsed,
+    splitView,
+    secondaryTab,
+    splitRatio,
     activeTabByProject,
     editorFileByProject,
     browserUrlByProject,
@@ -271,6 +321,11 @@ export default function App() {
 
   const selected = projects.find((p) => p.id === selectedId) ?? null;
 
+  // The run the wrap-up modal is currently asking about (for its subtitle).
+  const wrapupRun = wrapupModalRunId
+    ? activeRuns.find((r) => r.runId === wrapupModalRunId) ?? null
+    : null;
+
   // Primitive per-tab lookup so memoized TerminalTabs get a stable prop instead
   // of a fresh projects.find() per tab per App render.
   const codeMapEmbedByProject = useMemo(() => {
@@ -321,9 +376,92 @@ export default function App() {
       ? remembered
       : projectRuns[projectRuns.length - 1]?.runId ?? null;
 
+  // S|S derivations. The secondary pane's run must still exist, differ from the
+  // primary, AND belong to the selected project — resolving against projectRuns
+  // (not all activeRuns) keeps the dock scoped so a project switch can never leak
+  // a foreign project's terminal into the right pane; anything else resolves to
+  // null (fail-soft). secondaryTab stays persisted, so returning to its project
+  // restores the split. splitActive = the two-column layout being live.
+  const secondaryRun =
+    secondaryTab && secondaryTab !== activeTab
+      ? projectRuns.find((r) => r.runId === secondaryTab) ?? null
+      : null;
+  const splitActive = splitView && !!activeTab;
+  // The split panes' widths derive from splitRatio (primary spans 0→ratio,
+  // secondary ratio→1).
+  const leftPct = `${splitRatio * 100}%`;
+  const rightRemainder = `${(1 - splitRatio) * 100}%`;
+
   const selectTab = (runId: string) => {
     const run = activeRuns.find((r) => r.runId === runId);
-    if (run) setActiveTabByProject((m) => ({ ...m, [run.projectId]: runId }));
+    if (!run) return;
+    // In split mode, a single click on a tab that's ALREADY shown in a pane must
+    // NOT rearrange the panes (it would also swallow double-click-to-rename).
+    // Only a tab that isn't currently visible becomes the new primary.
+    if (splitView && (runId === activeTab || runId === secondaryTab)) {
+      return;
+    }
+    setActiveTabByProject((m) => ({ ...m, [run.projectId]: runId }));
+  };
+
+  // Drop a stale secondary-pane pointer once its run is gone (closed/popped out).
+  useEffect(() => {
+    if (secondaryTab && !activeRuns.some((r) => r.runId === secondaryTab)) setSecondaryTab(null);
+  }, [activeRuns, secondaryTab]);
+
+  // Assign the dragged tab to the secondary pane. Never mirror the primary — a
+  // pane split with itself is meaningless (no-op in that case).
+  const assignSecondary = (srcId: string) => {
+    if (!srcId || srcId === activeTab) return;
+    setSecondaryTab(srcId);
+  };
+
+  // Shared pane drop-target handlers (secondary pane + the empty dropzone). The
+  // dragged runId lives in dragRunId.current; fall back to the dataTransfer text
+  // channel for standards-compliant drops that lose the ref.
+  const onPaneDragOver = (e: ReactDragEvent) => {
+    if (!dragRunId.current) return; // only react to a tab drag, not arbitrary drags
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    setPaneDropActive(true);
+  };
+  const onPaneDrop = (e: ReactDragEvent) => {
+    e.preventDefault();
+    let src = dragRunId.current;
+    if (!src) {
+      try {
+        src = e.dataTransfer.getData('text/plain') || null;
+      } catch {
+        src = null;
+      }
+    }
+    dragRunId.current = null;
+    setPaneDropActive(false);
+    if (src) assignSecondary(src);
+  };
+
+  // Drag the divider between the two split panes. Maps the cursor's x within the
+  // term-stack to splitRatio (clamped 0.2–0.8), mirroring startResize's global
+  // pointermove/up + body-cursor-class pattern (resizing-h also disables child
+  // pointer-events so the terminal doesn't swallow the move).
+  const startSplitResize = (e: ReactPointerEvent) => {
+    e.preventDefault();
+    const stack = termStackRef.current;
+    if (!stack) return;
+    const onMove = (ev: PointerEvent) => {
+      const rect = stack.getBoundingClientRect();
+      if (rect.width <= 0) return;
+      const ratio = (ev.clientX - rect.left) / rect.width;
+      setSplitRatio(Math.min(0.8, Math.max(0.2, ratio)));
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      document.body.classList.remove('resizing-h');
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    document.body.classList.add('resizing-h');
   };
 
   const startRename = (r: ActiveRun) => {
@@ -399,6 +537,9 @@ export default function App() {
   const popOut = useCallback((runId: string, pos?: { x: number; y: number }) => {
     const bridge = desktop();
     if (!bridge) return;
+    // A run mid-wrap-up must stay docked: the gate UI (and the injected prompt's
+    // marker watch) lives in THIS window's tab — tearing it off would orphan it.
+    if (wrappingUpRef.current[runId]) return;
     setActiveRuns((cur) => {
       const run = cur.find((r) => r.runId === runId);
       if (!run) return cur;
@@ -485,6 +626,10 @@ export default function App() {
   // click: only a press that travels a real distance AND is released outside the
   // dock detaches (at the cursor). A plain click still just selects the tab.
   const beginTabDrag = (e: ReactPointerEvent, runId: string) => {
+    // Split mode: the HTML5 drag (assign-to-pane) owns the tab-drag gesture;
+    // tear-off resumes when the split is toggled off (Pop out stays available
+    // on the terminal toolbar either way).
+    if (splitView) return;
     if (e.button !== 0 || !desktop()) return;
     const start = { x: e.clientX, y: e.clientY };
     const onMove = (ev: PointerEvent) => {
@@ -704,6 +849,19 @@ export default function App() {
         else next.delete(runId);
         return next;
       });
+      // Forced wrap-up gate: this only advances pending→working (drives the spinner).
+      // 'ready' ("Close now") is NOT reached by going idle — an idle is a weak proxy that
+      // fires BEFORE the wrap-up actually finishes (consolidation + memory can pause mid-way
+      // past IDLE_MS). 'ready' comes solely from the session printing the completion marker,
+      // detected in output by TerminalTab → onWrapupComplete.
+      setWrappingUp((prev) => {
+        const entry = prev[runId];
+        if (!entry) return prev;
+        if (entry.phase === 'pending' && working) {
+          return { ...prev, [runId]: { ...entry, phase: 'working' } };
+        }
+        return prev;
+      });
       if (working || !taskDone) return;
       const run = activeRunsRef.current.find((r) => r.runId === runId);
       if (!run || run.status !== 'running') return;
@@ -719,10 +877,10 @@ export default function App() {
     [pushToast],
   );
 
-  const closeTab = (runId: string) => {
-    // Close server-side too: stops the pty (if live) and drops it from the
-    // workspace so it won't be restored on reopen.
-    const run = activeRuns.find((r) => r.runId === runId);
+  // Actually drop a tab: stop the pty (if live) server-side, drop it from the
+  // workspace so it won't be restored on reopen, and re-focus a sibling.
+  const performClose = useCallback((runId: string) => {
+    const run = activeRunsRef.current.find((r) => r.runId === runId);
     void api.closeRun(runId).catch(() => undefined);
     setActiveRuns((cur) => {
       const remaining = cur.filter((r) => r.runId !== runId);
@@ -740,7 +898,154 @@ export default function App() {
       }
       return remaining;
     });
+  }, []);
+
+  // The injected wrap-up printed its completion marker → the wrap-up is GENUINELY done.
+  // Only now do we advance the gate to 'ready' ("Close now"). This is the real signal —
+  // an idle-based guess could offer the close before the wrap-up ran.
+  const onWrapupComplete = useCallback((runId: string) => {
+    setWrappingUp((prev) => {
+      const entry = prev[runId];
+      if (!entry || entry.phase === 'ready') return prev;
+      return { ...prev, [runId]: { ...entry, phase: 'ready' } };
+    });
+  }, []);
+
+  // Clear a run's wrap-up gate state (entry + any pending injection for it).
+  const clearWrapup = useCallback((runId: string) => {
+    setWrappingUp((prev) => {
+      if (!(runId in prev)) return prev;
+      const next = { ...prev };
+      delete next[runId];
+      return next;
+    });
+    setInjectSignal((cur) => (cur && cur.runId === runId ? null : cur));
+  }, []);
+
+  // Open the forced-wrap-up modal for a claude tab. `origin` records whether the
+  // user hit Stop (keep the tab) or ✕ (drop the tab) so "Close now" matches.
+  const requestWrapup = useCallback((runId: string, origin: WrapupOrigin) => {
+    setWrapupOrigin(origin);
+    setWrapupVerdict(null);
+    setWrapupNotes('');
+    setWrapupModalRunId(runId);
+  }, []);
+
+  const cancelWrapup = useCallback(() => {
+    // Abort — tab stays open, nothing killed, nothing recorded.
+    setWrapupModalRunId(null);
+  }, []);
+
+  // Finish the gated close honouring the origin: Stop stops the process but keeps
+  // the tab (restartable); ✕ drops the tab entirely.
+  const finalizeClose = useCallback(
+    (runId: string, origin: WrapupOrigin) => {
+      clearWrapup(runId);
+      if (origin === 'close') {
+        performClose(runId);
+      } else {
+        void api.stopRun(runId).catch(() => undefined);
+      }
+    },
+    [clearWrapup, performClose],
+  );
+
+  // Safety valve — always available while wrapping. Drops the tab no matter what
+  // (a hung/misbehaving session must never trap the user; verdict already saved).
+  const forceCloseWrapup = useCallback(
+    (runId: string) => {
+      clearWrapup(runId);
+      performClose(runId);
+    },
+    [clearWrapup, performClose],
+  );
+
+  // Submit the modal: record the verdict server-side (fail-soft), then either
+  // inject the wrap-up prompt + gate the close (live pty) or just close (dead pty).
+  const submitWrapup = useCallback(() => {
+    const runId = wrapupModalRunId;
+    const verdict = wrapupVerdict;
+    if (!runId || !verdict) return;
+    const origin = wrapupOrigin;
+    const notes = wrapupNotes;
+    const run = activeRunsRef.current.find((r) => r.runId === runId);
+    // Deterministic capture — never blocks the close flow (server also fail-soft).
+    void api.wrapup(runId, verdict, notes).catch(() => undefined);
+    setWrapupModalRunId(null);
+
+    const alive = run ? run.status === 'running' || run.status === 'connecting' : false;
+    if (!alive) {
+      // Dead pty — nothing to run the wrap-up in. Record + close immediately.
+      finalizeClose(runId, origin);
+      return;
+    }
+
+    // Build a single submitted line (collapse newlines so it submits as one).
+    const verdictWord = verdict === 'successful' ? 'SUCCESSFUL' : 'UNSUCCESSFUL';
+    const notePart = notes.replace(/[\r\n]+/g, ' ').trim() || 'none';
+    const text =
+      `Run your /wrap-up skill now. Verdict: ${verdictWord}. Notes: ${notePart}. ` +
+      `When the wrap-up is FULLY complete, print this exact line on its own as your final output: ${WRAPUP_DONE_MARKER}`;
+    setInjectSignal({ runId, text, nonce: Date.now() });
+    // Always gate from 'pending' — never from 'working'. Seeding 'working' when
+    // the session merely happened to be mid-task at submit time would let the
+    // PRE-EXISTING task's next idle read as the wrap-up finishing. From 'pending'
+    // those pre-inject idles are ignored; only a FRESH post-inject working edge
+    // advances pending→working, and 'ready' comes only from the output marker.
+    // (Residual: a fully-merged task→wrap-up output stream that never yields a
+    // fresh working edge stays 'pending' — which fails SAFE: Force close still
+    // ends the tab and the verdict/notes were already recorded.)
+    setWrappingUp((prev) => ({ ...prev, [runId]: { phase: 'pending', origin } }));
+  }, [wrapupModalRunId, wrapupVerdict, wrapupOrigin, wrapupNotes, finalizeClose]);
+
+  // "Nothing to log": end the session with NO ceremony — records nothing (no
+  // api.wrapup) and injects nothing (no memory/log-consolidation prompt, no gated
+  // phase). Just closes the modal and finalizes per origin.
+  const closeWithoutLog = useCallback(() => {
+    const runId = wrapupModalRunId;
+    if (!runId) return;
+    const origin = wrapupOrigin;
+    setWrapupModalRunId(null);
+    finalizeClose(runId, origin);
+  }, [wrapupModalRunId, wrapupOrigin, finalizeClose]);
+
+  const closeTab = (runId: string) => {
+    // Claude tabs go through the forced wrap-up gate; shell/command tabs close now.
+    const run = activeRuns.find((r) => r.runId === runId);
+    if (run && run.kind === 'claude') {
+      requestWrapup(runId, 'close');
+      return;
+    }
+    performClose(runId);
   };
+
+  // Identity-stable per-run handlers for the memoized TerminalTabs: Stop opens
+  // the gate with origin 'stop'; "Close now" finalizes honouring the recorded
+  // origin (read via the ref so the callback identity never changes).
+  const requestWrapupStop = useCallback(
+    (runId: string) => requestWrapup(runId, 'stop'),
+    [requestWrapup],
+  );
+  const wrapupCloseNow = useCallback(
+    (runId: string) => {
+      const entry = wrappingUpRef.current[runId];
+      finalizeClose(runId, entry ? entry.origin : 'close');
+    },
+    [finalizeClose],
+  );
+
+  // Close the wrap-up modal on Escape (same as Cancel — nothing killed).
+  useEffect(() => {
+    if (!wrapupModalRunId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        cancelWrapup();
+      }
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [wrapupModalRunId, cancelWrapup]);
 
   // Lives in the view-switch strip (beside Runner); also rendered in the
   // no-project state so a collapsed sidebar can always be reopened.
@@ -846,6 +1151,22 @@ export default function App() {
                   >
                     Arsenal
                   </button>
+                  <button
+                    className={`vs-btn ${view === 'changelog' ? 'active' : ''}`}
+                    onClick={() => confirmLeaveEditor() && setView('changelog')}
+                  >
+                    Changelog
+                  </button>
+                  {/* Toggles the terminal dock's two-pane split ONLY — does not
+                      change `view`. */}
+                  <button
+                    className={`vs-btn vs-btn-split ${splitView ? 'active' : ''}`}
+                    onClick={() => setSplitView((s) => !s)}
+                    title="Side-by-side (two sessions)"
+                    aria-pressed={splitView}
+                  >
+                    S|S
+                  </button>
                 </div>
                 {view === 'runner' ? (
                   <div className="runner-scroll">
@@ -890,6 +1211,12 @@ export default function App() {
                   // hooks, memory pins, agents and commands, not project-filtered.
                   <div className="runner-scroll">
                     <Armory />
+                  </div>
+                ) : view === 'changelog' ? (
+                  // Repo-global (this app's own commits) — not project-scoped, but
+                  // lives in the view-switch alongside EOD/Arsenal.
+                  <div className="runner-scroll">
+                    <Changelog />
                   </div>
                 ) : view === 'browser' ? (
                   <BrowserTab
@@ -1017,13 +1344,31 @@ export default function App() {
                         ) : (
                           <button
                             className="tab-btn"
+                            draggable={splitView}
+                            onDragStart={(e) => {
+                              dragRunId.current = r.runId;
+                              try {
+                                e.dataTransfer.setData('text/plain', r.runId);
+                              } catch {
+                                /* some engines refuse setData on buttons — the ref carries it */
+                              }
+                              e.dataTransfer.effectAllowed = 'move';
+                            }}
+                            onDragEnd={() => {
+                              dragRunId.current = null;
+                              setPaneDropActive(false);
+                            }}
                             onPointerDown={(e) => beginTabDrag(e, r.runId)}
                             onClick={() => {
                               selectTab(r.runId);
                               if (dockMinimized) setDockMinimized(false);
                             }}
                             onDoubleClick={() => startRename(r)}
-                            title="Drag out to a window · double-click to rename"
+                            title={
+                              splitView
+                                ? 'Drag into the right pane · double-click to rename'
+                                : 'Drag out to a window · double-click to rename'
+                            }
                           >
                             <span className={`dot dot-${r.status}`} />
                             {r.elevated ? <><Ic name="shield" /> </> : null}
@@ -1031,7 +1376,12 @@ export default function App() {
                             {r.customLabel ?? r.label}
                           </button>
                         )}
-                        <button className="tab-close" title="Close tab" onClick={() => closeTab(r.runId)}>
+                        <button
+                          className="tab-close"
+                          title={wrappingUp[r.runId] ? 'Wrapping up…' : 'Close tab'}
+                          disabled={!!wrappingUp[r.runId]}
+                          onClick={() => closeTab(r.runId)}
+                        >
                           ×
                         </button>
                       </div>
@@ -1085,30 +1435,178 @@ export default function App() {
               {/* Every run stays mounted regardless of the selected project so its
                   pty/websocket survives project switches; only the selected
                   project's active tab is displayed. */}
-              <div className="term-stack">
-                {activeRuns.map((r) => (
+              <div
+                ref={termStackRef}
+                className={`term-stack ${splitActive && secondaryRun ? 'split' : ''}`}
+              >
+                {activeRuns.map((r) => {
+                  const isPrimary = activeTab === r.runId;
+                  const isSecondary =
+                    splitActive && !!secondaryRun && secondaryRun.runId === r.runId;
+                  const visible = isPrimary || isSecondary;
+                  // In split mode the primary takes the left portion and the
+                  // secondary the right; otherwise the visible slot fills the
+                  // stack. All other runs stay mounted but display:none (ptys
+                  // survive project/tab switches).
+                  let style: CSSProperties;
+                  if (!visible) style = { display: 'none' };
+                  else if (splitActive && isPrimary)
+                    style = { display: 'flex', left: 0, right: rightRemainder };
+                  else if (isSecondary) style = { display: 'flex', left: leftPct, right: 0 };
+                  else style = { display: 'flex' };
+                  return (
+                    <div
+                      key={r.runId}
+                      className={`term-slot ${isPrimary ? 'pane-primary' : ''} ${
+                        isSecondary ? 'pane-secondary' : ''
+                      } ${isSecondary && paneDropActive ? 'drag-over' : ''}`}
+                      style={style}
+                      // The secondary pane is itself a drop target so the user can
+                      // swap which session it shows without unsplitting first.
+                      onDragOver={isSecondary ? onPaneDragOver : undefined}
+                      onDragLeave={isSecondary ? () => setPaneDropActive(false) : undefined}
+                      onDrop={isSecondary ? onPaneDrop : undefined}
+                    >
+                      {isSecondary && (
+                        <button
+                          className="pane-unsplit"
+                          title="Clear secondary pane"
+                          onClick={() => setSecondaryTab(null)}
+                        >
+                          ×
+                        </button>
+                      )}
+                      <TerminalTab
+                        run={r}
+                        onStatus={onRunStatus}
+                        onRestart={restartRun}
+                        onContinue={continueRun}
+                        onActivity={onActivity}
+                        onDevUrl={handleDevUrl}
+                        codeMapEmbed={codeMapEmbedByProject.get(r.projectId) ?? false}
+                        onPopOut={desktop() ? popOut : undefined}
+                        onRequestWrapup={requestWrapupStop}
+                        wrapupPhase={wrappingUp[r.runId]?.phase ?? null}
+                        onWrapupClose={wrapupCloseNow}
+                        onWrapupForceClose={forceCloseWrapup}
+                        injectSignal={
+                          injectSignal && injectSignal.runId === r.runId ? injectSignal : null
+                        }
+                        onWrapupComplete={onWrapupComplete}
+                      />
+                    </div>
+                  );
+                })}
+                {/* Split on but no secondary yet → right-portion dropzone. */}
+                {splitActive && !secondaryRun && (
                   <div
-                    key={r.runId}
-                    className="term-slot"
-                    style={{ display: activeTab === r.runId ? 'flex' : 'none' }}
+                    className={`term-slot pane-dropzone ${paneDropActive ? 'drag-over' : ''}`}
+                    style={{ display: 'flex', left: leftPct, right: 0 }}
+                    onDragOver={onPaneDragOver}
+                    onDragLeave={() => setPaneDropActive(false)}
+                    onDrop={onPaneDrop}
                   >
-                    <TerminalTab
-                      run={r}
-                      onStatus={onRunStatus}
-                      onRestart={restartRun}
-                      onContinue={continueRun}
-                      onActivity={onActivity}
-                      onDevUrl={handleDevUrl}
-                      codeMapEmbed={codeMapEmbedByProject.get(r.projectId) ?? false}
-                      onPopOut={desktop() ? popOut : undefined}
-                    />
+                    <div className="dropzone-hint">
+                      Drag a tab here
+                      <span>for a side-by-side session</span>
+                    </div>
                   </div>
-                ))}
+                )}
+                {/* Draggable divider — only with two live panes. Drag to
+                    re-proportion, double-click to reset to 50/50. */}
+                {splitActive && secondaryRun && (
+                  <div
+                    className="split-divider"
+                    style={{ left: leftPct }}
+                    onPointerDown={startSplitResize}
+                    onDoubleClick={() => setSplitRatio(0.5)}
+                    title="Drag to resize · double-click to reset"
+                  />
+                )}
               </div>
             </>
           )}
         </section>
       </div>
+      {wrapupModalRunId && (
+        <div
+          className="wrapup-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Wrap up this session"
+          onMouseDown={(e) => {
+            // Backdrop click (not a click inside the card) = cancel.
+            if (e.target === e.currentTarget) cancelWrapup();
+          }}
+        >
+          <div className="wrapup-modal">
+            <div className="wrapup-modal-head">
+              <h2>Wrap up this session</h2>
+              {wrapupRun && (
+                <p className="wrapup-modal-sub">
+                  ✦ {wrapupRun.customLabel ?? wrapupRun.label} · {wrapupRun.projectName}
+                </p>
+              )}
+            </div>
+            <div className="wrapup-field">
+              <span className="wrapup-field-label">Verdict</span>
+              <div className="wrapup-verdicts">
+                <button
+                  type="button"
+                  className={`wrapup-verdict ok ${wrapupVerdict === 'successful' ? 'sel' : ''}`}
+                  aria-pressed={wrapupVerdict === 'successful'}
+                  onClick={() => setWrapupVerdict('successful')}
+                >
+                  Successful
+                </button>
+                <button
+                  type="button"
+                  className={`wrapup-verdict bad ${wrapupVerdict === 'unsuccessful' ? 'sel' : ''}`}
+                  aria-pressed={wrapupVerdict === 'unsuccessful'}
+                  onClick={() => setWrapupVerdict('unsuccessful')}
+                >
+                  Unsuccessful
+                </button>
+              </div>
+            </div>
+            <div className="wrapup-field">
+              <span className="wrapup-field-label">Notes (optional)</span>
+              <textarea
+                className="wrapup-notes"
+                rows={4}
+                autoFocus
+                value={wrapupNotes}
+                placeholder="What happened / anything to remember?"
+                onChange={(e) => setWrapupNotes(e.target.value)}
+              />
+            </div>
+            <div className="wrapup-actions">
+              <button className="btn btn-ghost" onClick={cancelWrapup}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-ghost wrapup-skip"
+                title="End the session without logging or a memory pass"
+                onClick={closeWithoutLog}
+              >
+                Nothing to log
+              </button>
+              <button
+                className="btn btn-primary"
+                disabled={!wrapupVerdict}
+                title={
+                  wrapupVerdict
+                    ? 'Record the verdict and run the session wrap-up'
+                    : 'Pick a verdict first'
+                }
+                onClick={submitWrapup}
+              >
+                Wrap up &amp; close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <Toasts toasts={toasts} onFocus={focusRun} onDismiss={dismissToast} />
     </div>
   );

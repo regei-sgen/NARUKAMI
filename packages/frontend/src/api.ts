@@ -250,6 +250,10 @@ export const api = {
   unstageAll: (projectId: string) =>
     request<{ ok: boolean }>(`/api/projects/${projectId}/git/unstage-all`, { method: 'POST' }),
 
+  // --- changelog (this app's own commit history, for the Changelog view) ---
+  getChangelog: () =>
+    request<{ commits: import('./lib/changelog').LogCommit[] }>('/api/changelog'),
+
   // --- workspace / session restore ---
   getWorkspace: () => request<WorkspaceState>('/api/workspace'),
 
@@ -265,6 +269,15 @@ export const api = {
 
   closeRun: (runId: string) =>
     request<{ ok: boolean; stopped: boolean }>(`/api/runs/${runId}/close`, { method: 'POST' }),
+
+  // Record a claude tab's session wrap-up verdict (+ optional notes) server-side
+  // BEFORE the close/stop proceeds — deterministic capture that survives whatever
+  // the session does with the injected wrap-up prompt.
+  wrapup: (runId: string, verdict: string, notes: string) =>
+    request<{ ok: boolean; verdict: string }>(`/api/runs/${runId}/wrapup`, {
+      method: 'POST',
+      body: JSON.stringify({ verdict, notes }),
+    }),
 
   renameRun: (runId: string, name: string) =>
     request<{ ok: boolean; name: string | null }>(`/api/runs/${runId}/name`, {

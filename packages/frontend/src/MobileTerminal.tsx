@@ -4,6 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { getMobileRun, mobileWsUrl } from './api';
 import { normalizeStatus } from './lib/runStatus';
 import { nextReconnectAction, type ReconnectAction } from './lib/reconnect';
+import { attachTouchWheelBridge } from './lib/touchScroll';
 import type { MobileRunInfo, RunStatus } from './types';
 
 /**
@@ -113,6 +114,7 @@ export function MobileTerminal({ runId, shareToken }: { runId: string; shareToke
     let t: Terminal | null = null;
     let dataDisposable: IDisposable | null = null;
     let ro: ResizeObserver | null = null;
+    let detachTouch: (() => void) | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let reconnectAttempts = 0;
     let isReconnect = false;
@@ -325,6 +327,11 @@ export function MobileTerminal({ runId, shareToken }: { runId: string; shareToke
       // DOM renderer is the reliable baseline for a single phone terminal.
       term.open(container);
 
+      // Touch panning → xterm's wheel pipeline. Without this a phone cannot
+      // scroll at all when the shared app enables mouse tracking (xterm 5.x
+      // gates its own touch-scroll on mouse reporting being OFF).
+      detachTouch = attachTouchWheelBridge(container);
+
       // Rescale the mirror whenever the surface changes size (rotation, soft
       // keyboard via the visualViewport pin, browser URL bar).
       ro = new ResizeObserver(() => applyMirror());
@@ -336,6 +343,7 @@ export function MobileTerminal({ runId, shareToken }: { runId: string; shareToke
     return () => {
       disposed = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (detachTouch) detachTouch();
       if (ro) ro.disconnect();
       if (dataDisposable) dataDisposable.dispose();
       if (wsRef.current) {

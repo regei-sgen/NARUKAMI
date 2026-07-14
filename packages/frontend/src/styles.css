@@ -3732,3 +3732,376 @@ body.tab-tearing * {
 }
 .chg-commit-btn { align-self: flex-end; }
 .chg-note { padding: 12px 10px; font-size: 0.8rem; color: var(--muted, #8a8a94); }
+
+/* ── Forced wrap-up gate (claude tabs) ─────────────────────────────────────────
+   Modal (verdict + notes) shown on Stop/✕ of a claude tab, then the in-toolbar
+   gate while the injected /wrap-up prompt runs. Ported from os-workstation;
+   theme-variable driven (color-mix instead of --accent-rgb, per this sheet). */
+.wrapup-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 120; /* above the toast stack and every menu */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.62);
+  backdrop-filter: blur(2px);
+}
+.wrapup-modal {
+  width: 100%;
+  max-width: 460px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 24px 60px -12px rgba(0, 0, 0, 0.7), 0 0 0 1px var(--border-red);
+}
+.wrapup-modal-head h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+.wrapup-modal-sub {
+  margin: 6px 0 0;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text-dim);
+}
+.wrapup-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.wrapup-field-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+}
+.wrapup-verdicts {
+  display: flex;
+  gap: 10px;
+}
+.wrapup-verdict {
+  flex: 1;
+  padding: 9px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-3);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: border-color 0.15s, box-shadow 0.15s, background 0.15s, color 0.15s;
+}
+.wrapup-verdict:hover {
+  border-color: var(--text-dim);
+}
+.wrapup-verdict.ok.sel {
+  color: var(--green);
+  border-color: var(--green);
+  box-shadow: 0 0 0 3px rgba(53, 224, 138, 0.16);
+  background: rgba(53, 224, 138, 0.08);
+}
+.wrapup-verdict.bad.sel {
+  color: var(--red);
+  border-color: var(--red);
+  box-shadow: 0 0 0 3px rgba(255, 59, 59, 0.16);
+  background: rgba(255, 59, 59, 0.08);
+}
+.wrapup-notes {
+  width: 100%;
+  resize: vertical;
+  min-height: 72px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-3);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  outline: none;
+}
+.wrapup-notes:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.wrapup-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+/* "Nothing to log" — the distinct third action: end the session without the
+   verdict record or the memory/log wrap-up ceremony. A dashed ghost so it reads
+   apart from the solid Cancel (go back) and the primary "Wrap up & close". */
+.wrapup-skip {
+  border-style: dashed;
+}
+
+/* In-toolbar gate state while the injected wrap-up runs (Stop/✕ are replaced). */
+.wrapup-gate {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.wrapup-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--yellow);
+  white-space: nowrap;
+}
+.wrapup-indicator.done {
+  color: var(--green);
+}
+.wrapup-spinner {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  border-top-color: var(--yellow);
+  animation: wrapup-spin 0.7s linear infinite;
+}
+@keyframes wrapup-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.wrapup-gate .btn {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+.wrapup-force {
+  color: var(--text-dim);
+}
+.tab-close:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ── Changelog view (this app's own commits, date/time-range filterable) ───── */
+.cl {
+  max-width: 900px;
+  padding: 18px 20px;
+}
+.cl-filter {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding-bottom: 14px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.cl-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+}
+.cl-field input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color-scheme: dark;
+}
+.cl-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.cl-presets {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.cl-preset {
+  padding: 6px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.cl-preset:hover {
+  color: var(--text);
+  border-color: var(--border-red);
+}
+.cl-clear {
+  color: var(--accent-2);
+}
+.cl-count {
+  margin-left: auto;
+  align-self: center;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.cl-empty {
+  padding: 30px;
+  text-align: center;
+}
+.cl-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.cl-item {
+  display: flex;
+  gap: 14px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--border);
+}
+.cl-when {
+  flex: 0 0 92px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  padding-top: 1px;
+}
+.cl-body {
+  flex: 1;
+  min-width: 0;
+}
+.cl-subject {
+  font-weight: 600;
+  font-size: 13.5px;
+  word-break: break-word;
+}
+.cl-meta {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-top: 3px;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-family: var(--mono);
+  flex-wrap: wrap;
+}
+.cl-hash {
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 5px;
+  color: var(--accent-2);
+}
+.cl-text {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ── S|S side-by-side split (terminal dock two-pane) ───────────────────────── */
+.vs-btn-split {
+  letter-spacing: 2px;
+}
+.tab-btn[draggable='true'] {
+  cursor: grab;
+}
+.term-slot.pane-secondary {
+  border-left: 1px solid var(--border-red);
+}
+.term-slot.pane-secondary.drag-over,
+.pane-dropzone.drag-over {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+}
+.pane-dropzone {
+  border-left: 1px dashed var(--border-red);
+  align-items: center;
+  justify-content: center;
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent,
+    transparent 10px,
+    color-mix(in srgb, var(--accent) 3%, transparent) 10px,
+    color-mix(in srgb, var(--accent) 3%, transparent) 20px
+  );
+}
+.dropzone-hint {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  text-align: center;
+  pointer-events: none;
+}
+.pane-unsplit {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  z-index: 6;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-2);
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.pane-unsplit:hover {
+  color: var(--red);
+  border-color: var(--border-red);
+}
+.split-divider {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 9px;
+  transform: translateX(-50%);
+  z-index: 5;
+  cursor: ew-resize;
+}
+.split-divider::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 3px;
+  height: 46px;
+  border-radius: 3px;
+  background: var(--border);
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.split-divider:hover::after {
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--glow);
+}

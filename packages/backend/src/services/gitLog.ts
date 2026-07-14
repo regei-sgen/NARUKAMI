@@ -81,6 +81,87 @@ export async function gitCommitsForDay(
   }
 }
 
+// A commit for the "Changelog" view — same as Commit plus the author date
+// (ISO 8601) and author name, so the UI can filter by a date/time range.
+export interface LogCommit extends Commit {
+  date: string; // author date, ISO 8601 (%aI)
+  author: string;
+}
+
+const MAX_LOG = 500;
+
+/**
+ * Parse `git log ... --pretty=format:%aI<FS>%an<FS>%h<FS>%s<FS>%b` (NUL-separated
+ * records, optional --shortstat line appended). Pure, so it's unit-tested against
+ * captured output. Mirror of parseCommits with the date/author fields prepended.
+ */
+export function parseLog(raw: string): LogCommit[] {
+  const blocks = raw.split('\0').filter((b) => b.trim() !== '');
+  const out: LogCommit[] = [];
+  for (const block of blocks) {
+    const statMatch = block.match(/(\d+) files? changed/);
+    const filesChanged = statMatch ? Number(statMatch[1]) : null;
+    const meta = block.replace(/\n?[ \t]*\d+ files? changed[^\n]*\n?/, '');
+
+    const parts = meta.split(FS);
+    const date = (parts[0] ?? '').trim();
+    const author = (parts[1] ?? '').trim();
+    const hash = (parts[2] ?? '').trim();
+    if (!hash) continue;
+    const subject = (parts[3] ?? '').trim();
+    const body = parts.slice(4).join(FS).trim().slice(0, MAX_BODY_CHARS);
+
+    out.push({ date, author, hash, subject, body, filesChanged });
+    if (out.length >= MAX_LOG) break;
+  }
+  return out;
+}
+
+/**
+ * Resolve the git work-tree root that CONTAINS `start` via `git rev-parse
+ * --show-toplevel` (walks up to the real repo root even when the monorepo root
+ * sits inside a larger work tree). Returns null when `start` isn't inside a work
+ * tree (e.g. the packaged desktop app, which ships no .git) — the caller then
+ * falls back to a bundled changelog.json. Never throws.
+ */
+export async function resolveRepoRoot(start: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync('git', ['-C', start, 'rev-parse', '--show-toplevel'], {
+      timeout: GIT_TIMEOUT_MS,
+      windowsHide: true,
+    });
+    const root = stdout.trim();
+    return root || null;
+  } catch {
+    return null;
+  }
+}
+
+/** The most recent commits (dated) in the repo at `repoPath`. [] on any failure
+ *  (missing git, not a repo) — the changelog is an enrichment, never fatal. */
+export async function repoLog(repoPath: string, limit = MAX_LOG): Promise<LogCommit[]> {
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      [
+        '-C',
+        repoPath,
+        'log',
+        '--no-merges',
+        '-z',
+        '--shortstat',
+        '-n',
+        String(limit),
+        `--pretty=format:%aI${FS}%an${FS}%h${FS}%s${FS}%b`,
+      ],
+      { timeout: GIT_TIMEOUT_MS, windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
+    );
+    return parseLog(stdout);
+  } catch {
+    return [];
+  }
+}
+
 /** One-line-per-commit text for feeding the AI day summary. */
 export function commitsToText(commits: Commit[]): string {
   return commits

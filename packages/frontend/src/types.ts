@@ -174,6 +174,9 @@ export interface ActiveRun {
   pending?: boolean;
 }
 
+// The forced wrap-up gate's verdict for a closing Claude session.
+export type WrapupVerdict = 'successful' | 'unsuccessful';
+
 // A notification shown as a clickable toast (routes to the tab).
 // - 'exit': the process ended (exited/killed/error).
 // - 'task': a long-lived process (Claude/shell) finished a task and went idle.
@@ -237,12 +240,16 @@ export interface EodEntry {
 // Persisted UI layout (stored server-side under the 'ui' settings key).
 export interface UiSettings {
   selectedId?: string | null;
-  view?: 'runner' | 'editor' | 'eod' | 'release' | 'argus' | 'codemap' | 'armory' | 'browser';
+  view?: 'runner' | 'editor' | 'eod' | 'release' | 'argus' | 'codemap' | 'armory' | 'browser' | 'changelog';
   dockPosition?: 'bottom' | 'right';
   dockHeight?: number;
   dockWidth?: number;
   dockMinimized?: boolean;
   sidebarCollapsed?: boolean;
+  // S|S split view: toggle, the secondary pane's run, and the primary's fraction.
+  splitView?: boolean;
+  secondaryTab?: string | null;
+  splitRatio?: number;
   activeTabByProject?: Record<string, string>;
   editorFileByProject?: Record<string, string>;
   browserUrlByProject?: Record<string, string>;

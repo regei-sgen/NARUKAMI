@@ -1,8 +1,32 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../db';
+import { TOKEN_FILE } from '../config';
 import { isRunning, startClaude, startRun, startShell, stopRun } from '../services/runner';
 import { startAdminShell } from '../services/brokerServer';
 import { AnalyzerError, diagnoseRun } from '../services/analyzer';
+
+// Append one session-wrap-up record as a JSON line. Deterministic capture that
+// survives even if the Claude session ignores the injected prompt. Lives next to
+// the token file so it lands in the repo root on a repo install and in the
+// Electron userData dir for the packaged desktop app. Throwing is the caller's
+// problem to swallow — the wrap-up/close flow must never be blocked by a
+// log-write failure (disk full, perms, etc.).
+function appendWrapupLog(entry: {
+  runId: string;
+  projectId: string | null;
+  projectName: string | null;
+  kind: string;
+  label: string | null;
+  verdict: string;
+  notes: string;
+}): void {
+  const dir = path.join(path.dirname(TOKEN_FILE), 'logs');
+  fs.mkdirSync(dir, { recursive: true });
+  const line = JSON.stringify({ ts: new Date().toISOString(), ...entry }) + '\n';
+  fs.appendFileSync(path.join(dir, 'session-wrapups.jsonl'), line, 'utf8');
+}
 
 // Effort injected into fresh Claude tabs when the caller doesn't pick one.
 // `ultracode` = xhigh + dynamic workflow fan-out — maximum thoroughness, by
@@ -189,6 +213,48 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
     await prisma.run.update({ where: { id: run.id }, data: { dockOpen: false } });
     return { ok: true, stopped };
   });
+
+  // Record a forced session wrap-up (verdict + optional notes) before a claude
+  // tab's Stop/close actually ends the session. This is the deterministic capture
+  // that survives even if the session ignores the injected wrap-up prompt. The
+  // log write is fully fail-soft: any error is swallowed so the close flow (which
+  // the frontend runs in parallel) is never blocked by a bad disk/perms state.
+  app.post<{ Params: { runId: string }; Body: { verdict?: string; notes?: string } }>(
+    '/api/runs/:runId/wrapup',
+    async (req, reply) => {
+      const run = await prisma.run.findUnique({
+        where: { id: req.params.runId },
+        include: { project: true },
+      });
+      if (!run) return reply.code(404).send({ error: 'Run not found.' });
+
+      const rawVerdict =
+        typeof req.body?.verdict === 'string' ? req.body.verdict.trim().toLowerCase() : '';
+      const verdict =
+        rawVerdict === 'successful'
+          ? 'successful'
+          : rawVerdict === 'unsuccessful'
+            ? 'unsuccessful'
+            : 'unspecified';
+      const notes = typeof req.body?.notes === 'string' ? req.body.notes.slice(0, 4000) : '';
+
+      try {
+        appendWrapupLog({
+          runId: run.id,
+          projectId: run.projectId,
+          projectName: run.project?.name ?? null,
+          kind: run.kind,
+          label: run.name ?? run.kind,
+          verdict,
+          notes,
+        });
+      } catch {
+        // Never block the close flow on a log-write failure.
+      }
+
+      return { ok: true, verdict };
+    },
+  );
 
   // Persist a tab's custom name (blank clears it).
   app.post<{ Params: { runId: string }; Body: { name?: string } }>(

@@ -36,3 +36,6 @@ Thumbs.db
 # Code Map engine (codebase-memory-mcp) per-repo shareable graph artifact
 .codebase-memory/
 .cbmignore
+
+# runtime session-wrapup logs (routes/runs.ts appendWrapupLog)
+/logs/

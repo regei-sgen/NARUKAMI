@@ -6,7 +6,7 @@
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc -p tsconfig.json && node scripts/copy-generated.mjs",
+    "build": "tsc -p tsconfig.json && node scripts/copy-generated.mjs && node scripts/gen-changelog.mjs",
     "typecheck": "tsc -p tsconfig.typecheck.json",
     "start": "node dist/index.js",
     "migrate": "prisma migrate dev --name init",

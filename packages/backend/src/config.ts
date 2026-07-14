@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 export const HOST = '127.0.0.1';
@@ -32,3 +33,20 @@ export const REPO_ROOT = findRepoRoot(__dirname);
 
 export const TOKEN_FILE =
   process.env.RUNNER_TOKEN_FILE ?? path.join(REPO_ROOT, '.runner-token');
+
+/**
+ * The work tree whose git history feeds the Changelog view. NARUKAMI serves as
+ * the Ace OS workstation, so the changelog tracks the Ace OS (OSOFT) repo — not
+ * NARUKAMI's own history. Resolution: NARUKAMI_CHANGELOG_REPO env override,
+ * else the first existing Ace workspace (~/OSOFT, then ~/Ace), else null (the
+ * route then falls back to the bundled snapshot / NARUKAMI's own repo).
+ */
+export function resolveChangelogRepo(): string | null {
+  const override = process.env.NARUKAMI_CHANGELOG_REPO;
+  if (override) return fs.existsSync(override) ? override : null;
+  const home = os.homedir();
+  for (const candidate of [path.join(home, 'OSOFT'), path.join(home, 'Ace')]) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}

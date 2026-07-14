@@ -10,6 +10,7 @@
   ],
   "scripts": {
     "token": "node scripts/gen-token.mjs",
+    "start": "node scripts/start-prod.js",
     "dev": "npm run token && concurrently -k -n backend,frontend -c cyan,magenta \"npm:dev:backend\" \"npm:dev:frontend\"",
     "dev:backend": "npm run dev -w backend",
     "dev:frontend": "npm run dev -w frontend",
