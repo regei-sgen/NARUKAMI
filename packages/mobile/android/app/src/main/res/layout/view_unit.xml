@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- One instrument card: full-bleed trace, a scrim to keep text legible over
+     it, then the readouts. -->
+<merge xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <com.narukami.pcstats.TraceView
+        android:id="@+id/trace"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@drawable/scrim" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:padding="12dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:baselineAligned="true">
+
+            <TextView
+                android:id="@+id/tag"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="@color/vred"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                android:letterSpacing="0.1"
+                android:fontFamily="@font/narukami_mono" />
+
+            <TextView
+                android:id="@+id/part"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="9dp"
+                android:maxLines="1"
+                android:ellipsize="end"
+                android:textColor="@color/dim"
+                android:textSize="11sp"
+                android:fontFamily="@font/narukami_mono" />
+
+            <TextView
+                android:id="@+id/ceil"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:maxLines="1"
+                android:textColor="@color/dimmer"
+                android:textSize="9sp"
+                android:fontFamily="@font/narukami_mono" />
+        </LinearLayout>
+
+        <Space
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:baselineAligned="false">
+
+            <include
+                android:id="@+id/m1"
+                layout="@layout/view_metric"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1" />
+
+            <include
+                android:id="@+id/m2"
+                layout="@layout/view_metric"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="14dp" />
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1.4"
+                android:layout_marginStart="14dp"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/die_temp"
+                    android:textColor="@color/dim"
+                    android:textSize="9sp"
+                    android:letterSpacing="0.18"
+                    android:fontFamily="@font/narukami_mono" />
+
+                <TextView
+                    android:id="@+id/dieTemp"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:textColor="@color/ink"
+                    android:textSize="30sp"
+                    android:textStyle="bold"
+                    android:fontFamily="@font/narukami_mono" />
+
+                <TextView
+                    android:id="@+id/dieNote"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="3dp"
+                    android:textColor="@color/dimmer"
+                    android:textSize="9sp"
+                    android:fontFamily="@font/narukami_mono" />
+            </LinearLayout>
+        </LinearLayout>
+    </LinearLayout>
+</merge>

@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
+import { PcStatsPopup } from './PcStatsPopup';
 import type { ActiveRun, VitalsFeed } from '../types';
 
 const POLL_MS = 5000;
@@ -180,7 +181,12 @@ export const HeaderCluster = memo(function HeaderCluster({ runs, workingIds, onF
         </span>
       )}
 
-      {windows.length > 0 && history.length > 1 && <span className="hdrc-div" />}
+      {/* Always available — unlike the sparklines it needs no history to fill. */}
+      <span className="hdrc-zone">
+        <PcStatsPopup />
+      </span>
+
+      {windows.length > 0 && <span className="hdrc-div" />}
 
       {windows.length > 0 && (
         <span className="hdrc-zone">

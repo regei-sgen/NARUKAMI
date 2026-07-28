@@ -10,6 +10,7 @@ import '@fontsource/jetbrains-mono/500.css';
 import '@fontsource/jetbrains-mono/600.css';
 import '@fontsource/jetbrains-mono/700.css';
 import App from './App';
+import { PcStatsWindow } from './components/PcStatsWindow';
 import { IconDefs } from './components/icons';
 import './styles.css';
 import './components/argus/argus.css';
@@ -25,9 +26,14 @@ if (savedTheme) document.documentElement.setAttribute('data-theme', savedTheme);
 const rootEl = document.getElementById('root');
 if (!rootEl) throw new Error('Root element #root not found');
 
+// The detached PC Stats window loads this same bundle with ?pcstats=1 and must
+// render ONLY the readout — booting the full App there would open a second
+// workspace (terminals, websockets, pollers) inside a 360px utility window.
+const isStatsWindow = new URLSearchParams(window.location.search).has('pcstats');
+
 ReactDOM.createRoot(rootEl).render(
   <React.StrictMode>
     <IconDefs />
-    <App />
+    {isStatsWindow ? <PcStatsWindow /> : <App />}
   </React.StrictMode>,
 );

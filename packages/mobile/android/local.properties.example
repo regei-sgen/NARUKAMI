@@ -1,0 +1,11 @@
+# Copy to `local.properties` (gitignored — it is this machine's own path).
+#
+# Point sdk.dir at an Android SDK with platform 34 + build-tools installed.
+# On this project's Windows box the private toolchain lives under
+# %LOCALAPPDATA%\narukami-build\ ; any standard SDK location works too.
+#
+# Windows (note the escaped backslashes):
+sdk.dir=C\:\\Users\\<you>\\AppData\\Local\\Android\\Sdk
+#
+# macOS:  sdk.dir=/Users/<you>/Library/Android/sdk
+# Linux:  sdk.dir=/home/<you>/Android/Sdk

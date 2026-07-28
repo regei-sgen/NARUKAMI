@@ -17,6 +17,12 @@ fs.rmSync(stage, { recursive: true, force: true });
 fs.mkdirSync(stage, { recursive: true });
 
 fs.copyFileSync(path.join(desktop, 'dist-main', 'main.js'), path.join(stage, 'main.js'));
+// The preload sits NEXT TO main.js in both dev and packaged layouts — main.ts
+// resolves it as path.join(__dirname, 'preload.js'), so it must be staged too
+// or the PC Stats window loses its pin bridge in the installer build.
+fs.copyFileSync(path.join(desktop, 'dist-main', 'preload.js'), path.join(stage, 'preload.js'));
+// Tray icon, likewise resolved next to main.js in the packaged app.
+fs.copyFileSync(path.join(desktop, 'build', 'icon.png'), path.join(stage, 'tray-icon.png'));
 fs.writeFileSync(
   path.join(stage, 'package.json'),
   JSON.stringify({ name: 'narukami-app', version: '1.0.0', main: 'main.js', private: true }, null, 2),

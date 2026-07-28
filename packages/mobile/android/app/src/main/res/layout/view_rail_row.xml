@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- STORAGE / POWER / UPTIME: key + value, optional bar, sub-line. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:baselineAligned="true">
+
+        <TextView
+            android:id="@+id/rKey"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textColor="@color/dim"
+            android:textSize="9sp"
+            android:letterSpacing="0.16"
+            android:fontFamily="@font/narukami_mono" />
+
+        <TextView
+            android:id="@+id/rValue"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="@color/ink"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:fontFamily="@font/narukami_mono" />
+    </LinearLayout>
+
+    <ProgressBar
+        android:id="@+id/rBar"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="4dp"
+        android:layout_marginTop="5dp"
+        android:max="100"
+        android:progressDrawable="@drawable/bar" />
+
+    <TextView
+        android:id="@+id/rSub"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:textColor="@color/dimmer"
+        android:textSize="9sp"
+        android:fontFamily="@font/narukami_mono" />
+</LinearLayout>

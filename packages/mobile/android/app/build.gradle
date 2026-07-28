@@ -1,0 +1,42 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.narukami.pcstats'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.narukami.pcstats"
+        // Android 8.0. Required because the launcher icon is adaptive-only
+        // (mipmap-anydpi-v26), which keeps the project free of binary PNGs;
+        // API 24/25 would need a fallback bitmap.
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName "1.0.0"
+    }
+
+    buildTypes {
+        release {
+            // Unsigned-by-CI is useless for sideloading, so the release build is
+            // signed with the debug key: this app is installed over adb, never
+            // shipped to Play. Swap in a real keystore if that ever changes.
+            signingConfig signingConfigs.debug
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    // No runtime dependencies: plain Android views + a Canvas trace.
+    // Tests run on the JVM, so they need a real org.json (the android.jar stub
+    // throws) — this never ships in the APK.
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.json:json:20231013'
+}

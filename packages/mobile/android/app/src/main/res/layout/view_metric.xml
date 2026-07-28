@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- LOAD / MEMORY style column: label, big figure with a small unit, thin bar. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical">
+
+    <TextView
+        android:id="@+id/mLabel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:textColor="@color/dim"
+        android:textSize="9sp"
+        android:letterSpacing="0.18"
+        android:fontFamily="@font/narukami_mono" />
+
+    <TextView
+        android:id="@+id/mValue"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:maxLines="1"
+        android:textColor="@color/ink"
+        android:textSize="26sp"
+        android:textStyle="bold"
+        android:fontFamily="@font/narukami_mono" />
+
+    <ProgressBar
+        android:id="@+id/mBar"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="4dp"
+        android:layout_marginTop="6dp"
+        android:max="100"
+        android:progressDrawable="@drawable/bar" />
+</LinearLayout>

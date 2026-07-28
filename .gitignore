@@ -16,9 +16,19 @@ packages/backend/src/generated/
 packages/backend/.env
 packages/frontend/.env
 
+# Android (packages/mobile) — Gradle caches and the machine's own SDK path.
+# `build/` above already covers app/build/; these are the rest.
+.gradle/
+packages/mobile/android/local.properties
+# Gradle/AGP emit these next to the module when a build is run from an IDE.
+packages/mobile/android/**/*.iml
+packages/mobile/android/.idea/
+packages/mobile/android/.cxx/
+
 # logs / os
 *.log
 npm-debug.log*
+logs/
 .DS_Store
 Thumbs.db
 

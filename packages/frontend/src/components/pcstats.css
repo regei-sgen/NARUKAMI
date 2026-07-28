@@ -1,0 +1,541 @@
+/* ── PC Stats · vivid instrument panel ──────────────────────────────────────
+   Landscape-first: two glass instrument cards on the left, system rail on the
+   right. Portrait collapses to a single scrolling column. Sized in vh/clamp so
+   it fills a phone in landscape, a small pinned desktop window, and a large
+   one, without breakpoints to miss.
+
+   Fonts deliberately come from the app's BUNDLED families (--mono) rather than
+   the mockup's Google Fonts link: the desktop app runs offline and a webfont
+   fetch would simply fail. */
+.pcv {
+  --ink: #fffdf9;
+  --dim: #a8a29a;
+  --dimmer: #6e6860;
+  --vgreen: #24e58e;
+  --vred: #ff4438;
+  --pad: clamp(8px, 1.5vh, 14px);
+  --r: 14px;
+
+  height: 100%;
+  min-height: 0;
+  padding: var(--pad);
+  display: grid;
+  grid-template-columns: 1fr clamp(190px, 26%, 280px);
+  gap: var(--pad);
+  background: #000;
+  color: var(--ink);
+  /* NARUKAMI's own bundled faces (JetBrains Mono / Ubuntu Mono), the same
+     stack the rest of the app uses — not a generic system monospace. */
+  font-family: var(--mono);
+  font-feature-settings: 'ss01', 'cv01', 'zero';
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+/* Every descendant inherits the brand face, including form controls. */
+.pcv,
+.pcv * {
+  font-family: var(--mono);
+}
+
+.pcv-stack {
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  gap: var(--pad);
+  min-height: 0;
+}
+
+/* glass shell shared by the cards and the rail */
+.pcv-unit,
+.pcv-sys {
+  background:
+    linear-gradient(158deg, rgba(255, 255, 255, 0.085) 0%, rgba(255, 255, 255, 0.022) 55%, rgba(255, 255, 255, 0.008) 100%),
+    rgba(0, 0, 0, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: var(--r);
+}
+.pcv-sys {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.55),
+    0 10px 36px rgba(0, 0, 0, 0.8);
+}
+
+/* Gradient-clipped text — lit glass rather than flat ink.
+   The stops are a specular highlight at the very top, the body colour through
+   the middle, then a darker base, so the glyphs read as a lit solid instead of
+   a flat fill. */
+.pcv-gloss {
+  background-image: linear-gradient(
+    180deg,
+    #ffffff 0%,
+    #fffdf9 22%,
+    #ece6dc 52%,
+    #b3ada4 78%,
+    #7b756d 100%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  /* a hairline dark edge under the glyph gives it thickness on black */
+  filter: drop-shadow(0 1px 0 rgba(0, 0, 0, 0.55)) drop-shadow(0 2px 6px rgba(0, 0, 0, 0.6));
+}
+
+.pcv-unit {
+  position: relative;
+  overflow: hidden;
+  min-height: 0;
+  transition: box-shadow 0.9s ease;
+}
+.pcv-trace {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+  opacity: 0.88;
+  -webkit-mask-image: linear-gradient(90deg, rgba(0, 0, 0, 0.2) 0%, rgba(0, 0, 0, 0.26) 24%, rgba(0, 0, 0, 0.58) 50%, rgba(0, 0, 0, 0.88) 70%, #000 84%);
+  mask-image: linear-gradient(90deg, rgba(0, 0, 0, 0.2) 0%, rgba(0, 0, 0, 0.26) 24%, rgba(0, 0, 0, 0.58) 50%, rgba(0, 0, 0, 0.88) 70%, #000 84%);
+}
+.pcv-scrim {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  background: linear-gradient(90deg, rgba(0, 0, 0, 0.52) 6%, rgba(0, 0, 0, 0.24) 42%, transparent 72%);
+}
+.pcv-fg {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 12px 15px 12px 18px;
+  gap: 2px;
+}
+
+.pcv-head {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+.pcv-tag {
+  font-weight: 700;
+  font-size: clamp(10px, 1.5vh, 12px);
+  letter-spacing: 0.1em;
+  background-image: linear-gradient(180deg, #ffe0da 0%, var(--vred) 72%);
+  filter: drop-shadow(0 0 14px rgba(255, 68, 56, 0.85));
+}
+.pcv-part {
+  font-size: clamp(10px, 1.4vh, 12px);
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  min-width: 0;
+}
+.pcv-spacer {
+  flex: 1;
+}
+.pcv-ceil {
+  font-size: 9.5px;
+  color: var(--dimmer);
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+.pcv-warn {
+  font-size: 10px;
+  white-space: nowrap;
+  padding: 4px 10px;
+  border-radius: 99px;
+  background: linear-gradient(180deg, rgba(255, 158, 36, 0.34), rgba(255, 158, 36, 0.12));
+  border: 1px solid rgba(255, 158, 36, 0.62);
+  color: #ffe3b0;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.26), 0 0 30px rgba(255, 158, 36, 0.38);
+}
+
+.pcv-readouts {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: flex-end;
+  gap: clamp(14px, 3.4vw, 42px);
+  min-height: 0;
+  padding-bottom: 3px;
+}
+.pcv-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+/* Column widths live here (not inline) so the narrow layout can reflow them —
+   inline flex-basis cannot be overridden by a media query. */
+.pcv-m-load {
+  flex: 0 0 clamp(66px, 9vw, 104px);
+}
+.pcv-m-mem {
+  flex: 0 0 clamp(96px, 13vw, 152px);
+}
+.pcv-lbl {
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  font-weight: 500;
+  color: var(--dim);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95);
+}
+.pcv-val {
+  font-weight: 600;
+  font-size: clamp(17px, 4.3vh, 31px);
+  line-height: 1;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transition: filter 0.7s ease;
+}
+.pcv-u {
+  font-size: 0.5em;
+  font-weight: 400;
+  margin-left: 2px;
+  letter-spacing: 0;
+  -webkit-text-fill-color: var(--dim);
+  color: var(--dim);
+}
+.pcv-note {
+  font-size: 9.5px;
+  color: var(--dimmer);
+  white-space: nowrap;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+}
+.pcv-bar {
+  height: 4px;
+  width: 100%;
+  border-radius: 99px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+.pcv-bar i,
+.pcv-track i {
+  display: block;
+  height: 100%;
+  border-radius: 99px;
+  transition: width 0.7s cubic-bezier(0.4, 0, 0.2, 1), background 0.7s ease, box-shadow 0.7s ease;
+}
+.pcv-chips {
+  display: flex;
+  gap: 9px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.pcv-chip {
+  font-size: 10px;
+  color: #cfc9c2;
+  font-variant-numeric: tabular-nums;
+  padding: 3px 8px;
+  border-radius: 99px;
+  white-space: nowrap;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.03));
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16);
+}
+.pcv-chip.na {
+  color: var(--dimmer);
+  background: none;
+  border-color: rgba(255, 255, 255, 0.05);
+  box-shadow: none;
+}
+
+/* ── system rail ────────────────────────────────────────────────────────── */
+.pcv-sys {
+  padding: 11px 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: clamp(7px, 1.5vh, 13px);
+  min-height: 0;
+  overflow: auto;
+}
+.pcv-ident {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex: 0 0 auto;
+}
+/* The machine name wears the NARUKAMI wordmark face, like the app header. */
+.pcv-host {
+  font-family: 'Sukajan Brush', 'Kaushan Script', var(--mono) !important;
+  font-weight: 400;
+  font-size: clamp(15px, 2.6vh, 21px);
+  letter-spacing: 0.04em;
+  line-height: 1.1;
+  background-image: linear-gradient(180deg, #ffffff 0%, #ffe9e4 40%, #ff8a7d 100%);
+  filter: drop-shadow(0 0 10px rgba(255, 68, 56, 0.45));
+}
+.pcv-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: radial-gradient(circle at 35% 30%, #dffff0, var(--vgreen));
+  animation: pcv-halo 2.6s ease-out infinite;
+}
+@keyframes pcv-halo {
+  0% {
+    box-shadow: 0 0 0 0 rgba(36, 229, 142, 0.7), 0 0 16px rgba(36, 229, 142, 1);
+  }
+  70% {
+    box-shadow: 0 0 0 9px transparent, 0 0 16px rgba(36, 229, 142, 1);
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent, 0 0 16px rgba(36, 229, 142, 1);
+  }
+}
+.pcv-kebab {
+  width: 32px;
+  height: 32px;
+  margin: -6px -8px -6px 0;
+  display: grid;
+  place-items: center;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  color: var(--dim);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  transition: 0.18s;
+}
+.pcv-kebab:hover {
+  color: #ffc9be;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.04));
+  border-color: rgba(255, 255, 255, 0.14);
+}
+.pcv-stamp {
+  font-size: 9px;
+  color: var(--dimmer);
+  letter-spacing: 0.04em;
+  margin-top: -6px;
+}
+.pcv-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.pcv-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+.pcv-k {
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  color: var(--dim);
+}
+.pcv-v {
+  font-weight: 600;
+  font-size: clamp(11px, 1.9vh, 14px);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  background-image: linear-gradient(180deg, #ffffff, #98928a);
+}
+.pcv-v.pcv-ac {
+  background-image: linear-gradient(180deg, #e2fff2, var(--vgreen));
+}
+.pcv-vu {
+  font-size: 0.62em;
+  -webkit-text-fill-color: var(--dim);
+  color: var(--dim);
+}
+.pcv-sub {
+  font-size: 9px;
+  color: var(--dimmer);
+}
+.pcv-track {
+  height: 4px;
+  border-radius: 99px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+.pcv-foot {
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.pcv-foot span {
+  font-size: 9px;
+  color: var(--dimmer);
+  letter-spacing: 0.04em;
+}
+
+.pcv-empty {
+  padding: 18px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: #6e6860;
+  background: #000;
+  height: 100%;
+}
+.pcv-empty.bad {
+  color: #ff4438;
+}
+
+/* ── window shell: menu + phone-share sheet ─────────────────────────────── */
+.pcvw {
+  position: relative;
+  height: 100vh;
+  width: 100%;
+  background: #000;
+  overflow: hidden;
+}
+@media (orientation: portrait), (max-width: 560px) {
+  .pcvw {
+    overflow: auto;
+  }
+}
+.pcv-menu {
+  position: absolute;
+  top: 42px;
+  right: 14px;
+  z-index: 40;
+  min-width: 186px;
+  padding: 5px;
+  background:
+    linear-gradient(160deg, rgba(255, 255, 255, 0.09) 0%, rgba(255, 255, 255, 0.025) 60%, rgba(255, 255, 255, 0.01) 100%),
+    rgba(9, 9, 10, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 12px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2), 0 22px 50px rgba(0, 0, 0, 0.9);
+}
+.pcv-menu button {
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  color: #fffdf9;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  padding: 10px 11px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: 0.14s;
+}
+.pcv-menu button:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #ffc9be;
+}
+.pcv-share {
+  position: absolute;
+  right: 14px;
+  top: 84px;
+  z-index: 50;
+  width: min(340px, calc(100% - 28px));
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  background:
+    linear-gradient(158deg, rgba(255, 255, 255, 0.09) 0%, rgba(255, 255, 255, 0.028) 60%, rgba(255, 255, 255, 0.012) 100%),
+    rgba(10, 10, 11, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 14px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), 0 30px 70px rgba(0, 0, 0, 0.8);
+}
+.pcv-share-lab {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #ff4438;
+}
+.pcv-share code {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: #9cf03c;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 6px 8px;
+  user-select: all;
+  overflow-wrap: anywhere;
+}
+.pcv-share-note {
+  font-size: 9.5px;
+  color: #6e6860;
+  line-height: 1.4;
+}
+.pcv-share-acts {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+}
+.pcv-share-acts button {
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  color: #a8a29a;
+  border-radius: 8px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  padding: 6px 11px;
+  cursor: pointer;
+}
+.pcv-share-acts button:hover {
+  color: #fffdf9;
+}
+
+/* Portrait / narrow: one column, cards get a floor height so the traces stay
+   readable, and the whole panel scrolls. */
+@media (orientation: portrait), (max-width: 560px) {
+  .pcv {
+    grid-template-columns: 1fr;
+    height: auto;
+    min-height: 100%;
+    overflow-y: auto;
+  }
+  .pcv-stack {
+    grid-template-rows: auto auto;
+  }
+  .pcv-unit {
+    min-height: 152px;
+  }
+}
+
+/* Narrow: three fixed metric columns cannot fit side by side — they collided
+   (the memory unit ran under the die-temp figure). Let the row wrap and give
+   each metric its own line's worth of space. */
+@media (max-width: 620px) {
+  .pcv-readouts {
+    flex-wrap: wrap;
+    row-gap: 12px;
+    column-gap: clamp(12px, 5vw, 28px);
+    align-items: flex-start;
+  }
+  .pcv-m-load,
+  .pcv-m-mem {
+    flex: 1 1 clamp(70px, 26%, 120px);
+  }
+  .pcv-metric:not(.pcv-m-load):not(.pcv-m-mem) {
+    flex: 1 1 100%;
+  }
+  .pcv-val {
+    font-size: clamp(16px, 3.4vh, 26px);
+  }
+  .pcv-chips {
+    gap: 6px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pcv *,
+  .pcv-dot {
+    animation: none !important;
+    transition: none !important;
+  }
+}

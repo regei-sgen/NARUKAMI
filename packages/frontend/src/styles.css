@@ -2705,10 +2705,336 @@ body.resizing-h * {
   width: 32px;
   font-variant-numeric: tabular-nums;
 }
+
+/* ── PC Stats popup ─────────────────────────────────────────────────────────
+   A header chip that opens a small fixed-position panel: GPU, temperatures and
+   machine status. Fixed (not absolute) so the header's overflow can never clip
+   it; coordinates come from the toggle's rect. */
+.pcs-toggle {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  color: var(--faint);
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.pcs-toggle:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+.pcs-toggle.on {
+  color: var(--text);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.pcs-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* The detached PC Stats window: fills whatever size the user drags it to, on
+   any display. Nothing inside is a fixed width — the window is the container. */
+.pcsw {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100%;
+  background: var(--bg-2);
+  overflow: hidden;
+}
+.pcsw-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-3);
+  flex: none;
+  /* let the whole strip drag the frameless-ish window around */
+  -webkit-app-region: drag;
+}
+.pcsw-title {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  color: var(--accent);
+}
+.pcsw-pin {
+  -webkit-app-region: no-drag;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--faint);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  padding: 3px 9px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.pcsw-pin:hover {
+  color: var(--text);
+}
+.pcsw-pin.on {
+  color: var(--text);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.pcsw-pin:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* Wi-Fi share panel: the address + token to type into the phone app. */
+.pcsw-lan {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  background: var(--bg-3);
+  border-bottom: 1px solid var(--border);
+}
+.pcsw-lan-lab {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.pcsw-lan-url {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text);
+  background: var(--bg-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  padding: 5px 7px;
+  user-select: all;
+  overflow-wrap: anywhere;
+}
+.pcsw-lan-note {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--faint);
+  line-height: 1.4;
+}
+.pcsw-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 12px 14px 16px;
+}
+/* Stat cards that ARRANGE THEMSELVES to the window's shape: one column in a
+   tall narrow window, a row of cards in a wide short one (e.g. parked as a
+   strip across the top of a portrait monitor). auto-fit + minmax does the
+   reflow at every width in between — no breakpoints to miss.
+   NOTE: nothing here may span 1 / -1. A full-width child marks every track
+   "occupied", which stops auto-fit collapsing the surplus track — the cards
+   then sit at their min width and leave dead space at the right edge. */
+.pcs-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(228px, 1fr));
+  align-content: stretch;
+  gap: 10px;
+  min-width: 0;
+}
+.pcs-body > .pcs-sec {
+  background: var(--bg-3);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  padding: 9px 11px 11px;
+  min-width: 0;
+}
+/* Long values (a full CPU model string) must WRAP, not push a horizontal
+   scrollbar into a narrow window. */
+.pcs-note {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text-dim);
+  line-height: 1.4;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.pcs-note.dim {
+  color: var(--faint);
+}
+.pcs-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.pcs-sec-lab {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.pcs-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.pcs-row-lab {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--faint);
+  width: 46px;
+  flex: none;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+/* Sparkline canvas: fluid width, fixed rhythm height. Sized in CSS; the
+   component paints at devicePixelRatio so it stays sharp on scaled displays. */
+.pcs-spark {
+  flex: 1;
+  min-width: 40px;
+  height: 22px;
+  display: block;
+}
+.pcs-track {
+  flex: 1;
+  height: 6px;
+  min-width: 40px;
+  border-radius: var(--r-pill);
+  background: var(--bg-3);
+  border: 1px solid var(--border-soft);
+  overflow: hidden;
+}
+.pcs-fill {
+  display: block;
+  height: 100%;
+  border-radius: var(--r-pill);
+  transition: width 0.3s, background 0.3s;
+}
+.pcs-fill.ok {
+  background: var(--green);
+}
+.pcs-fill.warn {
+  background: var(--yellow);
+}
+.pcs-fill.crit {
+  background: var(--red);
+}
+.pcs-row-val {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  /* fluid: shrinks with the window, never truncates the widest real value
+     ("92% on AC", "15.3/32G") at the default size */
+  flex: 0 1 auto;
+  min-width: 62px;
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+/* A sensor this machine does not expose: say so, with the reason. */
+.pcs-na {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--faint);
+  font-style: italic;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.pcs-gpu {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 0 2px;
+  border-top: 1px dashed var(--border-soft);
+}
+.pcs-gpu:first-of-type {
+  border-top: 0;
+  padding-top: 2px;
+}
+.pcs-gpu-name {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pcs-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.pcs-chip {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  background: var(--bg-3);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-pill);
+  padding: 2px 7px;
+  font-variant-numeric: tabular-nums;
+}
+.pcs-empty {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--faint);
+  padding: 6px 2px;
+}
+.pcs-empty.bad {
+  color: var(--red);
+}
+/* Very narrow stats window (user dragged it thin, or a small/scaled display):
+   stack each meter under its label so nothing is squeezed to unreadable. */
+@media (max-width: 300px) {
+  .pcs-row {
+    flex-wrap: wrap;
+    row-gap: 3px;
+  }
+  .pcs-row-lab {
+    width: auto;
+  }
+  .pcs-track {
+    order: 3;
+    flex-basis: 100%;
+  }
+  .pcs-row-val {
+    margin-left: auto;
+  }
+}
+/* Roomy stats window on a large display: let the readout breathe rather than
+   leaving a column of dead space. */
+@media (min-width: 460px) {
+  .pcs-body {
+    gap: 13px;
+  }
+  .pcs-row-lab {
+    width: 58px;
+  }
+  .pcs-note {
+    font-size: 11.5px;
+  }
+  .pcs-row-lab,
+  .pcs-row-val {
+    font-size: 12px;
+  }
+}
 /* portrait / narrow windows: compact the cluster BEFORE it has to disappear —
    sparkline canvases go first, meter tracks shrink, the wordmark eases down.
-   (Lives AFTER the base .hdrc-* rules: equal specificity, so order decides.) */
-@media (max-width: 1280px) {
+   (Lives AFTER the base .hdrc-* rules: equal specificity, so order decides.)
+   Raised 1280 → 1500: measured, the cluster's centered content began
+   overlapping the wordmark at ~1440px once the PC chip joined the strip (and
+   already did at ~1366px before it), so compaction has to start sooner. */
+@media (max-width: 1500px) {
   .app-header {
     gap: 10px;
   }

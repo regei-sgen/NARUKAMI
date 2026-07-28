@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The stats server is plain HTTP: on loopback over `adb reverse`, or on a LAN
+  address over Wi-Fi. Both need cleartext.
+
+  The domain-config below names the loopback/emulator hosts explicitly, but the
+  base-config is what actually carries the Wi-Fi case: Android's
+  network-security-config matches domains, and there is NO way to express "any
+  192.168.x.x / 10.x.x.x" here — the user's PC could be at any address. So
+  cleartext is permitted app-wide.
+
+  That is acceptable only because of what this app IS: it talks to exactly one
+  user-configured host and never to the public internet, and the endpoint it
+  talks to is a read-only stats feed. Nothing secret rides this connection
+  except the stats token itself, whose blast radius is "someone learns your CPU
+  temperature". Do not reuse this config for an app that carries real secrets.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">10.0.2.2</domain> <!-- emulator host -->
+    </domain-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

@@ -18,6 +18,8 @@ import { terminalRoutes } from './routes/terminals';
 import { argusRoutes } from './routes/argus';
 import { godclaudeRoutes } from './routes/godclaude';
 import { vitalsRoutes } from './routes/vitals';
+import { pcStatsRoutes } from './routes/pcstats';
+import { statsLanRoutes } from './routes/statsLan';
 import { codeGraphRoutes } from './routes/codeGraph';
 import { armoryRoutes } from './routes/armory';
 import { setupWebSocket } from './ws';
@@ -173,6 +175,8 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
   await app.register(argusRoutes);
   await app.register(godclaudeRoutes);
   await app.register(vitalsRoutes);
+  await app.register(pcStatsRoutes);
+  await app.register(statsLanRoutes);
   await app.register(codeGraphRoutes);
   await app.register(armoryRoutes);
 

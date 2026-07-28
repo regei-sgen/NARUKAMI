@@ -19,6 +19,8 @@ import type {
   GitChanges,
   MemoryGraph,
   MemoryNoteDetail,
+  PcStats,
+  StatsLanState,
   Project,
   ProjectTree,
   ReleaseCommitResult,
@@ -231,6 +233,16 @@ export const api = {
 
   // Header Instrument Cluster feed: process vitals + account usage windows.
   getVitals: () => request<VitalsFeed>('/api/vitals'),
+
+  // PC Stats popup: GPU / temperatures / machine status. Polled only while the
+  // popup is open — the backend spawns its probes on demand.
+  getPcStats: () => request<PcStats>('/api/pcstats'),
+
+  // Wi-Fi path for the phone app: a SEPARATE read-only listener that serves
+  // only the stats (never the shell APIs or the injected-token HTML).
+  getStatsLan: () => request<StatsLanState>('/api/pcstats/lan'),
+  startStatsLan: () => request<StatsLanState>('/api/pcstats/lan/start', { method: 'POST' }),
+  stopStatsLan: () => request<StatsLanState>('/api/pcstats/lan/stop', { method: 'POST' }),
 
   // Open a detected local dev-server URL in the system default browser.
   openUrl: (url: string) =>

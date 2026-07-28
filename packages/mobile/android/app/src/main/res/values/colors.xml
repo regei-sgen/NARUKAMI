@@ -1,0 +1,11 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg">#000000</color>
+    <color name="bar">#16161C</color>
+    <color name="accent">#FF2D3C</color>
+    <color name="ink">#FFFDF9</color>
+    <color name="dim">#A8A29A</color>
+    <color name="dimmer">#6E6860</color>
+    <color name="vred">#FF4438</color>
+    <color name="vgreen">#24E58E</color>
+</resources>

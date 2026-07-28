@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<merge xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:padding="12dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <View
+                android:id="@+id/dot"
+                android:layout_width="8dp"
+                android:layout_height="8dp"
+                android:background="@drawable/dot" />
+
+            <TextView
+                android:id="@+id/host"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="9dp"
+                android:maxLines="1"
+                android:ellipsize="end"
+                android:textColor="@color/ink"
+                android:textSize="20sp"
+                android:letterSpacing="0.04"
+                android:fontFamily="@font/sukajan_brush" />
+
+            <ImageButton
+                android:id="@+id/menu"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/menu"
+                android:src="@android:drawable/ic_menu_more" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/stamp"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="@color/dimmer"
+            android:textSize="9sp"
+            android:fontFamily="@font/narukami_mono" />
+
+        <include layout="@layout/view_rail_row" android:id="@+id/rowStorage"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="12dp" />
+
+        <include layout="@layout/view_rail_row" android:id="@+id/rowPower"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="12dp" />
+
+        <include layout="@layout/view_rail_row" android:id="@+id/rowUptime"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="12dp" />
+
+        <Space
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="10dp"
+            android:background="#14FFFFFF" />
+
+        <TextView
+            android:id="@+id/sources"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:textColor="@color/dimmer"
+            android:textSize="9sp"
+            android:lineSpacingExtra="2dp"
+            android:fontFamily="@font/narukami_mono" />
+    </LinearLayout>
+</merge>

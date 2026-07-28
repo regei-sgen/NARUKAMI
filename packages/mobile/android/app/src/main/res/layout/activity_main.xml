@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Portrait fallback. The activity is locked to sensorLandscape, so Android
+     normally uses layout-land/ instead; this exists only so the app still lays
+     out sensibly if that lock is ever relaxed.
+
+     Same ZoomLayout behaviour: pinch RE-LAYS-OUT (text and card heights scale
+     and the column reflows to the screen width) rather than magnifying, so
+     there is nothing to pan horizontally — only the usual vertical scroll. -->
+<com.narukami.pcstats.ZoomLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/zoom"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg"
+    android:clipChildren="false">
+
+    <ScrollView
+        android:id="@+id/root"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:fillViewport="true"
+        android:scrollbars="none">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="10dp">
+
+            <com.narukami.pcstats.UnitView
+                android:id="@+id/cpu"
+                android:layout_width="match_parent"
+                android:layout_height="180dp" />
+
+            <com.narukami.pcstats.UnitView
+                android:id="@+id/gpu"
+                android:layout_width="match_parent"
+                android:layout_height="180dp"
+                android:layout_marginTop="10dp" />
+
+            <!-- Full-readout theme canvas; GONE while the classic cards show.
+                 Zoom scales the whole card; the scroller pans the overflow. -->
+            <HorizontalScrollView
+                android:id="@+id/themeScroll"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:scrollbars="none"
+                android:visibility="gone">
+
+                <com.narukami.pcstats.theme.ThemeView
+                    android:id="@+id/themeView"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" />
+            </HorizontalScrollView>
+
+            <com.narukami.pcstats.RailView
+                android:id="@+id/rail"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp" />
+        </LinearLayout>
+    </ScrollView>
+</com.narukami.pcstats.ZoomLayout>

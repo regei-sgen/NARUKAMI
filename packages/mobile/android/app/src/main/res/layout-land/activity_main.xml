@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Landscape is THE layout: the activity is locked to sensorLandscape, so this
+     is what runs (either way up).
+
+     Single column — CPU, GPU, then the system rail BELOW the GPU rather than
+     beside it. The cards get the full screen width, which is what makes the
+     traces readable in landscape; the column simply scrolls.
+
+     Card heights are explicit dp rather than layout_weight so the ZoomLayout can
+     scale them: a weighted 0dp height is a non-positive sentinel and cannot be
+     scaled, which would grow the text inside a fixed card and clip it. -->
+<com.narukami.pcstats.ZoomLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/zoom"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg">
+
+    <ScrollView
+        android:id="@+id/root"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:fillViewport="true"
+        android:scrollbars="none">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="10dp">
+
+            <com.narukami.pcstats.UnitView
+                android:id="@+id/cpu"
+                android:layout_width="match_parent"
+                android:layout_height="158dp" />
+
+            <com.narukami.pcstats.UnitView
+                android:id="@+id/gpu"
+                android:layout_width="match_parent"
+                android:layout_height="158dp"
+                android:layout_marginTop="10dp" />
+
+            <!-- Full-readout theme canvas; GONE while the classic cards show.
+                 The card keeps the reference's 2560:1187 proportions, so zoom
+                 scales it as a whole: the horizontal scroller pans the overflow
+                 (themed mode only — the classic column still reflows). -->
+            <HorizontalScrollView
+                android:id="@+id/themeScroll"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:scrollbars="none"
+                android:visibility="gone">
+
+                <!-- No layout_gravity: for a child WIDER than the scroller,
+                     FrameLayout centring lays it out at negative left and the
+                     scroll range then ends in a dead band. The view is never
+                     narrower than the viewport; small cards centre themselves. -->
+                <com.narukami.pcstats.theme.ThemeView
+                    android:id="@+id/themeView"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" />
+            </HorizontalScrollView>
+
+            <com.narukami.pcstats.RailView
+                android:id="@+id/rail"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp" />
+        </LinearLayout>
+    </ScrollView>
+</com.narukami.pcstats.ZoomLayout>

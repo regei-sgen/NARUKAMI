@@ -338,6 +338,74 @@ export interface VitalsFeed {
   usage: Usage | null;
 }
 
+/** PC Stats popup feed (GET /api/pcstats) — GPU, temps, and machine status. */
+export interface GpuStat {
+  name: string;
+  tempC: number | null;
+  utilPct: number | null;
+  memUtilPct: number | null;
+  memUsedMB: number | null;
+  memTotalMB: number | null;
+  powerW: number | null;
+  powerLimitW: number | null;
+  clockMHz: number | null;
+  fanPct: number | null;
+}
+
+export interface TempReading {
+  label: string;
+  celsius: number | null;
+  /** why the reading is missing — shown instead of a fabricated number */
+  note?: string;
+}
+
+/** State of the read-only Wi-Fi stats listener the phone app can use. */
+export interface StatsLanState {
+  running: boolean;
+  info: {
+    port: number;
+    token: string;
+    urls: string[];
+    /** full addresses (token included) to point the phone at */
+    phoneUrls?: string[];
+  } | null;
+}
+
+/** Recent history behind the PC Stats sparklines. */
+export interface PcSeries {
+  cpu: number[];
+  mem: number[];
+  cpuTemp: number[];
+  gpuLoad: number[];
+  gpuTemp: number[];
+}
+
+export interface PcStats {
+  ts: number;
+  cpu: {
+    model: string;
+    cores: number;
+    physicalCores: number | null;
+    speedMHz: number;
+    loadPct: number;
+    tjMaxC: number | null;
+  };
+  mem: { usedMB: number; totalMB: number };
+  series: PcSeries;
+  gpus: GpuStat[];
+  gpuSource: 'nvidia-smi' | null;
+  temps: TempReading[];
+  status: {
+    hostname: string;
+    platform: string;
+    release: string;
+    arch: string;
+    uptimeSec: number;
+    battery: { percent: number; charging: boolean; label: string } | null;
+    disk: { freeGB: number; totalGB: number } | null;
+  };
+}
+
 export interface GraphNode {
   id: string;
   kind: 'memory' | 'project' | 'session' | 'ghost';

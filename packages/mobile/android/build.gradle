@@ -1,0 +1,6 @@
+// Root build file. Deliberately minimal: the app is a single WebView activity,
+// so there is no Kotlin plugin, no AndroidX bloat, and nothing to download
+// beyond the Android Gradle Plugin itself.
+plugins {
+    id 'com.android.application' version '8.5.2' apply false
+}
