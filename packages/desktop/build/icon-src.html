@@ -1,32 +1,115 @@
 <!doctype html>
 <meta charset="utf-8">
+<!--
+  NARUKAMI app icon source. Render at 1024x1024 to build/icon.png with
+  `node scripts/render-icon.mjs`; electron-builder turns that into the .ico for
+  the taskbar, tray and installer.
+
+  Glass treatment, built to survive downscaling to 16px:
+   - the tile is a lit slab (bright top edge, dark base) so the icon keeps a
+     defined silhouette against a dark taskbar,
+   - the bolt carries a hard specular on its upper facets and a warm bounce
+     underneath, which is what reads as "glass" rather than flat colour,
+   - every effect is broad. Fine detail turns to mush at tray size, so there is
+     deliberately none.
+-->
 <style>
   html, body { margin: 0; padding: 0; }
-  body { width: 1024px; height: 1024px; background: #08080a; overflow: hidden; }
+  body { width: 1024px; height: 1024px; background: #060608; overflow: hidden; }
   svg { display: block; }
 </style>
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
-    <linearGradient id="bolt" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#ff6672"/>
-      <stop offset="1" stop-color="#b00614"/>
-    </linearGradient>
-    <radialGradient id="bg" cx="0.5" cy="0.42" r="0.75">
-      <stop offset="0" stop-color="#14141a"/>
-      <stop offset="1" stop-color="#08080a"/>
+    <!-- backdrop: light pooled behind the bolt, falling off to near black -->
+    <radialGradient id="bg" cx="0.5" cy="0.38" r="0.78">
+      <stop offset="0" stop-color="#191921"/>
+      <stop offset="1" stop-color="#060608"/>
     </radialGradient>
+
+    <!-- glass slab: strong top sheen, clear middle, warm red bounce at the base -->
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0.00" stop-color="#ffffff" stop-opacity="0.16"/>
+      <stop offset="0.34" stop-color="#ffffff" stop-opacity="0.045"/>
+      <stop offset="0.52" stop-color="#ffffff" stop-opacity="0.015"/>
+      <stop offset="1.00" stop-color="#ff2436" stop-opacity="0.10"/>
+    </linearGradient>
+
+    <!-- rim: lit from the top-left, catching red again on the lower-right -->
+    <linearGradient id="rim" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0.00" stop-color="#ffb3ba" stop-opacity="0.80"/>
+      <stop offset="0.38" stop-color="#5e1018" stop-opacity="0.30"/>
+      <stop offset="1.00" stop-color="#ff5561" stop-opacity="0.55"/>
+    </linearGradient>
+
+    <!-- the sheen across the upper third of the slab -->
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.13"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+
+    <!-- bolt body: lit upper-left, deep shadow lower-right -->
+    <linearGradient id="bolt" x1="0.15" y1="0" x2="0.85" y2="1">
+      <stop offset="0.00" stop-color="#ff9aa3"/>
+      <stop offset="0.30" stop-color="#fb3346"/>
+      <stop offset="0.62" stop-color="#cc0f20"/>
+      <stop offset="1.00" stop-color="#7d030d"/>
+    </linearGradient>
+
+    <!-- hard specular on the bolt's top facets -->
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0.00" stop-color="#ffffff" stop-opacity="0.80"/>
+      <stop offset="0.20" stop-color="#ffffff" stop-opacity="0.30"/>
+      <stop offset="0.44" stop-color="#ffffff" stop-opacity="0.04"/>
+      <stop offset="0.60" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+
+    <!-- light bouncing back up into the underside -->
+    <linearGradient id="bounce" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0.00" stop-color="#ff6b76" stop-opacity="0.55"/>
+      <stop offset="0.28" stop-color="#ff6b76" stop-opacity="0"/>
+    </linearGradient>
+
     <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
-      <feGaussianBlur stdDeviation="26" result="b"/>
+      <feGaussianBlur stdDeviation="30" result="b"/>
       <feMerge>
         <feMergeNode in="b"/>
         <feMergeNode in="b"/>
         <feMergeNode in="SourceGraphic"/>
       </feMerge>
     </filter>
+
+    <!-- contact shadow so the bolt sits ON the slab instead of in it -->
+    <filter id="drop" x="-40%" y="-40%" width="180%" height="180%">
+      <feOffset dx="0" dy="18" in="SourceAlpha" result="o"/>
+      <feGaussianBlur stdDeviation="22" in="o" result="s"/>
+      <feFlood flood-color="#000000" flood-opacity="0.75" result="c"/>
+      <feComposite in="c" in2="s" operator="in"/>
+    </filter>
+
+    <path id="boltPath" d="M608 96 L224 544 L448 544 L384 928 L800 416 L576 416 Z"/>
+    <clipPath id="boltClip"><use href="#boltPath"/></clipPath>
+    <clipPath id="tileClip"><rect x="72" y="72" width="880" height="880" rx="196"/></clipPath>
   </defs>
+
   <rect x="0" y="0" width="1024" height="1024" fill="url(#bg)"/>
+
+  <!-- glass slab -->
+  <rect x="72" y="72" width="880" height="880" rx="196" fill="url(#tile)"/>
+  <g clip-path="url(#tileClip)">
+    <!-- sheen: a wide ellipse hanging off the top edge -->
+    <ellipse cx="512" cy="150" rx="620" ry="330" fill="url(#sheen)"/>
+  </g>
   <rect x="72" y="72" width="880" height="880" rx="196" fill="none"
-        stroke="#2a0d10" stroke-width="10"/>
-  <path d="M608 96 L224 544 L448 544 L384 928 L800 416 L576 416 Z"
-        fill="url(#bolt)" filter="url(#glow)"/>
+        stroke="url(#rim)" stroke-width="10"/>
+
+  <!-- bolt -->
+  <use href="#boltPath" filter="url(#drop)" fill="#000"/>
+  <use href="#boltPath" fill="url(#bolt)" filter="url(#glow)"/>
+  <g clip-path="url(#boltClip)">
+    <rect x="0" y="96" width="1024" height="832" fill="url(#gloss)"/>
+    <rect x="0" y="96" width="1024" height="832" fill="url(#bounce)"/>
+  </g>
+  <!-- crisp lit edge along the top-left of the bolt -->
+  <use href="#boltPath" fill="none" stroke="#ffd7db" stroke-opacity="0.55" stroke-width="7"
+       stroke-linejoin="round" clip-path="url(#boltClip)"/>
 </svg>

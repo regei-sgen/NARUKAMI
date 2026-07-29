@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- Same mark as the desktop app icon (packages/desktop/build/icon-src.html),
+       kept as SVG so it stays crisp in a browser tab and as a maskable PWA icon.
+       Keep the two in sync when the design changes. The slab sits tighter to the
+       edge than the 1024 version because a favicon has far fewer pixels to spend
+       on margin. -->
+  <defs>
+    <radialGradient id="fbg" cx="0.5" cy="0.38" r="0.78">
+      <stop offset="0" stop-color="#191921"/>
+      <stop offset="1" stop-color="#060608"/>
+    </radialGradient>
+    <linearGradient id="ftile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".16"/>
+      <stop offset=".34" stop-color="#ffffff" stop-opacity=".045"/>
+      <stop offset=".52" stop-color="#ffffff" stop-opacity=".015"/>
+      <stop offset="1" stop-color="#ff2436" stop-opacity=".10"/>
+    </linearGradient>
+    <linearGradient id="frim" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffb3ba" stop-opacity=".80"/>
+      <stop offset=".38" stop-color="#5e1018" stop-opacity=".30"/>
+      <stop offset="1" stop-color="#ff5561" stop-opacity=".55"/>
+    </linearGradient>
+    <linearGradient id="fbolt" x1=".15" y1="0" x2=".85" y2="1">
+      <stop offset="0" stop-color="#ff9aa3"/>
+      <stop offset=".30" stop-color="#fb3346"/>
+      <stop offset=".62" stop-color="#cc0f20"/>
+      <stop offset="1" stop-color="#7d030d"/>
+    </linearGradient>
+    <!-- must FADE out: a flat-opacity ellipse leaves a hard edge across the slab -->
+    <linearGradient id="fsheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".14"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="fgloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".80"/>
+      <stop offset=".20" stop-color="#ffffff" stop-opacity=".30"/>
+      <stop offset=".44" stop-color="#ffffff" stop-opacity=".04"/>
+      <stop offset=".60" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="fglow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="1.1" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <path id="fb" d="M19 3 L7 17 L14 17 L12 29 L25 13 L18 13 Z"/>
+    <clipPath id="fbc"><use href="#fb"/></clipPath>
+    <clipPath id="ftc"><rect x="1" y="1" width="30" height="30" rx="7"/></clipPath>
+  </defs>
+
+  <rect width="32" height="32" fill="url(#fbg)"/>
+  <rect x="1" y="1" width="30" height="30" rx="7" fill="url(#ftile)"/>
+  <g clip-path="url(#ftc)">
+    <ellipse cx="16" cy="4.4" rx="21" ry="11.5" fill="url(#fsheen)"/>
+  </g>
+  <rect x="1" y="1" width="30" height="30" rx="7" fill="none"
+        stroke="url(#frim)" stroke-width=".9"/>
+
+  <use href="#fb" fill="url(#fbolt)" filter="url(#fglow)"/>
+  <g clip-path="url(#fbc)">
+    <rect x="0" y="3" width="32" height="26" fill="url(#fgloss)"/>
+  </g>
+  <use href="#fb" fill="none" stroke="#ffd7db" stroke-opacity=".55" stroke-width=".25"
+       stroke-linejoin="round" clip-path="url(#fbc)"/>
+</svg>

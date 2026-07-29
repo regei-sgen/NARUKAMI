@@ -10,7 +10,8 @@
     "stage": "node scripts/stage.mjs",
     "serve:updates": "node scripts/serve-updates.mjs",
     "start": "npm run build:main && electron .",
-    "dist": "npm run build:main && npm run stage && electron-builder --win nsis"
+    "dist": "npm run build:main && npm run stage && electron-builder --win nsis",
+    "icon": "electron scripts/render-icon.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.2",
