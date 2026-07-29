@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { rewriteFramingHeaders } from './framingHeaders';
+import { ensureLhmRunning } from './lhm';
 
 const PACKAGED = app.isPackaged;
 
@@ -1002,6 +1003,12 @@ app.whenReady().then(async () => {
     // embedding (X-Frame-Options / CSP frame-ancestors).
     stripFramingHeaders(session.defaultSession);
     appUrl = await startBackend();
+    // Bring up the CPU-temperature sensor source alongside the app. Fire and
+    // forget: it must never delay the window, and it no-ops on a machine where
+    // the one-time elevated setup (scripts/setup-lhm.ps1) was never run.
+    void ensureLhmRunning().then((r) =>
+      process.stderr.write(`[narukami] LibreHardwareMonitor: ${r}\n`),
+    );
     const win = await createWindow();
     createTray();
     mainWindow = win;
