@@ -296,6 +296,7 @@ function openStatsWindow(): void {
     minWidth: 240,
     minHeight: 260,
     title: 'NARUKAMI · PC Stats',
+    icon: appIconPath(),
     backgroundColor: '#08080a',
     autoHideMenuBar: true,
     alwaysOnTop: true, // opens pinned; the in-window PIN button toggles it
@@ -333,10 +334,16 @@ function showMainWindow(): void {
 }
 
 /**
- * Tray icon path. Mirrors resolvePaths(): in dev the source PNG in build/, in
- * the packaged app the copy stage.mjs places next to main.js inside the asar.
+ * The app emblem, used for the tray AND every window. Mirrors resolvePaths():
+ * in dev the source PNG in build/, in the packaged app the copy stage.mjs
+ * places next to main.js inside the asar.
+ *
+ * Windows takes the taskbar/Alt-Tab icon from the packaged .exe resource that
+ * electron-builder generates from this same build/icon.png, but a window only
+ * shows the emblem in its title bar when `icon` is set explicitly — otherwise a
+ * dev run falls back to the stock Electron logo.
  */
-function trayIconPath(): string {
+function appIconPath(): string {
   return PACKAGED
     ? path.join(__dirname, 'tray-icon.png')
     : path.join(__dirname, '..', 'build', 'icon.png');
@@ -506,9 +513,9 @@ function buildTrayMenu(): void {
 }
 
 function createTray(): void {
-  const src = nativeImage.createFromPath(trayIconPath());
+  const src = nativeImage.createFromPath(appIconPath());
   if (src.isEmpty()) {
-    process.stderr.write(`[narukami] tray icon missing at ${trayIconPath()} — tray not created\n`);
+    process.stderr.write(`[narukami] tray icon missing at ${appIconPath()} — tray not created\n`);
     return;
   }
   tray = new Tray(src.resize({ width: 16, height: 16 }));
@@ -528,6 +535,7 @@ async function createWindow(): Promise<BrowserWindow> {
     minHeight: 600,
     backgroundColor: '#08080a',
     title: 'NARUKAMI',
+    icon: appIconPath(),
     autoHideMenuBar: true,
     webPreferences: {
       preload: PRELOAD,
@@ -582,6 +590,7 @@ function createTerminalWindow(runId: string, pos?: { x: number; y: number }): vo
     ...(pos ? { x: Math.round(pos.x - 80), y: Math.round(pos.y - 12) } : {}),
     backgroundColor: '#050506',
     title: 'NARUKAMI — terminal',
+    icon: appIconPath(),
     autoHideMenuBar: true,
     webPreferences: {
       preload: PRELOAD,
