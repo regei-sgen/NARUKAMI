@@ -38,16 +38,16 @@ describe('ensureSchema (additive self-heal)', () => {
     const c = await oldSchemaClient();
     try {
       expect(await cols(c, 'Run')).not.toContain('claudeSessionId');
-      expect(await cols(c, 'Project')).not.toContain('codeMapEmbed');
       expect(await cols(c, 'RunCommand')).not.toContain('shell');
       await ensureSchema(c);
       expect(await cols(c, 'Run')).toContain('claudeSessionId'); // healed
       expect(await cols(c, 'Run')).toContain('shell'); // healed
-      expect(await cols(c, 'Project')).toContain('codeMapEmbed'); // healed
       expect(await cols(c, 'RunCommand')).toContain('shell'); // healed
+      // A DB that never had the removed Code Map column must not gain one, and
+      // the drop pass must not error on its absence.
+      expect(await cols(c, 'Project')).not.toContain('codeMapEmbed');
       await ensureSchema(c); // second boot must be a clean no-op, not an error
       expect((await cols(c, 'Run')).filter((n) => n === 'claudeSessionId')).toHaveLength(1);
-      expect((await cols(c, 'Project')).filter((n) => n === 'codeMapEmbed')).toHaveLength(1);
       expect((await cols(c, 'RunCommand')).filter((n) => n === 'shell')).toHaveLength(1);
       // new whole table created for installs that predate it
       const tbls = await c.$queryRawUnsafe<Array<{ name: string }>>(
@@ -64,7 +64,6 @@ describe('ensureSchema (additive self-heal)', () => {
     try {
       await c.$executeRawUnsafe('ALTER TABLE "Run" ADD COLUMN "claudeSessionId" TEXT');
       await c.$executeRawUnsafe('ALTER TABLE "Run" ADD COLUMN "shell" TEXT');
-      await c.$executeRawUnsafe('ALTER TABLE "Project" ADD COLUMN "codeMapEmbed" BOOLEAN NOT NULL DEFAULT 0');
       await c.$executeRawUnsafe(`ALTER TABLE "RunCommand" ADD COLUMN "shell" TEXT NOT NULL DEFAULT 'powershell'`);
       const before = {
         run: await cols(c, 'Run'),
@@ -75,6 +74,26 @@ describe('ensureSchema (additive self-heal)', () => {
       expect(await cols(c, 'Run')).toEqual(before.run);
       expect(await cols(c, 'Project')).toEqual(before.project);
       expect(await cols(c, 'RunCommand')).toEqual(before.runCommand);
+    } finally {
+      await c.$disconnect();
+    }
+  });
+
+  // The packaged app never runs Prisma migrations, so a column belonging to a
+  // REMOVED feature can only disappear from an already-seeded DB via this path.
+  it('drops a removed feature\'s leftover column (Code Map) and is idempotent', async () => {
+    const c = await oldSchemaClient();
+    try {
+      await c.$executeRawUnsafe(
+        'ALTER TABLE "Project" ADD COLUMN "codeMapEmbed" BOOLEAN NOT NULL DEFAULT 0',
+      );
+      expect(await cols(c, 'Project')).toContain('codeMapEmbed');
+      await ensureSchema(c);
+      expect(await cols(c, 'Project')).not.toContain('codeMapEmbed'); // dropped
+      // Everything else on the table survives the drop.
+      expect(await cols(c, 'Project')).toContain('id');
+      await ensureSchema(c); // second boot: already gone, must not error
+      expect(await cols(c, 'Project')).not.toContain('codeMapEmbed');
     } finally {
       await c.$disconnect();
     }

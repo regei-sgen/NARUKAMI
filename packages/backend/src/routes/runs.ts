@@ -146,7 +146,6 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
           runId: run.id,
           cwd: project.path,
           resumeSessionId,
-          embedCodeMap: project.codeMapEmbed,
           initInput: resume ? undefined : setEffort ? `/effort ${effort}` : undefined,
         });
         await prisma.run.update({
@@ -251,7 +250,6 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
           runId: run.id,
           cwd: project.path,
           resumeSessionId: resume ? old.claudeSessionId ?? undefined : undefined,
-          embedCodeMap: project.codeMapEmbed,
           initInput: resume ? undefined : `/effort ${DEFAULT_CLAUDE_EFFORT}`,
         });
         pid = started.pid;

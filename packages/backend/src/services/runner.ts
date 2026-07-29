@@ -434,7 +434,6 @@ export function startClaude(opts: {
   cwd: string;
   initInput?: string;
   resumeSessionId?: string;
-  embedCodeMap?: boolean;
   settleMs?: number;
   maxWaitMs?: number;
 }): { pid: number; sessionId: string } {
@@ -444,8 +443,7 @@ export function startClaude(opts: {
   // Attach the NARUKAMI MCP bridge so this session can read/drive other live
   // terminals (list_terminals / read_terminal / send_terminal). No-op (returns
   // []) if orchestration is disabled or the bridge script can't be located.
-  // With embedCodeMap, also attach the Code Map (codebase-memory-mcp) server.
-  const mcpArgs = buildClaudeMcpArgs(opts.runId, { codeMap: opts.embedCodeMap });
+  const mcpArgs = buildClaudeMcpArgs(opts.runId);
   const { rawArgs, sessionId } = buildClaudeArgs({
     mcpArgs,
     resumeSessionId: opts.resumeSessionId,

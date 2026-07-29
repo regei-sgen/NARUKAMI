@@ -4,11 +4,6 @@ import type {
   ArgusSessions,
   ArgusStatus,
   Armory,
-  CodeChanges,
-  CodeEngineStatus,
-  CodeGraph,
-  CodeNodeDetail,
-  CodeScope,
   EmbeddedGodAction,
   EmbeddedGodStatus,
   EodActiveResponse,
@@ -423,38 +418,6 @@ export const api = {
     request<EmbeddedGodAction>('/api/godclaude/autopilot', {
       method: 'POST',
       body: JSON.stringify({ on }),
-    }),
-
-  // --- Code Map (project codebase graph via codebase-memory-mcp) ---
-  getCodeEngine: () => request<CodeEngineStatus>('/api/code-graph/engine'),
-
-  generateCodeGraph: (projectId: string, scope: CodeScope) =>
-    request<{ graph: CodeGraph; engine: CodeEngineStatus }>(
-      `/api/projects/${projectId}/code-graph/generate`,
-      { method: 'POST', body: JSON.stringify({ scope }) },
-    ),
-
-  getCodeGraph: (projectId: string, scope: CodeScope) =>
-    request<{ graph: CodeGraph }>(
-      `/api/projects/${projectId}/code-graph?scope=${encodeURIComponent(scope)}`,
-    ),
-
-  getCodeChanges: (projectId: string) =>
-    request<CodeChanges>(`/api/projects/${projectId}/code-graph/changes`),
-
-  // Everything the engine stores about one clicked node — backs the inspector
-  // section rendered under the graph.
-  getCodeNodeDetail: (projectId: string, nodeId: string) =>
-    request<{ detail: CodeNodeDetail }>(
-      `/api/projects/${projectId}/code-graph/node?nodeId=${encodeURIComponent(nodeId)}`,
-    ),
-
-  // Toggle whether this project's Code Map is embedded (as an MCP server) into
-  // the Claude sessions NARUKAMI launches for it.
-  setCodeMapEmbed: (projectId: string, enabled: boolean) =>
-    request<{ codeMapEmbed: boolean }>(`/api/projects/${projectId}/code-graph/embed`, {
-      method: 'POST',
-      body: JSON.stringify({ enabled }),
     }),
 
   // --- Armory (read-only inventory of skills / hooks / memory / agents / commands) ---

@@ -24,8 +24,6 @@ interface Props {
   // Fires when a dev-server URL is detected in this run's output (command/shell
   // runs only) — lets App feed the Browser view's per-project default URL.
   onDevUrl?: (runId: string, url: string) => void;
-  // Claude tabs only: this project's Code Map embed flag (for the map toggle).
-  codeMapEmbed?: boolean;
   // Detach this terminal into its own desktop window. Only supplied by the main
   // app window when running under the Electron shell — omitted in a pop-out
   // window (no re-detaching) and in the browser (no window to open).
@@ -39,11 +37,10 @@ interface Props {
  * flip applies on the next Restart/Continue). The session id comes from the Run
  * row (fetched once — restored tabs don't carry it in props).
  */
-function ClaudeToggles({ run, codeMapEmbed }: { run: ActiveRun; codeMapEmbed: boolean }) {
+function ClaudeToggles({ run }: { run: ActiveRun }) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [godInstalled, setGodInstalled] = useState(false);
   const [godOn, setGodOn] = useState(false);
-  const [mapOn, setMapOn] = useState(codeMapEmbed);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -80,18 +77,6 @@ function ClaudeToggles({ run, codeMapEmbed }: { run: ActiveRun; codeMapEmbed: bo
     }
   }, [sessionId, godOn]);
 
-  const toggleMap = useCallback(async () => {
-    setBusy(true);
-    try {
-      const res = await api.setCodeMapEmbed(run.projectId, !mapOn);
-      setMapOn(res.codeMapEmbed);
-    } catch {
-      /* keep prior state */
-    } finally {
-      setBusy(false);
-    }
-  }, [run.projectId, mapOn]);
-
   return (
     <span className="term-toggles">
       {godInstalled && sessionId && (
@@ -108,19 +93,6 @@ function ClaudeToggles({ run, codeMapEmbed }: { run: ActiveRun; codeMapEmbed: bo
           <Ic name="bolt" /> god
         </button>
       )}
-      <button
-        className={`term-toggle ${mapOn ? 'on' : ''}`}
-        disabled={busy}
-        title={
-          (mapOn
-            ? 'Code Map embedded in this project\'s Claude sessions — click to disable'
-            : 'Code Map not embedded — click to enable') +
-          ' (attaches at launch: applies on next Restart/Continue)'
-        }
-        onClick={() => void toggleMap()}
-      >
-        <Ic name="hex" /> map
-      </button>
     </span>
   );
 }
@@ -149,7 +121,7 @@ interface ServerMessage {
 // frame, and every open terminal would re-render with it. All props are stable
 // (primitives, per-run object identity, useCallback handlers), so memo cuts
 // that churn to the tabs whose run actually changed.
-export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity, onDevUrl, codeMapEmbed, onPopOut }: Props) {
+export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart, onContinue, onActivity, onDevUrl, onPopOut }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -669,7 +641,7 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
           </button>
         )}
         {run.kind === 'claude' && (
-          <ClaudeToggles run={run} codeMapEmbed={codeMapEmbed ?? false} />
+          <ClaudeToggles run={run} />
         )}
         {onPopOut && (
           <button

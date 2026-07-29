@@ -17,7 +17,6 @@ model Project {
   type        String?   // e.g. "node", "python", "unknown"
   packageMgr  String?   // e.g. "npm", "pnpm", "yarn", "pip", "poetry"
   status      String    @default("registered") // registered | analyzed | error
-  codeMapEmbed Boolean  @default(false) // when true, Claude sessions for this project get the codebase-memory-mcp (Code Map) MCP server attached
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 

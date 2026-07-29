@@ -25,7 +25,6 @@ export interface Project {
   type: string | null;
   packageMgr: string | null;
   status: string;
-  codeMapEmbed?: boolean; // Code Map (codebase-memory-mcp) attached to this project's Claude sessions
   createdAt: string;
   updatedAt: string;
   commands: RunCommand[];
@@ -237,7 +236,7 @@ export interface EodEntry {
 // Persisted UI layout (stored server-side under the 'ui' settings key).
 export interface UiSettings {
   selectedId?: string | null;
-  view?: 'runner' | 'editor' | 'eod' | 'release' | 'argus' | 'codemap' | 'armory' | 'browser';
+  view?: 'runner' | 'editor' | 'eod' | 'release' | 'argus' | 'armory' | 'browser';
   dockPosition?: 'bottom' | 'right';
   dockHeight?: number;
   dockWidth?: number;
@@ -520,53 +519,6 @@ export interface ArgusLogResult {
   exists: boolean;
   count: number;
   lines: unknown[];
-}
-
-// ── Code Map (project codebase graph via codebase-memory-mcp) ─────────────────
-export type CodeScope = 'files' | 'functions' | 'architecture';
-
-export interface CodeGraphNode {
-  id: string;
-  kind: string;
-  label: string;
-  file?: string;
-}
-export interface CodeGraphEdge {
-  source: string;
-  target: string;
-  kind: string;
-}
-export interface CodeGraph {
-  ok: boolean;
-  scope: CodeScope;
-  nodes: CodeGraphNode[];
-  edges: CodeGraphEdge[];
-  counts: Record<string, number>;
-  truncated: boolean;
-}
-export interface CodeNodeNeighbor {
-  /** edge type, e.g. CALLS / DEFINES / IMPORTS */
-  rel: string;
-  dir: 'out' | 'in';
-  id: string;
-  label: string;
-}
-export interface CodeNodeDetail {
-  id: string;
-  kinds: string[];
-  name: string | null;
-  file: string | null;
-  /** everything the engine stores on the node: signature, lines, complexity, flags… */
-  props: Record<string, unknown>;
-  neighbors: CodeNodeNeighbor[];
-}
-export interface CodeEngineStatus {
-  installed: boolean;
-  version: string | null;
-}
-export interface CodeChanges {
-  changed: string[];
-  ongoing: string[];
 }
 
 // --- EOD reports (mirror packages/backend/src/services/eodActivity.ts + routes/eod.ts) ---

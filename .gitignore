@@ -42,7 +42,3 @@ Thumbs.db
 
 # packaged archives / large artifacts
 *.zip
-
-# Code Map engine (codebase-memory-mcp) per-repo shareable graph artifact
-.codebase-memory/
-.cbmignore

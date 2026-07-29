@@ -24,7 +24,6 @@ const CodeEditor = lazy(() =>
 import { EodView } from './components/EodView';
 import { SgaRelease } from './components/SgaRelease';
 import { ArgusPanoptes } from './components/argus/ArgusPanoptes';
-import { CodeMap } from './components/CodeMap';
 import { Armory } from './components/Armory';
 import { BrowserTab } from './components/BrowserTab';
 import { DEFAULT_DEVICE_IDS, DEVICE_PRESETS } from './lib/browserView';
@@ -55,9 +54,9 @@ export default function App() {
   // mounted (see the term-stack below) so ptys survive project switches; this
   // only controls which one is visible for the currently selected project.
   const [activeTabByProject, setActiveTabByProject] = useState<Record<string, string>>({});
-  // Views are peer tabs (Runner / Editor / EOD / Argus / Code Map). Argus is a
+  // Views are peer tabs (Runner / Editor / EOD / Argus / Armory). Argus is a
   // global read-only monitor; the rest are scoped to the selected project.
-  const [view, setView] = useState<'runner' | 'editor' | 'eod' | 'release' | 'argus' | 'codemap' | 'armory' | 'browser'>('runner');
+  const [view, setView] = useState<'runner' | 'editor' | 'eod' | 'release' | 'argus' | 'armory' | 'browser'>('runner');
   // Terminal dock: docked bottom (resizable height) or right (resizable width),
   // plus minimize. All persisted server-side.
   const [dockPosition, setDockPosition] = useState<'bottom' | 'right'>('bottom');
@@ -162,7 +161,6 @@ export default function App() {
           ui.view === 'eod' ||
           ui.view === 'release' ||
           ui.view === 'argus' ||
-          ui.view === 'codemap' ||
           ui.view === 'armory' ||
           ui.view === 'browser'
         )
@@ -270,14 +268,6 @@ export default function App() {
   };
 
   const selected = projects.find((p) => p.id === selectedId) ?? null;
-
-  // Primitive per-tab lookup so memoized TerminalTabs get a stable prop instead
-  // of a fresh projects.find() per tab per App render.
-  const codeMapEmbedByProject = useMemo(() => {
-    const m = new Map<string, boolean>();
-    for (const p of projects) m.set(p.id, p.codeMapEmbed ?? false);
-    return m;
-  }, [projects]);
 
   // Leaving the editor (switching view or project) unmounts it and would silently
   // drop unsaved edits — confirm first when the editor is dirty.
@@ -835,12 +825,6 @@ export default function App() {
                     GODCLAUDE
                   </button>
                   <button
-                    className={`vs-btn ${view === 'codemap' ? 'active' : ''}`}
-                    onClick={() => confirmLeaveEditor() && setView('codemap')}
-                  >
-                    Code Map
-                  </button>
-                  <button
                     className={`vs-btn ${view === 'armory' ? 'active' : ''}`}
                     onClick={() => confirmLeaveEditor() && setView('armory')}
                   >
@@ -880,10 +864,6 @@ export default function App() {
                   // so it fills this content region instead of the whole window.
                   <div className="argus-pane">
                     <ArgusPanoptes selectedPath={selected.path} />
-                  </div>
-                ) : view === 'codemap' ? (
-                  <div className="runner-scroll">
-                    <CodeMap key={selected.id} project={selected} onChanged={refresh} />
                   </div>
                 ) : view === 'armory' ? (
                   // Armory is global (no project key) — an inventory of all skills,
@@ -1099,7 +1079,6 @@ export default function App() {
                       onContinue={continueRun}
                       onActivity={onActivity}
                       onDevUrl={handleDevUrl}
-                      codeMapEmbed={codeMapEmbedByProject.get(r.projectId) ?? false}
                       onPopOut={desktop() ? popOut : undefined}
                     />
                   </div>

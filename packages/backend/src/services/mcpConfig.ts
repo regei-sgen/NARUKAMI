@@ -4,7 +4,6 @@ import path from 'node:path';
 import { REPO_ROOT } from '../config';
 import { getToken } from '../auth';
 import { getBaseUrl } from './serverInfo';
-import { codeGraphBin, codeGraphBinInstalled } from './codeGraph';
 
 // Cross-terminal orchestration is on by default; set NARUKAMI_ORCHESTRATION=0 to
 // disable (Claude sessions then launch without the terminal-control MCP tools).
@@ -45,9 +44,6 @@ interface McpServerEntry {
  * so the server-selection logic is directly unit-testable.
  *   - `narukami` (cross-terminal orchestration bridge) is added when its bridge
  *     script, server URL, and token are all present.
- *   - `codebase-memory` (the Code Map engine, run as a stdio MCP server — see
- *     `codebase-memory-mcp --help`) is added when `codeMapBin` is provided, so the
- *     session can query the project's structural graph on demand.
  */
 export function assembleMcpServers(input: {
   execPath: string;
@@ -55,7 +51,6 @@ export function assembleMcpServers(input: {
   baseUrl: string | null;
   token: string | null;
   selfRunId: string;
-  codeMapBin: string | null;
 }): Record<string, McpServerEntry> {
   const servers: Record<string, McpServerEntry> = {};
   if (input.bridge && input.baseUrl && input.token) {
@@ -70,9 +65,6 @@ export function assembleMcpServers(input: {
       },
     };
   }
-  if (input.codeMapBin) {
-    servers['codebase-memory'] = { command: input.codeMapBin, args: [] };
-  }
   return servers;
 }
 
@@ -82,11 +74,8 @@ export function assembleMcpServers(input: {
  * Best-effort, never fatal.
  *
  * The config is NOT strict: the user's own MCP servers still load alongside it.
- * `opts.codeMap` attaches the Code Map engine (codebase-memory-mcp) so this
- * session can inspect the project's codebase graph on demand — enabled per
- * project via the CodeMap "Embed in Claude" toggle.
  */
-export function buildClaudeMcpArgs(selfRunId: string, opts: { codeMap?: boolean } = {}): string[] {
+export function buildClaudeMcpArgs(selfRunId: string): string[] {
   const wantNarukami = orchestrationEnabled();
   const bridge = wantNarukami ? locateBridge() : null;
   const baseUrl = wantNarukami ? getBaseUrl() : null;
@@ -99,17 +88,12 @@ export function buildClaudeMcpArgs(selfRunId: string, opts: { codeMap?: boolean 
     }
   }
 
-  // Only attach the Code Map server when embed is requested AND the engine binary
-  // is actually installed — otherwise Claude would get a server that can't start.
-  const codeMapBin = opts.codeMap && codeGraphBinInstalled() ? codeGraphBin() : null;
-
   const servers = assembleMcpServers({
     execPath: process.execPath,
     bridge,
     baseUrl,
     token,
     selfRunId,
-    codeMapBin,
   });
   if (Object.keys(servers).length === 0) return [];
 

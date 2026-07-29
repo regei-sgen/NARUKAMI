@@ -1,0 +1,11 @@
+-- Code Map feature removed: drop the per-project "Embed in Claude" flag that
+-- attached the codebase-memory-mcp server to that project's Claude sessions.
+--
+-- The earlier 20260707020000_add_project_codemap_embed migration is deliberately
+-- left in place: applied migration history is never rewritten, so databases that
+-- already ran it stay consistent and this migration undoes it forward.
+--
+-- Requires SQLite >= 3.35 for ALTER TABLE ... DROP COLUMN (bundled engine is 3.46).
+-- Databases seeded from the packaged app's template never run migrations at all;
+-- their copy of this column is dropped at boot by REMOVED_COLUMNS in src/db.ts.
+ALTER TABLE "Project" DROP COLUMN "codeMapEmbed";

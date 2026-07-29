@@ -9,9 +9,22 @@ export const prisma = new PrismaClient();
  */
 const ADDITIVE_COLUMNS: ReadonlyArray<{ table: string; column: string; ddl: string }> = [
   { table: 'Run', column: 'claudeSessionId', ddl: 'ALTER TABLE "Run" ADD COLUMN "claudeSessionId" TEXT' },
-  { table: 'Project', column: 'codeMapEmbed', ddl: 'ALTER TABLE "Project" ADD COLUMN "codeMapEmbed" BOOLEAN NOT NULL DEFAULT 0' },
   { table: 'RunCommand', column: 'shell', ddl: `ALTER TABLE "RunCommand" ADD COLUMN "shell" TEXT NOT NULL DEFAULT 'powershell'` },
   { table: 'Run', column: 'shell', ddl: 'ALTER TABLE "Run" ADD COLUMN "shell" TEXT' },
+];
+
+/**
+ * Columns left behind by a REMOVED feature. The packaged app never runs Prisma
+ * migrations (see {@link ensureSchema}), so a column deleted from schema.prisma
+ * would otherwise linger forever in every already-seeded database. Each is
+ * dropped idempotently at boot, guarded by `PRAGMA table_info`.
+ *
+ * Unlike {@link ADDITIVE_COLUMNS} this DESTROYS data — list a column here only
+ * once the feature that owned it is gone and its values are meaningless.
+ */
+const REMOVED_COLUMNS: ReadonlyArray<{ table: string; column: string }> = [
+  // Code Map (the codebase-memory-mcp "Embed in Claude" toggle) — feature removed.
+  { table: 'Project', column: 'codeMapEmbed' },
 ];
 
 /**
@@ -55,7 +68,10 @@ type RawClient = Pick<PrismaClient, '$queryRawUnsafe' | '$executeRawUnsafe'>;
  * missing from a DB that an older version seeded, and any query touching it would
  * fail with "no such column". For each additive column we check `PRAGMA
  * table_info` and apply the `ADD COLUMN` only when it's absent. Idempotent and
- * safe to run on every boot; never drops or rewrites data.
+ * safe to run on every boot.
+ *
+ * It then drops any {@link REMOVED_COLUMNS} still present — the one case where
+ * this routine discards data, and only for columns whose owning feature is gone.
  */
 export async function ensureSchema(client: RawClient = prisma): Promise<void> {
   // WAL journal mode: with several live shells each flushing RunLog rows every
@@ -89,6 +105,21 @@ export async function ensureSchema(client: RawClient = prisma): Promise<void> {
       // Best-effort: a self-heal failure must never block boot. Surface it so a
       // genuinely broken DB is visible rather than silently degraded.
       process.stderr.write(`[narukami] ensureSchema(${table}.${column}) failed: ${String(err)}\n`);
+    }
+  }
+  // Finally, drop columns whose feature has been removed. Runs AFTER the additive
+  // pass so the two can never fight over the same column name.
+  for (const { table, column } of REMOVED_COLUMNS) {
+    try {
+      const cols = await client.$queryRawUnsafe<Array<{ name: string }>>(
+        `PRAGMA table_info("${table}")`,
+      );
+      if (!cols.some((c) => c.name === column)) continue; // already gone
+      await client.$executeRawUnsafe(`ALTER TABLE "${table}" DROP COLUMN "${column}"`);
+    } catch (err) {
+      process.stderr.write(
+        `[narukami] ensureSchema(drop ${table}.${column}) failed: ${String(err)}\n`,
+      );
     }
   }
 }

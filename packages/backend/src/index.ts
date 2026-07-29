@@ -20,7 +20,6 @@ import { godclaudeRoutes } from './routes/godclaude';
 import { vitalsRoutes } from './routes/vitals';
 import { pcStatsRoutes } from './routes/pcstats';
 import { statsLanRoutes } from './routes/statsLan';
-import { codeGraphRoutes } from './routes/codeGraph';
 import { armoryRoutes } from './routes/armory';
 import { shareRoutes } from './routes/share';
 import { reconcileRelay } from './services/mobileShare';
@@ -192,7 +191,6 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
   await app.register(vitalsRoutes);
   await app.register(pcStatsRoutes);
   await app.register(statsLanRoutes);
-  await app.register(codeGraphRoutes);
   await app.register(armoryRoutes);
   await app.register(shareRoutes);
 
