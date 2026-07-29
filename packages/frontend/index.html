@@ -2,7 +2,15 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover: env(safe-area-inset-*) is 0 without it (notched
+         phones); interactive-widget=resizes-content: Android Chrome 108+ stopped
+         resizing the layout viewport for the soft keyboard by default, which hid
+         the mobile terminal's key bar behind it (iOS ignores this — handled with
+         a visualViewport listener instead). -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
+    />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/favicon.svg" />
     <link rel="manifest" href="/manifest.webmanifest" />

@@ -16,11 +16,15 @@ const stage = path.join(desktop, 'dist-app');
 fs.rmSync(stage, { recursive: true, force: true });
 fs.mkdirSync(stage, { recursive: true });
 
-fs.copyFileSync(path.join(desktop, 'dist-main', 'main.js'), path.join(stage, 'main.js'));
-// The preload sits NEXT TO main.js in both dev and packaged layouts — main.ts
-// resolves it as path.join(__dirname, 'preload.js'), so it must be staged too
-// or the PC Stats window loses its pin bridge in the installer build.
-fs.copyFileSync(path.join(desktop, 'dist-main', 'preload.js'), path.join(stage, 'preload.js'));
+// Copy every compiled main-process module (main.js, preload.js, and any modules
+// they require like framingHeaders.js) so no runtime `require('./…')` is missing.
+// The preload in particular sits NEXT TO main.js in both dev and packaged
+// layouts — main.ts resolves it as path.join(__dirname, 'preload.js'), so it
+// must be staged or the PC Stats window loses its pin bridge in the installer.
+const mainOut = path.join(desktop, 'dist-main');
+for (const f of fs.readdirSync(mainOut)) {
+  if (f.endsWith('.js')) fs.copyFileSync(path.join(mainOut, f), path.join(stage, f));
+}
 // Tray icon, likewise resolved next to main.js in the packaged app.
 fs.copyFileSync(path.join(desktop, 'build', 'icon.png'), path.join(stage, 'tray-icon.png'));
 fs.writeFileSync(

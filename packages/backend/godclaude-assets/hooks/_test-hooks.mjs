@@ -2268,18 +2268,19 @@ expect('118d. godsite: `docker build .` → ALLOW (building is fine; only publis
   const bare = slHome('sl_bare', false); // no resolver module present → layer "not installed here"
   expect('310. statusline: layer not installed + no cwd → empty line (fail-safe, never throws)', statusline(bare, PAY, { GODMODE_ACTIVE: '1' }), '');
   expect('311. statusline: dormant (not armed) → faint god:off', statusline(home, PAY, { GODMODE_ACTIVE: '0' }), 'god:off');
-  // Statusline shows the Kami label "god:<Pseudonym> (<trigger>)" (user preference over trigger-only).
-  expect('312. statusline: armed + no mode → god:Amaterasu (general)', statusline(home, PAY, { GODMODE_ACTIVE: '1' }), 'god:Amaterasu (general)');
-  expect('313. statusline: armed + developer → god:Mahitotsu (goddev)', statusline(home, PAY, { GODMODE_ACTIVE: '1', GODMODE_MODE: 'developer' }), 'god:Mahitotsu (goddev)');
-  expect('314. statusline: armed + qa → god:Enma (godqa)', statusline(home, PAY, { GODMODE_ACTIVE: '1', GODMODE_MODE: 'qa' }), 'god:Enma (godqa)');
+  // Statusline shows the Kami label "<Pseudonym> (<Trigger>)" — pseudonym + capitalized mode, with NO
+  // "god:" prefix and NO autopilot marker (user preference; see the god-segment comment in the statusline).
+  expect('312. statusline: armed + no mode → Amaterasu (General)', statusline(home, PAY, { GODMODE_ACTIVE: '1' }), 'Amaterasu (General)');
+  expect('313. statusline: armed + developer → Mahitotsu (Goddev)', statusline(home, PAY, { GODMODE_ACTIVE: '1', GODMODE_MODE: 'developer' }), 'Mahitotsu (Goddev)');
+  expect('314. statusline: armed + qa → Enma (Godqa)', statusline(home, PAY, { GODMODE_ACTIVE: '1', GODMODE_MODE: 'qa' }), 'Enma (Godqa)');
   // multi-mode: arm developer + qa for THIS session via the CLI, then the bar joins them with ' + '.
   const cliEnv = { ...process.env, DET_HOOKS_HOME: home, GODMODE_MODES_DIR: MODES_DIR, GODMODE_MODE: '', CLAUDE_CODE_SESSION_ID: 'sl1' };
   try { execFileSync('node', [CLI, 'developer'], { encoding: 'utf8', env: cliEnv }); execFileSync('node', [CLI, 'add', 'qa'], { encoding: 'utf8', env: cliEnv }); } catch (_) {}
-  expect('315. statusline: armed + multi-mode → god:Mahitotsu (goddev) + Enma (godqa)', statusline(home, PAY, { GODMODE_ACTIVE: '1' }), 'god:Mahitotsu (goddev) + Enma (godqa)');
+  expect('315. statusline: armed + multi-mode → Mahitotsu (Goddev) + Enma (Godqa)', statusline(home, PAY, { GODMODE_ACTIVE: '1' }), 'Mahitotsu (Goddev) + Enma (Godqa)');
   // 315b. Back-ported feature coverage: a payload carrying cwd renders the 📁 dir segment alongside the
   // god label (the where/what line the richer live statusline added). Proves the back-port's dirSeg works.
   const withDir = statusline(home, { session_id: 'sl1', cwd: 'C:/work/sample' }, { GODMODE_ACTIVE: '1' });
-  expect('315b. statusline: cwd present → 📁 dir segment renders beside the god label', /📁 sample/.test(withDir) && /god:Mahitotsu \(goddev\) \+ Enma \(godqa\)/.test(withDir), true);
+  expect('315b. statusline: cwd present → 📁 dir segment renders beside the god label', /📁 sample/.test(withDir) && /Mahitotsu \(Goddev\) \+ Enma \(Godqa\)/.test(withDir), true);
 }
 
 // ---- proof-gate: SubagentStop derivation reaches WORKFLOW-spawned subagents ----

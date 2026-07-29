@@ -25,6 +25,7 @@ describe('ensureSchema (additive self-heal)', () => {
     // Old-schema tables: deliberately WITHOUT the self-healed columns.
     await c.$executeRawUnsafe('CREATE TABLE "Run" ("id" TEXT PRIMARY KEY, "kind" TEXT, "pid" INTEGER)');
     await c.$executeRawUnsafe('CREATE TABLE "Project" ("id" TEXT PRIMARY KEY, "name" TEXT)');
+    await c.$executeRawUnsafe('CREATE TABLE "RunCommand" ("id" TEXT PRIMARY KEY, "label" TEXT)');
     return c;
   }
 
@@ -38,12 +39,16 @@ describe('ensureSchema (additive self-heal)', () => {
     try {
       expect(await cols(c, 'Run')).not.toContain('claudeSessionId');
       expect(await cols(c, 'Project')).not.toContain('codeMapEmbed');
+      expect(await cols(c, 'RunCommand')).not.toContain('shell');
       await ensureSchema(c);
       expect(await cols(c, 'Run')).toContain('claudeSessionId'); // healed
+      expect(await cols(c, 'Run')).toContain('shell'); // healed
       expect(await cols(c, 'Project')).toContain('codeMapEmbed'); // healed
+      expect(await cols(c, 'RunCommand')).toContain('shell'); // healed
       await ensureSchema(c); // second boot must be a clean no-op, not an error
       expect((await cols(c, 'Run')).filter((n) => n === 'claudeSessionId')).toHaveLength(1);
       expect((await cols(c, 'Project')).filter((n) => n === 'codeMapEmbed')).toHaveLength(1);
+      expect((await cols(c, 'RunCommand')).filter((n) => n === 'shell')).toHaveLength(1);
       // new whole table created for installs that predate it
       const tbls = await c.$queryRawUnsafe<Array<{ name: string }>>(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='EodReport'",
@@ -58,11 +63,18 @@ describe('ensureSchema (additive self-heal)', () => {
     const c = await oldSchemaClient();
     try {
       await c.$executeRawUnsafe('ALTER TABLE "Run" ADD COLUMN "claudeSessionId" TEXT');
+      await c.$executeRawUnsafe('ALTER TABLE "Run" ADD COLUMN "shell" TEXT');
       await c.$executeRawUnsafe('ALTER TABLE "Project" ADD COLUMN "codeMapEmbed" BOOLEAN NOT NULL DEFAULT 0');
-      const before = { run: await cols(c, 'Run'), project: await cols(c, 'Project') };
+      await c.$executeRawUnsafe(`ALTER TABLE "RunCommand" ADD COLUMN "shell" TEXT NOT NULL DEFAULT 'powershell'`);
+      const before = {
+        run: await cols(c, 'Run'),
+        project: await cols(c, 'Project'),
+        runCommand: await cols(c, 'RunCommand'),
+      };
       await ensureSchema(c);
       expect(await cols(c, 'Run')).toEqual(before.run);
       expect(await cols(c, 'Project')).toEqual(before.project);
+      expect(await cols(c, 'RunCommand')).toEqual(before.runCommand);
     } finally {
       await c.$disconnect();
     }

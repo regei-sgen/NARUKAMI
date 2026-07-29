@@ -211,6 +211,29 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  // Set which Windows shell a command runs in (the PS/CMD toggle in the Runner).
+  app.patch<{ Params: { commandId: string }; Body: { shell?: string } }>(
+    '/api/commands/:commandId',
+    async (req, reply) => {
+      const shell = req.body?.shell;
+      if (shell !== 'powershell' && shell !== 'cmd') {
+        return reply.code(400).send({ error: "shell must be 'powershell' or 'cmd'." });
+      }
+      try {
+        const updated = await prisma.runCommand.update({
+          where: { id: req.params.commandId },
+          data: { shell },
+        });
+        return updated;
+      } catch (err) {
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025') {
+          return reply.code(404).send({ error: 'Command not found.' });
+        }
+        return reply.code(500).send({ error: 'Failed to update command.', detail: String(err) });
+      }
+    },
+  );
+
   // Delete a run command (detected or custom).
   app.delete<{ Params: { commandId: string } }>('/api/commands/:commandId', async (req, reply) => {
     try {

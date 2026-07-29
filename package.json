@@ -21,5 +21,15 @@
   },
   "devDependencies": {
     "concurrently": "^9.1.2"
+  },
+  "allowScripts": {
+    "@prisma/client@6.19.3": true,
+    "@prisma/engines@6.19.3": true,
+    "electron@33.4.11": true,
+    "esbuild@0.28.1": true,
+    "esbuild@0.21.5": true,
+    "esbuild@0.25.12": true,
+    "node-pty@1.1.0": true,
+    "prisma@6.19.3": true
   }
 }

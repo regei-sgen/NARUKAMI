@@ -76,10 +76,18 @@ function readJson<T>(file: string): T | null {
 }
 
 /** Version of the assets shipped with this build ('unknown' when unstated, null when absent). */
+// Memoized: vendored assets are immutable for the process lifetime, but the 5s
+// status poll called this every tick — 4 statSyncs + a readFileSync+parse per
+// call on the Fastify event loop for a constant.
+let vendoredVersionCache: string | null | undefined;
 export function vendoredVersion(): string | null {
-  const assets = locateAssets();
-  if (!assets) return null;
-  return readJson<VendorManifest>(path.join(assets, 'VENDOR.json'))?.version ?? 'unknown';
+  if (vendoredVersionCache === undefined) {
+    const assets = locateAssets();
+    vendoredVersionCache = assets
+      ? readJson<VendorManifest>(path.join(assets, 'VENDOR.json'))?.version ?? 'unknown'
+      : null;
+  }
+  return vendoredVersionCache;
 }
 
 interface InstallManifest {

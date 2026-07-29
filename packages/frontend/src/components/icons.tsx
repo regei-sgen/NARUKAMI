@@ -29,6 +29,7 @@ export type IconName =
   | 'plus'
   | 'dock'
   | 'external'
+  | 'qr'
   | 'chevron';
 
 /** Mount once at the app root; symbols are then addressable document-wide. */
@@ -124,6 +125,12 @@ export function IconDefs() {
       <symbol id="i-dock" viewBox="0 0 16 16">
         <rect x="1.8" y="2.6" width="12.4" height="10.8" rx="1.6" />
         <path d="M9.6 2.6v10.8" />
+      </symbol>
+      <symbol id="i-qr" viewBox="0 0 16 16">
+        <rect x="2" y="2" width="4.2" height="4.2" rx="0.6" />
+        <rect x="9.8" y="2" width="4.2" height="4.2" rx="0.6" />
+        <rect x="2" y="9.8" width="4.2" height="4.2" rx="0.6" />
+        <path d="M9.8 9.8h1.8v1.8M14 9.8v4.2M9.8 14h1.8" />
       </symbol>
     </svg>
   );

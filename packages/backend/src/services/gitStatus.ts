@@ -35,6 +35,42 @@ export interface GitDiffResult {
   ranges: DiffRange[];
 }
 
+// ── near-invariant fact caches ───────────────────────────────────────────────
+// The editor polls /git/status and /git/diff every ~3s; before these caches
+// each tick paid 3 extra git.exe spawns (rev-parse --show-prefix, rev-parse
+// --is-inside-work-tree, ls-files) re-verifying facts that essentially never
+// change: whether the project is a repo, its prefix inside it, and whether the
+// open file is tracked. Windows process creation is the expensive part, so the
+// steady-state poll now costs 1 spawn (status) + 1 (diff) instead of 5.
+// TTL-bounded so the rare real transitions (repo created/deleted, `git add` of
+// an open untracked file, a nested .git appearing) surface within seconds —
+// all consumers are visual decorations, never correctness.
+const FACT_TTL_MS = 15_000;
+const FACT_CACHE_MAX = 1000; // safety bound; one tracked entry per opened file
+
+interface FactEntry<T> {
+  v: T;
+  at: number;
+}
+const prefixCache = new Map<string, FactEntry<string>>(); // projectPath → show-prefix
+const trackedCache = new Map<string, FactEntry<boolean>>(); // projectPath\0relPath → tracked
+
+function factGet<T>(map: Map<string, FactEntry<T>>, key: string, now: number): T | null {
+  const hit = map.get(key);
+  return hit && now - hit.at < FACT_TTL_MS ? hit.v : null;
+}
+
+function factSet<T>(map: Map<string, FactEntry<T>>, key: string, v: T, at: number): void {
+  if (map.size >= FACT_CACHE_MAX) map.clear();
+  map.set(key, { v, at });
+}
+
+/** Drop all cached repo facts (tests / explicit invalidation). */
+export function clearGitFactCaches(): void {
+  prefixCache.clear();
+  trackedCache.clear();
+}
+
 async function git(projectPath: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync('git', ['-C', projectPath, ...args], {
     timeout: GIT_TIMEOUT_MS,
@@ -138,12 +174,18 @@ export function parseDiffRanges(raw: string): DiffRange[] {
  * drop changes outside the project so the paths line up with the file tree.
  */
 export async function gitStatus(projectPath: string): Promise<GitStatusResult> {
-  let prefix: string;
-  try {
-    // Doubles as the repo check: throws outside a work tree.
-    prefix = (await git(projectPath, ['rev-parse', '--show-prefix'])).trim();
-  } catch {
-    return { isRepo: false, files: [] };
+  const now = Date.now();
+  let prefix = factGet(prefixCache, projectPath, now);
+  const fromCache = prefix !== null;
+  if (prefix === null) {
+    try {
+      // Doubles as the repo check: throws outside a work tree.
+      prefix = (await git(projectPath, ['rev-parse', '--show-prefix'])).trim();
+      factSet(prefixCache, projectPath, prefix, now);
+    } catch {
+      prefixCache.delete(projectPath);
+      return { isRepo: false, files: [] };
+    }
   }
 
   let raw: string;
@@ -155,6 +197,12 @@ export async function gitStatus(projectPath: string): Promise<GitStatusResult> {
       '--untracked-files=all',
     ]);
   } catch {
+    // A cached prefix may be the stale fact here (repo deleted / re-rooted
+    // since it was learned) — drop it and redo the tick from scratch so the
+    // isRepo answer stays truthful. A fresh-prefix failure is a plain status
+    // error (huge tree timeout etc.): report "repo, no data" as before.
+    prefixCache.delete(projectPath);
+    if (fromCache) return gitStatus(projectPath);
     return { isRepo: true, files: [] };
   }
 
@@ -178,17 +226,29 @@ export async function gitDiffRanges(
   projectPath: string,
   relPath: string,
 ): Promise<GitDiffResult> {
-  try {
-    await git(projectPath, ['rev-parse', '--is-inside-work-tree']);
-  } catch {
-    return { isRepo: false, tracked: false, ranges: [] };
+  const now = Date.now();
+  // Repo-ness rides the same cache as gitStatus's prefix (the status poll fills
+  // it every tick, and any non-null prefix entry proves we're in a work tree).
+  if (factGet(prefixCache, projectPath, now) === null) {
+    try {
+      const prefix = (await git(projectPath, ['rev-parse', '--show-prefix'])).trim();
+      factSet(prefixCache, projectPath, prefix, now);
+    } catch {
+      prefixCache.delete(projectPath);
+      return { isRepo: false, tracked: false, ranges: [] };
+    }
   }
 
-  let tracked = true;
-  try {
-    await git(projectPath, ['ls-files', '--error-unmatch', '--', relPath]);
-  } catch {
-    tracked = false;
+  const trackedKey = `${projectPath}\0${relPath}`;
+  let tracked = factGet(trackedCache, trackedKey, now);
+  if (tracked === null) {
+    tracked = true;
+    try {
+      await git(projectPath, ['ls-files', '--error-unmatch', '--', relPath]);
+    } catch {
+      tracked = false;
+    }
+    factSet(trackedCache, trackedKey, tracked, now);
   }
   if (!tracked) return { isRepo: true, tracked: false, ranges: [] };
 

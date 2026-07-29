@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
+import { onWindowVisibility, windowHidden } from '../lib/visibility';
 import type {
   CodeChanges,
   CodeEngineStatus,
@@ -289,10 +290,19 @@ export function CodeMap({ project, onChanged }: Props) {
       }
     };
     void tick();
-    const id = setInterval(tick, 2500);
+    // Each tick spawns a `git status` backend-side — skip it while the window
+    // is hidden (backgroundThrottling:false means the interval itself never
+    // slows down) and catch up immediately on restore.
+    const id = setInterval(() => {
+      if (!windowHidden()) void tick();
+    }, 2500);
+    const offVis = onWindowVisibility((hidden) => {
+      if (!hidden) void tick();
+    });
     return () => {
       alive = false;
       clearInterval(id);
+      offVis();
     };
   }, [graph, project.id]);
 

@@ -1,4 +1,5 @@
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { onWindowVisibility, windowHidden } from '../../lib/visibility';
 
 /**
  * GraphFlat — a dependency-free, interactive 2D force-directed graph. Unlike
@@ -440,7 +441,8 @@ export function GraphFlat<T extends FlatNode = FlatNode>({
         draggingNodeRef.current !== null ||
         panningRef.current;
       const glowOnly = !interacting && !!highlight && highlight.size > 0;
-      if (interacting) raf = requestAnimationFrame(step);
+      if (windowHidden()) runningRef.current = false; // park; visibility effect wakes us
+      else if (interacting) raf = requestAnimationFrame(step);
       else if (glowOnly)
         glowTimer = setTimeout(() => {
           glowTimer = null;
@@ -499,6 +501,15 @@ export function GraphFlat<T extends FlatNode = FlatNode>({
   useEffect(() => {
     wakeRef.current?.();
   }, [highlightIds]);
+
+  // Parked-while-hidden loops resume when the window comes back.
+  useEffect(
+    () =>
+      onWindowVisibility((hidden) => {
+        if (!hidden) wakeRef.current?.();
+      }),
+    [],
+  );
 
   const localMouse = (ev: React.PointerEvent): { x: number; y: number } => {
     const rect = (ev.currentTarget as HTMLElement).getBoundingClientRect();

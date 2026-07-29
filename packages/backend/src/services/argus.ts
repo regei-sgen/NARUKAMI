@@ -85,7 +85,10 @@ export interface GodStats {
 }
 
 export function readSnapshot(): Promise<GodSnapshot | null> {
-  return cached('snapshot', 2500, () => runGodJson<GodSnapshot>('godmonitor.mjs'));
+  // 10s, matching the embedded path (services/godclaude.ts): each miss spawns a
+  // full Electron-as-node godmonitor.mjs run, which is expensive on Windows —
+  // a monitoring dashboard doesn't need sub-10s freshness.
+  return cached('snapshot', 10_000, () => runGodJson<GodSnapshot>('godmonitor.mjs'));
 }
 
 export function readStats(): Promise<GodStats | null> {
@@ -380,10 +383,13 @@ export function buildMemoryGraph(notes: MemoryNodeRaw[]): MemoryGraph {
 
 const memGraphCache = { t: 0, dir: '', data: null as MemoryGraph | null };
 
-/** Walk ~/.claude/projects/<proj>/memory/*.md and synthesize the graph. Read-only, 30s cached (per dir). */
+/** Walk ~/.claude/projects/<proj>/memory/*.md and synthesize the graph. Read-only, 90s cached (per dir). */
 export async function collectMemoryGraph(now: number = Date.now()): Promise<MemoryGraph> {
   const dir = claudeDir();
-  if (memGraphCache.data && memGraphCache.dir === dir && now - memGraphCache.t < 30_000) {
+  // TTL must comfortably exceed the frontend's 30s poll — at exactly 30s every
+  // poll missed and re-walked every project's memory dir for a graph that
+  // changes a few times a day.
+  if (memGraphCache.data && memGraphCache.dir === dir && now - memGraphCache.t < 90_000) {
     return memGraphCache.data;
   }
   const root = path.join(dir, 'projects');
