@@ -10,12 +10,20 @@ const h = vi.hoisted(() => ({
   runFindMany: vi.fn(),
   collectActiveProjects: vi.fn(),
   generateEodReport: vi.fn(),
+  summarizeSession: vi.fn(),
+  collectSessionsForRange: vi.fn(),
 }));
 
 vi.mock('../db', () => ({
   prisma: {
     project: { findMany: h.projectFindMany },
     run: { findMany: h.runFindMany },
+    // The per-session digest cache lives in AppSetting.
+    appSetting: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      upsert: vi.fn().mockResolvedValue({}),
+      deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+    },
     eodReport: {
       upsert: h.upsert,
       findMany: vi.fn().mockResolvedValue([]),
@@ -24,6 +32,21 @@ vi.mock('../db', () => ({
     },
   },
 }));
+
+// Keep the route hermetic: without this it would stream the machine's REAL
+// ~/.claude transcripts (tens of MB) and try to spawn `claude -p` per session.
+vi.mock('../services/eodSessions', async () => {
+  // Only the filesystem-touching collector is stubbed; isSubstantiveSession and
+  // sessionSubstance stay REAL so the route's stub-filtering is genuinely tested.
+  const actual = await vi.importActual<typeof import('../services/eodSessions')>(
+    '../services/eodSessions',
+  );
+  return {
+    ...actual,
+    collectSessionsForRange: h.collectSessionsForRange,
+    sessionToPromptText: (r: { sessionId: string }) => `SESSION ${r.sessionId}`,
+  };
+});
 
 vi.mock('../services/eodActivity', () => ({
   collectActiveProjects: h.collectActiveProjects,
@@ -35,7 +58,7 @@ vi.mock('../services/eodActivity', () => ({
 
 vi.mock('../services/analyzer', () => {
   class AnalyzerError extends Error {}
-  return { generateEodReport: h.generateEodReport, AnalyzerError };
+  return { generateEodReport: h.generateEodReport, summarizeSession: h.summarizeSession, AnalyzerError };
 });
 
 vi.mock('../services/gitLog', () => ({
@@ -71,6 +94,101 @@ beforeEach(() => {
     { name: 'Demo', path: 'C:/repo/demo', registered: true, projectId: 'p1', sessions: 1, runs: 0, commits: 2 },
   ]);
   h.generateEodReport.mockReset().mockResolvedValue('## EOD -- July 1–11, 2026\n### Demo\n-   Did stuff');
+  // Two SUBSTANTIVE sessions for the selected project, so the digest layer has
+  // work to do. These need the real record shape — the route now filters on
+  // files/tools/prompts/elapsed to drop the one-shot stubs that headless
+  // `claude -p` calls leave behind.
+  const session = (id: string, endedAt: string) => ({
+    sessionId: id,
+    file: `${id}.jsonl`,
+    cwd: 'C:/repo/demo',
+    title: `title ${id}`,
+    gitBranch: 'main',
+    startedAt: endedAt,
+    endedAt,
+    bytes: 1000,
+    userPrompts: ['do the thing', 'and the other thing'],
+    assistantNotes: ['did it'],
+    tools: [{ name: 'Edit', count: 12 }],
+    files: ['src/a.ts', 'src/b.ts'],
+    activeMs: 20 * 60_000,
+    truncated: false,
+  });
+  h.collectSessionsForRange.mockReset().mockResolvedValue(
+    new Map([
+      ['c:/repo/demo', [session('s1', '2026-07-01T10:00:00Z'), session('s2', '2026-07-01T18:00:00Z')]],
+    ]),
+  );
+  h.summarizeSession.mockReset().mockImplementation((_cwd, _name, text: string) => `digest of ${text}`);
+});
+
+describe('POST /api/eod/report — session digest layer', () => {
+  it('digests EACH session, then hands the digests to the roll-up', async () => {
+    const r = await app.inject({
+      method: 'POST',
+      url: '/api/eod/report',
+      payload: { from: '2026-07-01', to: '2026-07-01', paths: ['C:/repo/demo'] },
+    });
+    expect(r.statusCode).toBe(201);
+
+    // Layer 1 ran once per session…
+    expect(h.summarizeSession).toHaveBeenCalledTimes(2);
+    // …and layer 2 received those digests, in order, with the real session count.
+    const projects = h.generateEodReport.mock.calls[0][2] as Array<{
+      sessionDigests: string[];
+      sessions: number;
+      sessionsOmitted: number;
+    }>;
+    expect(projects[0].sessions).toBe(2);
+    expect(projects[0].sessionsOmitted).toBe(0);
+    expect(projects[0].sessionDigests).toEqual(['digest of SESSION s1', 'digest of SESSION s2']);
+  });
+
+  it('skips the one-shot stubs that report generation itself leaves behind', async () => {
+    // 1 real session + 3 headless stubs (a prompt, no files, no elapsed time) —
+    // the shape `claude -p` writes, including this report's own digest calls.
+    const stub = (id: string) => ({
+      sessionId: id, file: `${id}.jsonl`, cwd: 'C:/repo/demo', title: null, gitBranch: null,
+      startedAt: '2026-07-01T23:00:00Z', endedAt: '2026-07-01T23:00:00Z', bytes: 100,
+      userPrompts: ['summarize this session'], assistantNotes: [], tools: [{ name: 'Read', count: 1 }],
+      files: [], activeMs: 0, truncated: false,
+    });
+    const real = {
+      sessionId: 'real', file: 'real.jsonl', cwd: 'C:/repo/demo', title: 'Real work', gitBranch: 'main',
+      startedAt: '2026-07-01T09:00:00Z', endedAt: '2026-07-01T17:00:00Z', bytes: 5000,
+      userPrompts: ['build the thing'], assistantNotes: ['built it'],
+      tools: [{ name: 'Edit', count: 40 }], files: ['src/a.ts'], activeMs: 60 * 60_000, truncated: false,
+    };
+    h.collectSessionsForRange.mockResolvedValue(
+      new Map([['c:/repo/demo', [real, stub('n1'), stub('n2'), stub('n3')]]]),
+    );
+
+    const r = await app.inject({
+      method: 'POST',
+      url: '/api/eod/report',
+      payload: { from: '2026-07-01', to: '2026-07-01', paths: ['C:/repo/demo'] },
+    });
+    expect(r.statusCode).toBe(201);
+    // Only the real session was digested — the stubs never reached Claude.
+    expect(h.summarizeSession).toHaveBeenCalledTimes(1);
+    const projects = h.generateEodReport.mock.calls[0][2] as Array<{ sessions: number; sessionsOmitted: number }>;
+    expect(projects[0].sessions).toBe(1); // the count reported is of REAL sessions
+    expect(projects[0].sessionsOmitted).toBe(0);
+  });
+
+  it('a failed session digest is skipped, not fatal — the report still generates', async () => {
+    h.summarizeSession
+      .mockRejectedValueOnce(new Error('claude died'))
+      .mockResolvedValueOnce('digest of SESSION s2');
+    const r = await app.inject({
+      method: 'POST',
+      url: '/api/eod/report',
+      payload: { from: '2026-07-01', to: '2026-07-01', paths: ['C:/repo/demo'] },
+    });
+    expect(r.statusCode).toBe(201);
+    const projects = h.generateEodReport.mock.calls[0][2] as Array<{ sessionDigests: string[] }>;
+    expect(projects[0].sessionDigests).toEqual(['digest of SESSION s2']);
+  });
 });
 
 describe('GET /api/eod/active (range)', () => {

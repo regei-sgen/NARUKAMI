@@ -68,6 +68,14 @@ if (shareToken && typeof window.ClipboardItem === 'undefined') {
   };
 }
 
+// Mark the document for the phone route. The mobile view is the one entry point
+// whose root box is sized to the VISUAL viewport (100dvh + the visualViewport
+// pin) while html/body stay at 100% of the LAYOUT viewport — on Android Chrome
+// those differ by the URL bar's height, which left the page scrollable by that
+// much. The class lets styles.css lock this route's document without touching
+// the desktop app, the popout or the PC Stats window.
+if (shareToken && shareRun) document.documentElement.classList.add('mobile-share');
+
 const view =
   shareToken && shareRun ? (
     <MobileTerminal runId={shareRun} shareToken={shareToken} />

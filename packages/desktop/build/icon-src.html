@@ -2,8 +2,8 @@
 <meta charset="utf-8">
 <!--
   NARUKAMI app icon source. Render at 1024x1024 to build/icon.png with
-  `node scripts/render-icon.mjs`; electron-builder turns that into the .ico for
-  the taskbar, tray and installer.
+  `npm run icon -w desktop`; electron-builder turns that into the .ico for the
+  taskbar, tray and installer.
 
   Glass treatment, built to survive downscaling to 16px:
    - the tile is a lit slab (bright top edge, dark base) so the icon keeps a
@@ -12,15 +12,26 @@
      underneath, which is what reads as "glass" rather than flat colour,
    - every effect is broad. Fine detail turns to mush at tray size, so there is
      deliberately none.
+
+  TRANSPARENCY: the slab is the whole icon — nothing is painted outside its
+  rounded rect, so the corners stay clear and the icon doesn't sit in a black
+  square on the taskbar/desktop. Two things must hold together or the box comes
+  straight back:
+   - the depth gradient (#bg) is painted INTO the slab rect, never full-bleed
+     across the 1024 canvas. It is what makes the slab read as dark glass, so it
+     can't simply be dropped either — without it the slab is nearly invisible,
+   - the capture window in scripts/render-icon.mjs must stay `transparent: true`,
+     or capturePage() composites the alpha away again.
 -->
 <style>
-  html, body { margin: 0; padding: 0; }
-  body { width: 1024px; height: 1024px; background: #060608; overflow: hidden; }
+  html, body { margin: 0; padding: 0; background: transparent; }
+  body { width: 1024px; height: 1024px; overflow: hidden; }
   svg { display: block; }
 </style>
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
-    <!-- backdrop: light pooled behind the bolt, falling off to near black -->
+    <!-- slab depth: light pooled behind the bolt, falling off to near black.
+         Painted into the slab only — full-bleed is what made it a black box. -->
     <radialGradient id="bg" cx="0.5" cy="0.38" r="0.78">
       <stop offset="0" stop-color="#191921"/>
       <stop offset="1" stop-color="#060608"/>
@@ -91,9 +102,9 @@
     <clipPath id="tileClip"><rect x="72" y="72" width="880" height="880" rx="196"/></clipPath>
   </defs>
 
-  <rect x="0" y="0" width="1024" height="1024" fill="url(#bg)"/>
-
-  <!-- glass slab -->
+  <!-- glass slab: depth base, then the glass gradient, sheen and lit rim.
+       Everything from here on is clipped to (or drawn within) the slab. -->
+  <rect x="72" y="72" width="880" height="880" rx="196" fill="url(#bg)"/>
   <rect x="72" y="72" width="880" height="880" rx="196" fill="url(#tile)"/>
   <g clip-path="url(#tileClip)">
     <!-- sheen: a wide ellipse hanging off the top edge -->
@@ -102,14 +113,17 @@
   <rect x="72" y="72" width="880" height="880" rx="196" fill="none"
         stroke="url(#rim)" stroke-width="10"/>
 
-  <!-- bolt -->
-  <use href="#boltPath" filter="url(#drop)" fill="#000"/>
-  <use href="#boltPath" fill="url(#bolt)" filter="url(#glow)"/>
-  <g clip-path="url(#boltClip)">
-    <rect x="0" y="96" width="1024" height="832" fill="url(#gloss)"/>
-    <rect x="0" y="96" width="1024" height="832" fill="url(#bounce)"/>
+  <!-- bolt. Clipped to the slab so the glow can't bleed into the transparent
+       corners and re-introduce a faint square. -->
+  <g clip-path="url(#tileClip)">
+    <use href="#boltPath" filter="url(#drop)" fill="#000"/>
+    <use href="#boltPath" fill="url(#bolt)" filter="url(#glow)"/>
+    <g clip-path="url(#boltClip)">
+      <rect x="0" y="96" width="1024" height="832" fill="url(#gloss)"/>
+      <rect x="0" y="96" width="1024" height="832" fill="url(#bounce)"/>
+    </g>
+    <!-- crisp lit edge along the top-left of the bolt -->
+    <use href="#boltPath" fill="none" stroke="#ffd7db" stroke-opacity="0.55" stroke-width="7"
+         stroke-linejoin="round" clip-path="url(#boltClip)"/>
   </g>
-  <!-- crisp lit edge along the top-left of the bolt -->
-  <use href="#boltPath" fill="none" stroke="#ffd7db" stroke-opacity="0.55" stroke-width="7"
-       stroke-linejoin="round" clip-path="url(#boltClip)"/>
 </svg>

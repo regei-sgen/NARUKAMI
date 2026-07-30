@@ -3,7 +3,12 @@
        kept as SVG so it stays crisp in a browser tab and as a maskable PWA icon.
        Keep the two in sync when the design changes. The slab sits tighter to the
        edge than the 1024 version because a favicon has far fewer pixels to spend
-       on margin. -->
+       on margin.
+
+       TRANSPARENCY: the slab is the whole icon — the depth gradient (#fbg) is
+       painted INTO the rounded rect, never full-bleed across the 32x32 canvas.
+       Full-bleed put an opaque near-black square behind the glass, which showed
+       up as a box around the mark on any tab strip that isn't near-black. -->
   <defs>
     <radialGradient id="fbg" cx="0.5" cy="0.38" r="0.78">
       <stop offset="0" stop-color="#191921"/>
@@ -48,7 +53,7 @@
     <clipPath id="ftc"><rect x="1" y="1" width="30" height="30" rx="7"/></clipPath>
   </defs>
 
-  <rect width="32" height="32" fill="url(#fbg)"/>
+  <rect x="1" y="1" width="30" height="30" rx="7" fill="url(#fbg)"/>
   <rect x="1" y="1" width="30" height="30" rx="7" fill="url(#ftile)"/>
   <g clip-path="url(#ftc)">
     <ellipse cx="16" cy="4.4" rx="21" ry="11.5" fill="url(#fsheen)"/>
@@ -56,10 +61,13 @@
   <rect x="1" y="1" width="30" height="30" rx="7" fill="none"
         stroke="url(#frim)" stroke-width=".9"/>
 
-  <use href="#fb" fill="url(#fbolt)" filter="url(#fglow)"/>
-  <g clip-path="url(#fbc)">
-    <rect x="0" y="3" width="32" height="26" fill="url(#fgloss)"/>
+  <!-- bolt, clipped to the slab so the glow can't bleed into the clear corners -->
+  <g clip-path="url(#ftc)">
+    <use href="#fb" fill="url(#fbolt)" filter="url(#fglow)"/>
+    <g clip-path="url(#fbc)">
+      <rect x="0" y="3" width="32" height="26" fill="url(#fgloss)"/>
+    </g>
+    <use href="#fb" fill="none" stroke="#ffd7db" stroke-opacity=".55" stroke-width=".25"
+         stroke-linejoin="round" clip-path="url(#fbc)"/>
   </g>
-  <use href="#fb" fill="none" stroke="#ffd7db" stroke-opacity=".55" stroke-width=".25"
-       stroke-linejoin="round" clip-path="url(#fbc)"/>
 </svg>

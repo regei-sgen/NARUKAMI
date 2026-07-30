@@ -76,14 +76,22 @@ describe('request + api methods', () => {
     expect(JSON.parse(init.body)).toEqual({ path: 'C:/proj' });
   });
 
-  it('openClaude posts the effort level', async () => {
+  it('openClaude omits the effort so the configured default applies', async () => {
     const fetchMock = vi.fn().mockResolvedValue(makeResponse(201, '{"runId":"r1","pid":9}'));
     vi.stubGlobal('fetch', fetchMock);
 
     await apiMod.api.openClaude('p1');
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe('http://127.0.0.1:4000/api/projects/p1/claude');
-    expect(JSON.parse(init.body)).toEqual({ effort: 'ultracode' });
+    expect(JSON.parse(init.body)).toEqual({});
+  });
+
+  it('openClaude posts an explicit effort override', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(makeResponse(201, '{"runId":"r1","pid":9}'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await apiMod.api.openClaude('p1', { effort: 'high' });
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ effort: 'high' });
   });
 
   it('run posts the commandId', async () => {

@@ -9,7 +9,17 @@ import {
   useState,
 } from 'react';
 import { api, hasToken } from './api';
-import type { ActiveRun, Project, RestoredRun, RunCommand, RunStatus, Toast, UiSettings } from './types';
+import type {
+  ActiveRun,
+  AppPrefs,
+  Project,
+  RestoredRun,
+  RunCommand,
+  RunStatus,
+  Toast,
+  UiSettings,
+  View,
+} from './types';
 import { ProjectSidebar } from './components/ProjectSidebar';
 import { ProjectPanel } from './components/ProjectPanel';
 
@@ -25,6 +35,7 @@ import { EodView } from './components/EodView';
 import { SgaRelease } from './components/SgaRelease';
 import { ArgusPanoptes } from './components/argus/ArgusPanoptes';
 import { Armory } from './components/Armory';
+import { Settings } from './components/Settings';
 import { BrowserTab } from './components/BrowserTab';
 import { DEFAULT_DEVICE_IDS, DEVICE_PRESETS } from './lib/browserView';
 import { TerminalTab } from './components/TerminalTab';
@@ -54,9 +65,9 @@ export default function App() {
   // mounted (see the term-stack below) so ptys survive project switches; this
   // only controls which one is visible for the currently selected project.
   const [activeTabByProject, setActiveTabByProject] = useState<Record<string, string>>({});
-  // Views are peer tabs (Runner / Editor / EOD / Argus / Armory). Argus is a
-  // global read-only monitor; the rest are scoped to the selected project.
-  const [view, setView] = useState<'runner' | 'editor' | 'eod' | 'release' | 'argus' | 'armory' | 'browser'>('runner');
+  // Views are peer tabs (Runner / Editor / EOD / Argus / Armory / Settings).
+  // Argus, Armory and Settings are global; the rest are scoped to the selection.
+  const [view, setView] = useState<View>('runner');
   // Terminal dock: docked bottom (resizable height) or right (resizable width),
   // plus minimize. All persisted server-side.
   const [dockPosition, setDockPosition] = useState<'bottom' | 'right'>('bottom');
@@ -75,6 +86,15 @@ export default function App() {
     else delete document.documentElement.dataset.theme;
     localStorage.setItem('narukami-theme', theme);
   }, [theme]);
+  // Notification prefs (Settings tab). Persisted server-side under 'prefs';
+  // every field defaults ON, which is the behaviour before the setting existed.
+  const [prefs, setPrefs] = useState<AppPrefs>({});
+  // Read via a ref by the stable pushToast callback, so toggling a pref takes
+  // effect immediately without re-creating the terminal event handlers.
+  const prefsRef = useRef<AppPrefs>({});
+  useEffect(() => {
+    prefsRef.current = prefs;
+  }, [prefs]);
   // Last-open editor file per project (restored on reopen).
   const [editorFileByProject, setEditorFileByProject] = useState<Record<string, string>>({});
   // Browser view: last committed preview URL per project (persisted) and the
@@ -162,9 +182,11 @@ export default function App() {
           ui.view === 'release' ||
           ui.view === 'argus' ||
           ui.view === 'armory' ||
-          ui.view === 'browser'
+          ui.view === 'browser' ||
+          ui.view === 'settings'
         )
           setView(ui.view);
+        if (ws.settings.prefs && typeof ws.settings.prefs === 'object') setPrefs(ws.settings.prefs);
         if (ui.activeTabByProject) setActiveTabByProject(ui.activeTabByProject);
         if (ui.editorFileByProject) setEditorFileByProject(ui.editorFileByProject);
         if (ui.browserUrlByProject) setBrowserUrlByProject(ui.browserUrlByProject);
@@ -221,6 +243,16 @@ export default function App() {
     browserUrlByProject,
     browserDevices,
   ]);
+
+  // Notification prefs write through immediately (they're deliberate clicks, not
+  // a stream of layout changes, so there's nothing to debounce).
+  const updatePrefs = useCallback((patch: AppPrefs) => {
+    setPrefs((cur) => {
+      const next = { ...cur, ...patch };
+      void api.saveSettings({ prefs: next }).catch(() => undefined);
+      return next;
+    });
+  }, []);
 
   // Drag the dock's inner edge to resize it. Docked bottom → drag the top edge
   // to change height (up = taller); docked right → drag the left edge to change
@@ -637,13 +669,17 @@ export default function App() {
         focused: typeof document === 'undefined' ? true : document.hasFocus(),
         visible: typeof document === 'undefined' ? true : document.visibilityState === 'visible',
       });
-      if (inApp) {
+      // Both channels are individually switchable in Settings → Notifications.
+      // Unset = on, so an install that predates the setting behaves as before.
+      if (inApp && prefsRef.current.inAppToasts !== false) {
         setToasts((cur) => [...cur.filter((x) => x.id !== t.id), t].slice(-4));
         const prev = toastTimers.current[t.id];
         if (prev) clearTimeout(prev);
         toastTimers.current[t.id] = setTimeout(() => dismissToast(t.id), 10000);
       }
-      fireNativeNotification(t, () => focusRun(t));
+      if (prefsRef.current.desktopNotifications !== false) {
+        fireNativeNotification(t, () => focusRun(t));
+      }
     },
     [dismissToast, focusRun],
   );
@@ -703,6 +739,7 @@ export default function App() {
       // identical to "done" on a timer — a guaranteed false-positive source.
       // Those still get the reliable finish toast when the process actually exits.
       if (run.kind !== 'claude') return;
+      if (prefsRef.current.taskDoneNotifications === false) return;
       taskSeqRef.current += 1;
       pushToast(taskToast(run, taskSeqRef.current));
     },
@@ -746,6 +783,28 @@ export default function App() {
         <line x1="6" y1="2.5" x2="6" y2="13.5" stroke="currentColor" strokeWidth="1.3" />
       </svg>
     </button>
+  );
+
+  // Global (no project key) and reachable even with nothing registered — a fresh
+  // install may need to configure its AI credential before adding a project.
+  const settingsView = (
+    <Settings
+      themes={THEMES}
+      theme={theme}
+      onThemeChange={setTheme}
+      dockPosition={dockPosition}
+      onDockPositionChange={setDockPosition}
+      dockHeight={dockHeight}
+      dockWidth={dockWidth}
+      onDockSizeReset={() => {
+        setDockHeight(320);
+        setDockWidth(480);
+      }}
+      sidebarCollapsed={sidebarCollapsed}
+      onSidebarCollapsedChange={setSidebarCollapsed}
+      prefs={prefs}
+      onPrefsChange={updatePrefs}
+    />
   );
 
   return (
@@ -830,6 +889,12 @@ export default function App() {
                   >
                     Arsenal
                   </button>
+                  <button
+                    className={`vs-btn ${view === 'settings' ? 'active' : ''}`}
+                    onClick={() => confirmLeaveEditor() && setView('settings')}
+                  >
+                    Settings
+                  </button>
                 </div>
                 {view === 'runner' ? (
                   <div className="runner-scroll">
@@ -871,6 +936,8 @@ export default function App() {
                   <div className="runner-scroll">
                     <Armory />
                   </div>
+                ) : view === 'settings' ? (
+                  <div className="runner-scroll">{settingsView}</div>
                 ) : view === 'browser' ? (
                   <BrowserTab
                     key={selected.id}
@@ -895,8 +962,20 @@ export default function App() {
               </>
             ) : (
               <>
-                <div className="view-switch">{sidebarToggle}</div>
-                <div className="empty">Select or add a project to get started.</div>
+                <div className="view-switch">
+                  {sidebarToggle}
+                  <button
+                    className={`vs-btn ${view === 'settings' ? 'active' : ''}`}
+                    onClick={() => setView('settings')}
+                  >
+                    Settings
+                  </button>
+                </div>
+                {view === 'settings' ? (
+                  <div className="runner-scroll">{settingsView}</div>
+                ) : (
+                  <div className="empty">Select or add a project to get started.</div>
+                )}
               </>
             )}
           </main>

@@ -32,6 +32,16 @@ const FIT_FONT = 13; // comfortable size used when the phone claims the grid
 
 type Approval = 'pending' | 'approved' | 'denied';
 
+/** Live cell height in CSS px, or a ratio estimate before the first render. */
+function cellHeightPx(term: Terminal): number {
+  const core = (term as unknown as {
+    _core?: { _renderService?: { dimensions?: { css?: { cell?: { height: number } } } } };
+  })._core;
+  const h = core?._renderService?.dimensions?.css?.cell?.height;
+  if (typeof h === 'number' && h > 0) return h;
+  return Math.max(1, (term.options.fontSize ?? FIT_FONT) * CELL_H_RATIO);
+}
+
 export function MobileTerminal({ runId, shareToken }: { runId: string; shareToken: string }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -351,6 +361,68 @@ export function MobileTerminal({ runId, shareToken }: { runId: string; shareToke
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId, shareToken, error, approval]);
+
+  // Scrollback from the WHOLE surface, not just the rows.
+  //
+  // Mirroring the desktop's grid on a phone is width-limited, so the font shrinks
+  // until ~80 columns fit and the resulting block of rows fills only the TOP of
+  // the surface — measured at 309px of a 741px surface on a Pixel-class screen.
+  // The remaining ~58% is empty background with no scroll handler, so a swipe
+  // there did nothing and the history was reachable only if your thumb happened
+  // to land on the rows. Forward wheel/touch from the whole surface into the
+  // terminal's scrollback. Gestures that begin on xterm's own viewport are left
+  // alone — it scrolls those natively (verified with trusted touch input).
+  useEffect(() => {
+    const surface = containerRef.current;
+    if (!surface || error || approval !== 'approved') return;
+
+    const nativelyHandled = (target: EventTarget | null): boolean =>
+      target instanceof Element && target.closest('.xterm-viewport') !== null;
+
+    const onWheel = (e: WheelEvent): void => {
+      const term = termRef.current;
+      if (!term || nativelyHandled(e.target)) return;
+      const raw = e.deltaY / cellHeightPx(term);
+      // Never round a real gesture down to zero lines.
+      term.scrollLines(raw > 0 ? Math.max(1, Math.round(raw)) : Math.min(-1, Math.round(raw)));
+      e.preventDefault();
+    };
+
+    // Track the last Y and consume it in whole lines, so a slow drag still moves
+    // and a fast one doesn't drift out of sync with the rendered rows.
+    let lastY: number | null = null;
+    const onTouchStart = (e: TouchEvent): void => {
+      lastY = nativelyHandled(e.target) ? null : e.touches[0]?.clientY ?? null;
+    };
+    const onTouchMove = (e: TouchEvent): void => {
+      const term = termRef.current;
+      const y = e.touches[0]?.clientY;
+      if (!term || lastY === null || y === undefined) return;
+      const cell = cellHeightPx(term);
+      // Dragging DOWN reveals older output, which is a scroll UP in xterm terms.
+      const lines = Math.trunc((lastY - y) / cell);
+      if (lines === 0) return;
+      term.scrollLines(lines);
+      lastY -= lines * cell;
+      e.preventDefault();
+    };
+    const endTouch = (): void => {
+      lastY = null;
+    };
+
+    surface.addEventListener('wheel', onWheel, { passive: false });
+    surface.addEventListener('touchstart', onTouchStart, { passive: true });
+    surface.addEventListener('touchmove', onTouchMove, { passive: false });
+    surface.addEventListener('touchend', endTouch, { passive: true });
+    surface.addEventListener('touchcancel', endTouch, { passive: true });
+    return () => {
+      surface.removeEventListener('wheel', onWheel);
+      surface.removeEventListener('touchstart', onTouchStart);
+      surface.removeEventListener('touchmove', onTouchMove);
+      surface.removeEventListener('touchend', endTouch);
+      surface.removeEventListener('touchcancel', endTouch);
+    };
+  }, [approval, error]);
 
   // Send a raw sequence for the keys a mobile soft-keyboard lacks.
   const sendKey = (seq: string): void => {

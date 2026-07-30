@@ -21,7 +21,9 @@ import { vitalsRoutes } from './routes/vitals';
 import { pcStatsRoutes } from './routes/pcstats';
 import { statsLanRoutes } from './routes/statsLan';
 import { armoryRoutes } from './routes/armory';
+import { settingsRoutes } from './routes/settings';
 import { shareRoutes } from './routes/share';
+import { loadAiConfig } from './services/aiProvider';
 import { reconcileRelay } from './services/mobileShare';
 import { setupWebSocket } from './ws';
 import { pruneOldRunLogs, reconcileStaleRuns } from './services/runner';
@@ -96,6 +98,11 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
   // Remove any per-run MCP config files (which embed a bearer token) left in the
   // temp dir by a prior session's now-dead Claude processes.
   sweepMcpConfigs();
+
+  // Prime the AI-provider config so the (synchronous) Claude spawn path can read
+  // it without a DB round-trip. Best-effort: on failure it stays at the default,
+  // which injects nothing and leaves Claude Code on its own signed-in login.
+  await loadAiConfig();
 
   // If the embedded godclaude is installed, refresh its assets when this build
   // ships a newer vendored version (never auto-installs; best-effort).
@@ -192,6 +199,7 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
   await app.register(pcStatsRoutes);
   await app.register(statsLanRoutes);
   await app.register(armoryRoutes);
+  await app.register(settingsRoutes);
   await app.register(shareRoutes);
 
   // Packaged desktop mode: serve the built frontend from this same server so the

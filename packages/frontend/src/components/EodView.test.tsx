@@ -64,3 +64,38 @@ describe('EodView', () => {
     expect(getEodActive).toHaveBeenLastCalledWith(addDays(today, -6), today);
   });
 });
+
+describe('toSlack — the detailed report format (per-project sub-headings)', () => {
+  it('converts **bold** to Slack single-asterisk bold, leaving no literal ** behind', () => {
+    const slack = toSlack(
+      '### NARUKAMI\n**Overview** — Shipped the Settings tab.\n\n**Delivered**\n-   Added **server-side** key storage.\n',
+    );
+    expect(slack).toContain('*NARUKAMI*');
+    expect(slack).toContain('*Overview* — Shipped the Settings tab.');
+    expect(slack).toContain('*Delivered*');
+    expect(slack).toContain('• Added *server-side* key storage.');
+    expect(slack).not.toContain('**'); // no markdown bold survives into Slack
+  });
+
+  it('keeps a heading that already contains bold from doubling its asterisks', () => {
+    expect(toSlack('### **NARUKAMI**')).toBe('*NARUKAMI*');
+  });
+});
+
+describe('toSlack — nested sub-lists (the themed report format)', () => {
+  it('preserves one level of nesting instead of flattening it', () => {
+    const slack = toSlack(
+      '#### Account Management\n-   Expanded account management by adding:\n    -   Operator settings management.\n    -   Account editing.\n-   Back at top level.',
+    );
+    const lines = slack.split('\n');
+    expect(lines).toContain('*Account Management*');
+    expect(lines).toContain('• Expanded account management by adding:');
+    expect(lines).toContain('    • Operator settings management.');
+    expect(lines).toContain('    • Account editing.');
+    expect(lines).toContain('• Back at top level.');
+  });
+
+  it('keeps a plain top-level bullet unindented', () => {
+    expect(toSlack('- One thing.')).toBe('• One thing.');
+  });
+});

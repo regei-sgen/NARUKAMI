@@ -4,6 +4,7 @@ import '../lib/monaco-setup'; // side-effect: offline workers + narukami theme +
 import { api } from '../api';
 import { changedFolders, diffDecorations } from '../lib/gitChanges';
 import { onWindowVisibility, windowHidden } from '../lib/visibility';
+import { Markdown, isMarkdownPath } from '../lib/markdown';
 import type { DiffRange, FileNode, GitBranch, GitChange, Project } from '../types';
 import { Ic } from './icons';
 import { ChangesPanel } from './ChangesPanel';
@@ -139,17 +140,34 @@ function FileIcon() {
   );
 }
 
+/**
+ * Replace one directory's children in an immutable tree. Only the branch on the
+ * way to `target` is rebuilt, so every untouched subtree keeps its identity and
+ * the memoized rows below it don't reconcile.
+ */
+function withChildren(nodes: FileNode[], target: string, children: FileNode[]): FileNode[] {
+  return nodes.map((n) => {
+    if (n.path === target) return { ...n, children, loaded: true };
+    if (n.type === 'dir' && n.children && target.startsWith(`${n.path}/`)) {
+      return { ...n, children: withChildren(n.children, target, children) };
+    }
+    return n;
+  });
+}
+
 interface TreeProps {
   nodes: FileNode[];
   depth: number;
   expanded: Set<string>;
-  toggle: (p: string) => void;
+  toggle: (n: FileNode) => void;
   onOpen: (n: FileNode) => void;
   currentPath: string | null;
   // Git working-tree changes: file path → change type, plus the set of folders
   // that contain a change (so a collapsed dir still flags what's inside).
   changed: Map<string, GitChange>;
   changedDirs: Set<string>;
+  // Directories whose listing is in flight (big projects load folders on demand).
+  loadingDirs: Set<string>;
 }
 
 // Memoized: `content` state lives in CodeEditor, so without this the whole
@@ -166,6 +184,7 @@ const TreeNodes = memo(function TreeNodesInner({
   currentPath,
   changed,
   changedDirs,
+  loadingDirs,
 }: TreeProps) {
   return (
     <>
@@ -181,7 +200,7 @@ const TreeNodes = memo(function TreeNodesInner({
             <div
               className={`ft-row ${active ? 'active' : ''} ${isDir ? 'ft-dir' : 'ft-file'} ${changeClass}`}
               style={{ paddingLeft: 8 + depth * 13 }}
-              onClick={() => (isDir ? toggle(n.path) : onOpen(n))}
+              onClick={() => (isDir ? toggle(n) : onOpen(n))}
               title={n.path}
             >
               {isDir ? (
@@ -204,7 +223,13 @@ const TreeNodes = memo(function TreeNodesInner({
                 currentPath={currentPath}
                 changed={changed}
                 changedDirs={changedDirs}
+                loadingDirs={loadingDirs}
               />
+            )}
+            {isDir && isOpen && !n.children && loadingDirs.has(n.path) && (
+              <div className="ft-loading" style={{ paddingLeft: 8 + (depth + 1) * 13 }}>
+                Loading…
+              </div>
             )}
           </div>
         );
@@ -215,9 +240,10 @@ const TreeNodes = memo(function TreeNodesInner({
 
 export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: Props) {
   const [tree, setTree] = useState<FileNode[]>([]);
-  const [truncated, setTruncated] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [loadingDirs, setLoadingDirs] = useState<Set<string>>(new Set());
   const [treeErr, setTreeErr] = useState<string | null>(null);
+  const [dirErr, setDirErr] = useState<string | null>(null); // one folder failed to list
   const [loadingTree, setLoadingTree] = useState(true);
 
   const [currentPath, setCurrentPath] = useState<string | null>(null);
@@ -226,6 +252,13 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
   const [originalMtime, setOriginalMtime] = useState<number | null>(null);
   const [conflict, setConflict] = useState(false);
   const [fileErr, setFileErr] = useState<string | null>(null);
+
+  // On-disk state of the OPEN file, polled cheaply (stat, not a re-read). Claude
+  // and other tools edit files behind the editor, so the buffer can silently go
+  // stale; these drive the Refresh button's "changed on disk" flag.
+  const [diskMtime, setDiskMtime] = useState<number | null>(null);
+  const [diskGone, setDiskGone] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [loadingFile, setLoadingFile] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -233,13 +266,23 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
   // Sidebar tab: file Explorer (tree + search) or git Changes (source control).
   const [leftTab, setLeftTab] = useState<'explorer' | 'changes'>('explorer');
 
-  // Search: by file name (client-side filter of the tree) or by code (backend grep).
+  // Search: by file name or by code — both server-side, because the tree can be
+  // partly lazy on a big project and a client-side filter would only ever see
+  // the folders that happen to be loaded.
   const [searchMode, setSearchMode] = useState<'name' | 'code'>('name');
   const [query, setQuery] = useState('');
+  const [nameResults, setNameResults] = useState<string[]>([]);
+  const [nameTruncated, setNameTruncated] = useState(false);
+  const [nameSearching, setNameSearching] = useState(false);
+  const [nameErr, setNameErr] = useState<string | null>(null);
   const [codeResults, setCodeResults] = useState<{ path: string; line: number; text: string }[]>([]);
   const [codeTruncated, setCodeTruncated] = useState(false);
   const [codeSearching, setCodeSearching] = useState(false);
   const [codeErr, setCodeErr] = useState<string | null>(null);
+
+  // Markdown files can be read rendered instead of as source. Sticky across
+  // files so browsing docs doesn't need a click per file.
+  const [mdPreview, setMdPreview] = useState(false);
 
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
   const monacoRef = useRef<Parameters<OnMount>[1] | null>(null);
@@ -250,6 +293,12 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
   // the nonce re-triggers the effect even when the file content is identical.
   const pendingRevealRef = useRef<number | null>(null);
   const [revealNonce, setRevealNonce] = useState(0);
+  // Cursor + scroll offset captured just before a disk refresh, reapplied once the
+  // reloaded content reaches the model (see the effect near refreshFromDisk).
+  // Deliberately NOT Monaco's saveViewState/restoreViewState: restoring a full view
+  // state cancels in-flight folding work and leaks a `Canceled` rejection to the
+  // window. These two coarse settings are all the position we actually need.
+  const pendingViewRef = useRef<{ lineNumber: number; column: number; scrollTop: number } | null>(null);
 
   // Git working-tree changes (path → change type), polled while the editor is
   // open. Drives the file-tree markers; the open file's diff gutter is fetched
@@ -277,6 +326,11 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
   // (which corrupted dirty tracking).
   const currentPathRef = useRef(currentPath);
   currentPathRef.current = currentPath;
+
+  // Same idea for the project: a folder listing in flight when the user switches
+  // projects must not be merged into the new project's tree.
+  const projectIdRef = useRef(project.id);
+  projectIdRef.current = project.id;
 
   // Report unsaved-edits state upward so the parent can guard view/project
   // switches; always clear it on unmount.
@@ -355,12 +409,13 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
     setOriginal('');
     setOriginalMtime(null);
     setConflict(false);
+    setLoadingDirs(new Set());
+    setDirErr(null);
     api
       .getTree(project.id)
       .then((r) => {
         if (cancelled) return;
         setTree(r.tree);
-        setTruncated(r.truncated);
         // Auto-expand the first top-level directory for a useful starting view.
         const firstDir = r.tree.find((n) => n.type === 'dir');
         setExpanded(firstDir ? new Set([firstDir.path]) : new Set());
@@ -376,14 +431,68 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
     };
   }, [project.id]);
 
-  const toggle = useCallback((p: string) => {
+  const toggle = useCallback((node: FileNode) => {
     setExpanded((cur) => {
       const next = new Set(cur);
-      if (next.has(p)) next.delete(p);
-      else next.add(p);
+      if (next.has(node.path)) next.delete(node.path);
+      else next.add(node.path);
       return next;
     });
   }, []);
+
+  // On a big project the tree arrives with distant folders deferred
+  // (`loaded === false`). Whenever one of those is expanded — by a click or by
+  // the auto-expand above — pull its FULL listing, so an open folder always
+  // shows everything it holds rather than a silently clipped slice.
+  useEffect(() => {
+    const missing: string[] = [];
+    const scan = (ns: FileNode[]): void => {
+      for (const n of ns) {
+        if (n.type !== 'dir') continue;
+        if (n.loaded === false && !n.children && expanded.has(n.path) && !loadingDirs.has(n.path)) {
+          missing.push(n.path);
+        }
+        if (n.children) scan(n.children);
+      }
+    };
+    scan(tree);
+    if (missing.length === 0) return;
+
+    setLoadingDirs((cur) => {
+      const next = new Set(cur);
+      for (const p of missing) next.add(p);
+      return next;
+    });
+    for (const p of missing) {
+      const forProject = project.id;
+      api
+        .getDir(forProject, p)
+        .then((r) => {
+          // Ignore a listing that lands after the user switched projects — the
+          // path could collide with a same-named folder in the new tree.
+          if (projectIdRef.current !== forProject) return;
+          setTree((cur) => withChildren(cur, p, r.children));
+        })
+        .catch((e) => {
+          if (projectIdRef.current !== forProject) return;
+          // A folder that won't list must not wipe out the whole Explorer —
+          // collapse it again and say so under the tree.
+          setDirErr(`${p}: ${(e as Error).message}`);
+          setExpanded((cur) => {
+            const next = new Set(cur);
+            next.delete(p);
+            return next;
+          });
+        })
+        .finally(() => {
+          setLoadingDirs((cur) => {
+            const next = new Set(cur);
+            next.delete(p);
+            return next;
+          });
+        });
+    }
+  }, [tree, expanded, loadingDirs, project.id]);
 
   const openPath = useCallback(
     async (filePath: string, line?: number) => {
@@ -402,6 +511,9 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
         setContent(r.content);
         setOriginal(r.content);
         setOriginalMtime(r.mtimeMs);
+        // A just-read file is by definition in sync with disk.
+        setDiskMtime(r.mtimeMs);
+        setDiskGone(false);
         setConflict(false);
         // Set OR clear the pending reveal: a plain open (no line) must wipe any
         // stale reveal so it can't fire on the wrong file when it mounts.
@@ -441,22 +553,6 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
     },
     [openPath, project.id],
   );
-
-  // Flattened file paths for the name-search filter (rebuilt when the tree changes).
-  const flatFiles = useMemo(() => {
-    const out: string[] = [];
-    const rec = (ns: FileNode[]): void => {
-      for (const n of ns) {
-        if (n.type === 'dir') {
-          if (n.children) rec(n.children);
-        } else {
-          out.push(n.path);
-        }
-      }
-    };
-    rec(tree);
-    return out;
-  }, [tree]);
 
   // Folders that (transitively) contain a change — collapsed dirs still get a marker.
   const changedDirs = useMemo(() => changedFolders(changed.keys()), [changed]);
@@ -510,6 +606,28 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
     }
   }, [project.id]);
 
+  // Probe the open file's on-disk mtime (stat only — no content). Runs on the same
+  // cadence as the git polls so an external edit surfaces within a few seconds.
+  const refreshDiskStat = useCallback(async () => {
+    const fp = currentPathRef.current;
+    if (!fp) {
+      setDiskMtime(null);
+      setDiskGone(false);
+      return;
+    }
+    try {
+      const s = await api.statFile(project.id, fp);
+      if (currentPathRef.current !== fp) return; // file switched mid-flight
+      setDiskGone(false);
+      setDiskMtime(s.mtimeMs);
+    } catch (e) {
+      if (currentPathRef.current !== fp) return;
+      // Only a genuine 404 means "gone"; any other probe failure is transient and
+      // must not raise a false alarm on the toolbar.
+      setDiskGone(/not found/i.test((e as Error).message));
+    }
+  }, [project.id]);
+
   // Fetch changed line ranges for the OPEN file and repaint the gutter. Decoupled
   // from `changed` on purpose: git collapses every edit to the same "modified"
   // bucket, so re-editing an already-modified file leaves the status signature
@@ -542,29 +660,84 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
     setChanged(new Map());
     void refreshGit();
     void refreshOpenDiff();
-    // Every tick spawns git processes backend-side (status + open-file diff).
-    // Skip while the window is hidden — decorations are invisible then anyway —
-    // and refresh immediately on restore so nothing looks stale.
+    void refreshDiskStat();
+    // Every tick spawns git processes backend-side (status + open-file diff) plus
+    // one stat for the open file. Skip while the window is hidden — decorations
+    // are invisible then anyway — and refresh immediately on restore so nothing
+    // looks stale.
     const t = setInterval(() => {
       if (windowHidden()) return;
       void refreshGit();
       void refreshOpenDiff();
+      void refreshDiskStat();
     }, 3000);
     const offVis = onWindowVisibility((hidden) => {
       if (hidden) return;
       void refreshGit();
       void refreshOpenDiff();
+      void refreshDiskStat();
     });
     return () => {
       clearInterval(t);
       offVis();
     };
-  }, [refreshGit, refreshOpenDiff]);
+  }, [refreshGit, refreshOpenDiff, refreshDiskStat]);
 
-  // Refetch the gutter when the open file changes (independent of the poll).
+  // Refetch the gutter when the open file changes (independent of the poll), and
+  // re-probe disk: the read that opened the file and a write landing right after
+  // it can race, so don't wait up to a poll interval to notice.
   useEffect(() => {
     void refreshOpenDiff();
-  }, [currentPath, refreshOpenDiff]);
+    void refreshDiskStat();
+  }, [currentPath, refreshOpenDiff, refreshDiskStat]);
+
+  // True when disk has moved ahead of the copy we loaded — an edit made outside
+  // the editor (Claude, git checkout, another tool).
+  const stale = !diskGone && diskMtime !== null && originalMtime !== null && diskMtime > originalMtime;
+
+  // Re-read the open file from disk. Never discards unsaved edits silently, and
+  // keeps the cursor/scroll where it was so refreshing doesn't lose your place.
+  const refreshFromDisk = useCallback(async () => {
+    const fp = currentPathRef.current;
+    if (!fp || refreshing) return;
+    if (content !== original) {
+      const ok = window.confirm(
+        `${fp} has unsaved changes.\n\nReload it from disk and discard them?`,
+      );
+      if (!ok) return;
+    }
+    setRefreshing(true);
+    const ed = editorRef.current;
+    const pos = ed?.getPosition();
+    pendingViewRef.current =
+      ed && pos
+        ? { lineNumber: pos.lineNumber, column: pos.column, scrollTop: ed.getScrollTop() }
+        : null;
+    try {
+      await openPath(fp);
+      void refreshOpenDiff();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [content, original, openPath, refreshOpenDiff, refreshing]);
+
+  // Restore the pre-refresh cursor/scroll once the new content has been applied
+  // to the model. Keyed on `content` because that is what re-renders the editor;
+  // the ref makes it a no-op for ordinary keystrokes.
+  useEffect(() => {
+    const want = pendingViewRef.current;
+    if (!want) return;
+    const ed = editorRef.current;
+    const model = ed?.getModel();
+    if (ed && model) {
+      // Clamp: the reloaded file may be shorter than it was.
+      const lineNumber = Math.min(want.lineNumber, model.getLineCount());
+      ed.setPosition({ lineNumber, column: want.column });
+      ed.setScrollTop(want.scrollTop);
+      ed.focus();
+    }
+    pendingViewRef.current = null;
+  }, [content]);
 
   // Re-apply decorations on edits so an untracked file's whole-file highlight
   // tracks new lines and decorations survive buffer changes.
@@ -572,11 +745,40 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
     applyDecorations();
   }, [content, applyDecorations]);
 
-  const nameResults = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (searchMode !== 'name' || !q) return [];
-    return flatFiles.filter((p) => p.toLowerCase().includes(q)).slice(0, 300);
-  }, [flatFiles, query, searchMode]);
+  // Debounced backend file-name search — covers the whole project, including
+  // folders the tree hasn't loaded yet.
+  useEffect(() => {
+    const q = query.trim();
+    if (searchMode !== 'name' || !q) {
+      setNameResults([]);
+      setNameTruncated(false);
+      setNameErr(null);
+      setNameSearching(false);
+      return;
+    }
+    setNameSearching(true);
+    let cancelled = false;
+    const t = setTimeout(() => {
+      api
+        .searchFileNames(project.id, q)
+        .then((r) => {
+          if (cancelled) return;
+          setNameResults(r.files);
+          setNameTruncated(r.truncated);
+          setNameErr(null);
+        })
+        .catch((e) => {
+          if (!cancelled) setNameErr((e as Error).message);
+        })
+        .finally(() => {
+          if (!cancelled) setNameSearching(false);
+        });
+    }, 200);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [project.id, query, searchMode]);
 
   // Debounced backend content search.
   useEffect(() => {
@@ -670,6 +872,9 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
       if (currentPathRef.current !== pathAtSave) return; // switched files mid-save
       setOriginal(contentAtSave);
       setOriginalMtime(res.mtimeMs);
+      // Our own write is the newest state on disk — don't let it read as stale.
+      setDiskMtime(res.mtimeMs);
+      setDiskGone(false);
       setConflict(false);
       setSaved(true);
       // Reflect the save immediately: tree markers (refreshGit) + gutter for the
@@ -687,6 +892,18 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
     }
   }, [project.id, currentPath, content, original, saving, originalMtime, conflict, refreshGit, refreshOpenDiff]);
   saveRef.current = save;
+
+  const isMd = currentPath !== null && isMarkdownPath(currentPath);
+
+  // Switching to the preview unmounts Monaco, so drop the editor refs with it —
+  // a stale handle would make the next decoration pass touch a disposed editor.
+  const showPreview = useCallback(() => {
+    editorRef.current = null;
+    monacoRef.current = null;
+    decorationsRef.current = [];
+    setMdPreview(true);
+  }, []);
+  const showSource = useCallback(() => setMdPreview(false), []);
 
   const handleMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
@@ -761,10 +978,13 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
             <div className="ft-body">
               {query.trim() ? (
                 searchMode === 'name' ? (
-                  nameResults.length === 0 ? (
-                    <div className="ft-note">No file names match.</div>
-                  ) : (
-                    nameResults.map((p) => {
+                  <>
+                    {nameSearching && <div className="ft-note">Searching…</div>}
+                    {nameErr && <div className="ft-note ft-err">{nameErr}</div>}
+                    {!nameSearching && !nameErr && nameResults.length === 0 && (
+                      <div className="ft-note">No file names match.</div>
+                    )}
+                    {nameResults.map((p) => {
                       const st = changed.get(p);
                       return (
                         <div
@@ -782,8 +1002,13 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
                           {st && <span className={`ft-status-dot ${st}`} title={`Modified (${st})`} />}
                         </div>
                       );
-                    })
-                  )
+                    })}
+                    {nameTruncated && (
+                      <div className="ft-note ft-trunc">
+                        Showing the first {nameResults.length} matches — refine the search.
+                      </div>
+                    )}
+                  </>
                 ) : (
                   <>
                     {codeSearching && <div className="ft-note">Searching…</div>}
@@ -826,12 +1051,9 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
                     currentPath={currentPath}
                     changed={changed}
                     changedDirs={changedDirs}
+                    loadingDirs={loadingDirs}
                   />
-                  {truncated && (
-                    <div className="ft-note ft-trunc">
-                      Tree truncated — some files hidden (large project).
-                    </div>
-                  )}
+                  {dirErr && <div className="ft-note ft-err">{dirErr}</div>}
                 </>
               )}
             </div>
@@ -872,11 +1094,50 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
               <Ic name="branch" /> {branch.branch}
             </span>
           )}
+          {isMd && !showDiff && (
+            <div className="editor-mdmode" role="group" aria-label="Markdown view">
+              <button
+                className={`md-mode ${!mdPreview ? 'active' : ''}`}
+                onClick={showSource}
+                title="Edit the Markdown source"
+              >
+                Code
+              </button>
+              <button
+                className={`md-mode ${mdPreview ? 'active' : ''}`}
+                onClick={showPreview}
+                title="Read the rendered Markdown"
+              >
+                Preview
+              </button>
+            </div>
+          )}
           {fileErr && <span className="editor-file-err">{fileErr}</span>}
           {saved && !dirty && !conflict && <span className="editor-saved">saved ✓</span>}
           {showDiff && (
             <span className="editor-diff-note">
               {headLoading ? 'loading…' : headCommitted ? '‹ committed · working ›' : 'new file — nothing committed yet'}
+            </span>
+          )}
+          {currentPath && (
+            <button
+              className={`btn btn-ghost editor-refresh${stale ? ' attention' : ''}`}
+              onClick={() => void refreshFromDisk()}
+              disabled={refreshing || diskGone}
+              title={
+                diskGone
+                  ? 'This file no longer exists on disk'
+                  : stale
+                    ? 'This file changed on disk — click to reload it'
+                    : 'Reload this file from disk'
+              }
+            >
+              <Ic name="refresh" /> {refreshing ? 'Refreshing…' : 'Refresh'}
+            </button>
+          )}
+          {currentPath && (stale || diskGone) && (
+            <span className={`editor-disk-note${diskGone ? ' gone' : ''}`}>
+              {diskGone ? 'deleted on disk' : 'changed on disk'}
             </span>
           )}
           {currentPath && (
@@ -902,6 +1163,10 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
           {currentPath === null ? (
             <div className="editor-empty">
               {loadingFile ? 'Opening…' : 'Select a file from the tree to edit it.'}
+            </div>
+          ) : isMd && mdPreview && !showDiff ? (
+            <div className="md-preview" data-testid="md-preview">
+              <Markdown source={content} />
             </div>
           ) : showDiff ? (
             <DiffEditor

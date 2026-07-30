@@ -3,14 +3,18 @@ import { prisma } from '../db';
 import { isRunning, startClaude, startRun, startShell, stopRun } from '../services/runner';
 import { startAdminShell } from '../services/brokerServer';
 import { AnalyzerError, diagnoseRun } from '../services/analyzer';
+import { DEFAULT_EFFORT, cachedAiConfig } from '../services/aiProvider';
 
 // Effort injected into fresh Claude tabs when the caller doesn't pick one.
-// `ultracode` = xhigh + dynamic workflow fan-out — maximum thoroughness, by
-// the owner's explicit choice. Its parallel subagents' tool storms are the
-// dominant CPU cost of a busy Claude tab (NARUKAMI's own runtime is ~1%), so
-// anyone chasing "NARUKAMI CPU usage" should look here first, not at the
-// streaming pipeline. One constant so launch and restart can never disagree.
-const DEFAULT_CLAUDE_EFFORT = 'ultracode';
+// Shipped default `ultracode` = xhigh + dynamic workflow fan-out — maximum
+// thoroughness. Its parallel subagents' tool storms are the dominant CPU cost of
+// a busy Claude tab (NARUKAMI's own runtime is ~1%), so anyone chasing "NARUKAMI
+// CPU usage" should look here first, not at the streaming pipeline — turning it
+// down in Settings → AI provider is the lever. One accessor so launch and
+// restart can never disagree.
+function defaultClaudeEffort(): string {
+  return cachedAiConfig().defaultEffort || DEFAULT_EFFORT;
+}
 
 export async function runRoutes(app: FastifyInstance): Promise<void> {
   // Start a run for one of a project's detected commands.
@@ -119,9 +123,9 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
 
       const resume = req.body?.continue === true;
       // Sanitize the effort level (slash-command arg) — word chars only.
-      const raw =
-        typeof req.body?.effort === 'string' ? req.body.effort.trim() : DEFAULT_CLAUDE_EFFORT;
-      const effort = /^[a-zA-Z0-9-]{1,32}$/.test(raw) ? raw : DEFAULT_CLAUDE_EFFORT;
+      const fallback = defaultClaudeEffort();
+      const raw = typeof req.body?.effort === 'string' ? req.body.effort.trim() : fallback;
+      const effort = /^[a-zA-Z0-9-]{1,32}$/.test(raw) ? raw : fallback;
       const setEffort = req.body?.setEffort !== false; // default on
 
       // "Continue" resumes THIS project's most recent NARUKAMI Claude session by
@@ -250,7 +254,7 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
           runId: run.id,
           cwd: project.path,
           resumeSessionId: resume ? old.claudeSessionId ?? undefined : undefined,
-          initInput: resume ? undefined : `/effort ${DEFAULT_CLAUDE_EFFORT}`,
+          initInput: resume ? undefined : `/effort ${defaultClaudeEffort()}`,
         });
         pid = started.pid;
         claudeSessionId = started.sessionId;

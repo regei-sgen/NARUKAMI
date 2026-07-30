@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { AnalyzerCommand, AnalyzerResult } from '../types';
+import { claudeSpawnEnv } from './aiProvider';
 import { godSpawnEnv } from './godclaude';
 import { resolveExecutable, wrapForWindows } from './exec';
 
@@ -188,8 +189,10 @@ async function runClaude(
       timeout: timeoutMs,
       killSignal: 'SIGKILL',
       // Headless analysis sessions are NARUKAMI sessions too — same embedded
-      // godclaude home as the interactive terminals.
-      env: { ...process.env, ...godSpawnEnv() },
+      // godclaude home as the interactive terminals, and the same configured AI
+      // credential (empty in the default 'claude-code' mode). In headless mode
+      // an injected ANTHROPIC_API_KEY is always used, with no approval prompt.
+      env: { ...process.env, ...godSpawnEnv(), ...claudeSpawnEnv() },
     });
     return stdout;
   } catch (err) {
@@ -351,7 +354,62 @@ export interface EodProjectInput {
   commitsText: string;
   runsText: string;
   sessions: number;
-  sessionContext: string; // the developer's actual prompts/tasks from that day's Claude sessions
+  /** Per-session digests from {@link summarizeSession}, in chronological order. */
+  sessionDigests: string[];
+  /** Sessions that existed but weren't digested (budget cap) — reported, never hidden. */
+  sessionsOmitted: number;
+}
+
+// A session digest reads one transcript's worth of material — more runway than
+// the 2-minute project-analysis budget, but far less than the final report.
+const SESSION_DIGEST_TIMEOUT_MS = 180_000;
+
+// The roll-up ingests every digest for every project at once; the old 2-minute
+// default was sized for a single thin prompt and would kill a real day's report.
+const EOD_REPORT_TIMEOUT_MS = 300_000;
+
+/**
+ * Layer 1 of the EOD pipeline: turn ONE Claude session into a detailed digest.
+ *
+ * The report used to be written in a single pass over a merged blob of user
+ * prompts, which is why it came out vague — nothing ever read a session as a
+ * unit. This reads one session at a time so the model can actually follow what
+ * was asked, what was done, and how it ended, before anything is summarized
+ * across the day.
+ *
+ * `sessionText` comes from eodSessions.sessionToPromptText (both sides of the
+ * conversation plus tool/file evidence). Returns markdown; failures are the
+ * caller's to handle (a dead session must not sink the whole report).
+ */
+export async function summarizeSession(
+  cwd: string,
+  projectName: string,
+  sessionText: string,
+): Promise<string> {
+  const prompt = `You are summarizing ONE Claude Code working session on the project "${projectName}", for a developer's end-of-day report.
+
+Read the session material below and write a DETAILED, factual account of that session.
+
+Output EXACTLY this markdown and nothing else (no preamble, no code fences):
+
+**<a short specific title for this session, max 9 words>**
+- **Goal:** <what the developer set out to do, in their terms>
+- **Work:** <3-6 bullets of what was actually done — specific changes, files, commands, findings. Merge trivia into meaningful units.>
+- **Outcome:** <what state it ended in: what works, what shipped, what was verified>
+- **Open:** <anything unresolved, deferred, or explicitly left for later — or "nothing outstanding">
+
+Hard rules:
+- Be SPECIFIC. Name the real files, features, commands, errors and decisions that appear in the material. "Worked on the UI" is a failure; "Added a Settings tab with an API-key field wired to the backend" is right.
+- Derive EVERYTHING from the material. Never invent a file, number, test result or outcome that isn't there.
+- The assistant's narration says what it intended; the tool/file evidence says what it touched. Prefer the evidence when they disagree.
+- If the session is thin or exploratory, say so plainly rather than padding it.
+- Past tense. No filler, no restating these instructions.
+
+Session material:
+${sessionText}`;
+
+  const stdout = await runClaude(prompt, cwd, SESSION_DIGEST_TIMEOUT_MS);
+  return stripFences(unwrapEnvelope(stdout)).trim();
 }
 
 /**
@@ -367,49 +425,81 @@ export async function generateEodReport(
   note: string,
 ): Promise<string> {
   const blocks = projects
-    .map(
-      (p) => `## PROJECT: ${p.name}  (${p.sessions} Claude session(s) active today)
-Git commits today (subject + details):
+    .map((p) => {
+      const digests = p.sessionDigests.length
+        ? p.sessionDigests.map((d, i) => `--- SESSION ${i + 1} OF ${p.sessions} ---\n${d}`).join('\n\n')
+        : '(no session digests — fall back to the commits and runs below)';
+      const omitted =
+        p.sessionsOmitted > 0
+          ? `\nNOTE: ${p.sessionsOmitted} further session(s) that day were not digested (per-report budget). Say so if the day looks incomplete.`
+          : '';
+      return `## PROJECT: ${p.name}  (${p.sessions} Claude session(s) in range)
+
+Per-session digests, in chronological order — THIS IS THE PRIMARY SOURCE:
+${digests}${omitted}
+
+Git commits in range (subject + body):
 """
-${p.commitsText.slice(-4000) || '(no commits today)'}
+${p.commitsText.slice(-6000) || '(no commits in range)'}
 """
-Runs that finished today:
+
+Runs that finished in range:
 """
 ${p.runsText.slice(-1500) || '(none recorded)'}
-"""
-What the developer actually worked on in Claude sessions today (their own prompts/tasks — use this to describe the work when commits are thin):
-"""
-${p.sessionContext.slice(-3000) || '(no session context captured)'}
-"""`,
-    )
+"""`;
+    })
     .join('\n\n');
 
-  const prompt = `You are writing a developer's End-of-Day report for ${prettyDate}, in a FIXED markdown format.
+  const prompt = `You are writing a developer's End-of-Day report for ${prettyDate}.
 
-Output EXACTLY this structure and NOTHING else (no preamble, no explanation, no code fences):
+Each project below arrives as a set of PER-SESSION digests (written from the full session transcripts), plus that project's git commits and runs. Your job is the final layer: reorganize that raw material into a clean, professional report grouped BY THEME.
 
-## EOD -- ${prettyDate}
+The audience is a colleague or manager who is NOT reading the code. They want to understand what was accomplished and why it matters — not how it was implemented.
+
+Output EXACTLY this markdown structure and NOTHING else (no preamble, no explanation, no code fences):
+
+## EOD — ${prettyDate}
 
 ### <Project Name>
--   <2-4 concise, past-tense bullets of what was accomplished>
 
-(repeat one "### <Project Name>" section for EACH project listed below, in the given order)
+#### <Theme of work>
+-   <a clear, plain-English accomplishment>
+-   <an accomplishment that had several parts:>
+    -   <the parts, one per line>
+-   <another accomplishment>
+
+#### <Next theme of work>
+-   <...>
+
+(3-7 themes per project, then repeat "### <Project Name>" for EACH project below, in the given order)
 
 ### Summary
--   <1-2 bullets summarizing the whole day across the projects>
+-   <3-4 bullets: the through-line of the day, the most valuable outcomes, and — in the final bullet — anything that is still outstanding or unfinished.>
 
-Rules:
-- Use each project's name EXACTLY as given (the text after "## PROJECT:", before the parenthetical).
-- Base every bullet on the git commits / runs / session tasks provided. Condense related work into readable outcomes ("Built X", "Added Y", "Fixed Z"). Do NOT invent specifics or numbers not present.
-- Bullets are short, factual, past tense — 2-4 per project.
-- If a project has NO commits, write real bullets from "What the developer actually worked on" (their session tasks) — describe the actual work. Do NOT emit filler like "Worked on <name> across N sessions"; only fall back to that if there is genuinely no commit AND no session context.
-${note ? `- Weave in the developer's own note where relevant:\n"""\n${note.slice(0, 1500)}\n"""` : ''}
+THEMES — how to group:
+- Invent the theme names yourself from what actually happened, and name them for the AREA OF WORK. Good examples: "Environment & Infrastructure", "Console Consolidation", "User Interface", "Account Management", "Data & Pagination", "Workflow & Runtime Improvements", "Backend Improvements", "Packaging & Release".
+- Group by theme, NEVER by session or by chronology. Work spread over three sessions that advanced one feature is ONE theme with the full story told once.
+- Order themes so the most substantial work comes first.
+
+LANGUAGE — this is the most important part:
+- Write plain, professional English. Full sentences. Past tense.
+- Say what was ACHIEVED and what it ENABLES, not how it was coded.
+- BAN, in the report body: file paths and file names, function/variable/class names, line numbers, commit hashes, branch names, migration names, port numbers, test counts and pass/fail tallies, tool and library names, command lines, code in backticks, and any \`inline code\` formatting at all.
+- Translate the specifics into outcomes. "Lifted the 1460px .sheet cap in tools/product/index.html" becomes "Rebuilt the console layout to use the full width of large displays." "Added src/db/pages.ts across eight modules" becomes "Introduced a reusable pagination framework across the application's data layer."
+- Keep the substance and precision — this is a DETAILED report, just written for a human. Never flatten real work into "made improvements" or "worked on the UI"; say which capability was added, fixed or removed.
+- Use a nested sub-list when one accomplishment naturally breaks into parts. Introduce it with a bullet ending in a colon.
+
+TRUTH:
+- Base everything on the material given. NEVER invent an accomplishment, capability or outcome that is not there.
+- If a project has almost no signal, say so in one honest line rather than padding it.
+- Do not mention sessions, transcripts, digests, the assistant, or this prompt. Report the WORK, not how the report was made.
+${note ? `- The developer added this note — weave it in where it fits:\n"""\n${note.slice(0, 1500)}\n"""` : ''}
 
 Projects (in order):
 
 ${blocks}`;
 
-  const stdout = await runClaude(prompt, cwd);
+  const stdout = await runClaude(prompt, cwd, EOD_REPORT_TIMEOUT_MS);
   return stripFences(unwrapEnvelope(stdout)).trim();
 }
 

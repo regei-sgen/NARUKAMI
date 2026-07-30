@@ -1,15 +1,20 @@
 import type {
+  AboutInfo,
+  AiSettings,
   AnalyzerResult,
+  AppPrefs,
   ArgusLogResult,
   ArgusSessions,
   ArgusStatus,
   Armory,
+  DirListing,
   EmbeddedGodAction,
   EmbeddedGodStatus,
   EodActiveResponse,
   EodReportDoc,
   FileContent,
   FileHead,
+  FileStat,
   GitBranch,
   GitChanges,
   GitDiff,
@@ -158,11 +163,13 @@ export const api = {
     }>(`/api/runs/${runId}`),
 
   // resume: reopen the most recent conversation in the project dir (claude --continue).
+  // Omitting `effort` lets the backend apply the level configured in Settings →
+  // AI provider; passing one overrides it for this launch only.
   openClaude: (projectId: string, opts: { effort?: string; resume?: boolean } = {}) =>
     request<{ runId: string; pid: number }>(`/api/projects/${projectId}/claude`, {
       method: 'POST',
       body: JSON.stringify(
-        opts.resume ? { continue: true } : { effort: opts.effort ?? 'ultracode' },
+        opts.resume ? { continue: true } : opts.effort ? { effort: opts.effort } : {},
       ),
     }),
 
@@ -173,6 +180,22 @@ export const api = {
 
   // --- built-in code editor ---
   getTree: (projectId: string) => request<ProjectTree>(`/api/projects/${projectId}/tree`),
+
+  // Full listing of ONE directory — used to expand a folder the tree deferred.
+  getDir: (projectId: string, dirPath: string) =>
+    request<DirListing>(`/api/projects/${projectId}/dir?path=${encodeURIComponent(dirPath)}`),
+
+  // Cheap staleness probe for the open file — mtime/size only, no content. Drives
+  // the editor's "changed on disk" flag and its Refresh button.
+  statFile: (projectId: string, filePath: string) =>
+    request<FileStat>(`/api/projects/${projectId}/file-stat?path=${encodeURIComponent(filePath)}`),
+
+  // Find files by name across the whole project (the tree may be partly lazy,
+  // so this can't be a client-side filter).
+  searchFileNames: (projectId: string, q: string) =>
+    request<{ files: string[]; truncated: boolean }>(
+      `/api/projects/${projectId}/files?q=${encodeURIComponent(q)}`,
+    ),
 
   readFile: (projectId: string, filePath: string) =>
     request<FileContent>(
@@ -362,11 +385,31 @@ export const api = {
   deleteRelease: (releaseId: string) =>
     request<{ ok: boolean }>(`/api/releases/${releaseId}`, { method: 'DELETE' }),
 
-  saveSettings: (patch: { ui?: UiSettings } & Record<string, unknown>) =>
+  saveSettings: (patch: { ui?: UiSettings; prefs?: AppPrefs } & Record<string, unknown>) =>
     request<{ ok: boolean; saved: number }>('/api/settings', {
       method: 'POST',
       body: JSON.stringify(patch),
     }),
+
+  // --- Settings tab: AI provider (the key stays server-side; responses are masked) ---
+  getAiSettings: () => request<AiSettings>('/api/settings/ai'),
+
+  // Patch semantics on the secret: omit `apiKey` to KEEP the stored one.
+  saveAiSettings: (patch: {
+    provider?: 'claude-code' | 'api-key';
+    apiKey?: string;
+    baseUrl?: string;
+    defaultEffort?: string;
+  }) =>
+    request<AiSettings>('/api/settings/ai', {
+      method: 'POST',
+      body: JSON.stringify(patch),
+    }),
+
+  // Forget the stored key and fall back to the signed-in Claude Code CLI.
+  clearAiKey: () => request<AiSettings>('/api/settings/ai/key', { method: 'DELETE' }),
+
+  getAbout: () => request<AboutInfo>('/api/settings/about'),
 
   // --- Argus Panoptes (read-only god-monitor over ~/.claude) ---
   getArgusStatus: () => request<ArgusStatus>('/api/argus/status'),

@@ -34,7 +34,11 @@ async function renderMaster() {
     height: 1024,
     show: false,
     frame: false,
-    backgroundColor: '#060608',
+    // MUST stay transparent. capturePage() composites the page onto the window
+    // background, so an opaque backgroundColor here bakes a solid square into
+    // the PNG's alpha — which is exactly how the icon ended up as a black box.
+    transparent: true,
+    backgroundColor: '#00000000',
   });
   await win.loadFile(SRC);
   // One frame is not always enough for the filters/gradients to composite.

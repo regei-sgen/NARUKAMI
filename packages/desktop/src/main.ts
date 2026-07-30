@@ -115,6 +115,99 @@ function stripFramingHeaders(sess: Electron.Session): void {
 
 let appUrl = '';
 let mainWindow: BrowserWindow | null = null;
+
+// ── background residency ────────────────────────────────────────────────────
+// NARUKAMI is a tray app: closing the window puts it in the background rather
+// than ending the process, so the embedded backend keeps serving PC Stats, the
+// phone server and any live terminals. Only an explicit Quit (tray menu, or the
+// updater restarting us) actually exits — `isQuitting` is how the window's close
+// handler tells those two cases apart.
+let isQuitting = false;
+
+/** Shell-level prefs, kept next to the app's other userData. Deliberately NOT in
+ *  the backend's SQLite: these are read during startup, before/independently of
+ *  the backend, and must survive a backend that fails to boot. */
+interface ShellPrefs {
+  /** Close hides to the tray instead of quitting. */
+  runInBackground: boolean;
+  /** Launch NARUKAMI (hidden) when the user signs in to Windows. */
+  startAtLogin: boolean;
+}
+
+const SHELL_PREFS_DEFAULTS: ShellPrefs = { runInBackground: true, startAtLogin: true };
+
+function shellPrefsPath(): string {
+  return path.join(app.getPath('userData'), 'shell-prefs.json');
+}
+
+let shellPrefsCache: ShellPrefs | null = null;
+
+function shellPrefs(): ShellPrefs {
+  if (shellPrefsCache) return shellPrefsCache;
+  try {
+    const raw = JSON.parse(fs.readFileSync(shellPrefsPath(), 'utf8')) as Partial<ShellPrefs>;
+    shellPrefsCache = {
+      runInBackground:
+        typeof raw.runInBackground === 'boolean'
+          ? raw.runInBackground
+          : SHELL_PREFS_DEFAULTS.runInBackground,
+      startAtLogin:
+        typeof raw.startAtLogin === 'boolean' ? raw.startAtLogin : SHELL_PREFS_DEFAULTS.startAtLogin,
+    };
+  } catch {
+    // No file yet (first run) or unreadable — fall back to the defaults.
+    shellPrefsCache = { ...SHELL_PREFS_DEFAULTS };
+  }
+  return shellPrefsCache;
+}
+
+function setShellPref<K extends keyof ShellPrefs>(key: K, value: ShellPrefs[K]): void {
+  const next = { ...shellPrefs(), [key]: value };
+  shellPrefsCache = next;
+  try {
+    fs.writeFileSync(shellPrefsPath(), JSON.stringify(next, null, 2));
+  } catch (err) {
+    // Non-fatal: the pref still applies for this session, it just won't persist.
+    process.stderr.write(`[narukami] could not save shell prefs: ${String(err)}\n`);
+  }
+}
+
+/**
+ * Register (or clear) the Windows sign-in launcher, pointing at THIS install.
+ *
+ * `--hidden` is what start-at-login uses to come up straight into the tray: a
+ * window unfolding on every boot is exactly what an auto-started background app
+ * must not do. Packaged builds only — in dev `process.execPath` is the Electron
+ * binary, and registering that would auto-launch a bare Electron at every login.
+ */
+function applyLoginItem(enabled: boolean): void {
+  if (!PACKAGED) return;
+  try {
+    app.setLoginItemSettings({
+      openAtLogin: enabled,
+      path: process.execPath,
+      args: ['--hidden'],
+    });
+  } catch (err) {
+    process.stderr.write(`[narukami] could not update the login item: ${String(err)}\n`);
+  }
+}
+
+/**
+ * True when this launch should go straight to the tray without showing a window.
+ *
+ * The argv check is the one that matters on Windows: the Run entry we register
+ * is literally `NARUKAMI.exe --hidden`, and `wasOpenedAtLogin` is macOS-only
+ * (always false on Windows), so it is the fallback, not the primary signal.
+ */
+function launchedHidden(): boolean {
+  if (process.argv.includes('--hidden')) return true;
+  try {
+    return app.getLoginItemSettings().wasOpenedAtLogin === true;
+  } catch {
+    return false;
+  }
+}
 // runId → the window it was torn off into (dedupe: a repeat tear-off just focuses
 // the existing window).
 const popouts = new Map<string, BrowserWindow>();
@@ -321,7 +414,10 @@ function openStatsWindow(): void {
   });
 }
 
-/** Show/focus the main window (tray "Open NARUKAMI"). */
+/** Show/focus the main window (tray "Open NARUKAMI"). Also the way back from a
+ *  close-to-tray or a hidden login start, so it has to undo BOTH hide and
+ *  skipTaskbar — a shown window with skipTaskbar still set has no taskbar button
+ *  and looks half-restored. */
 function showMainWindow(): void {
   const win = BrowserWindow.getAllWindows().find((w) => w !== statsWin && !w.isDestroyed());
   if (!win) {
@@ -329,6 +425,7 @@ function showMainWindow(): void {
     return;
   }
   if (win.isMinimized()) win.restore();
+  win.setSkipTaskbar(false);
   win.show();
   win.focus();
 }
@@ -494,7 +591,39 @@ function trayMenu(): Menu {
       },
     },
     { type: 'separator' },
-    { label: 'Quit NARUKAMI', click: () => app.quit() },
+    {
+      label: 'Keep running in background',
+      type: 'checkbox',
+      checked: shellPrefs().runInBackground,
+      click: (item) => {
+        setShellPref('runInBackground', item.checked);
+        buildTrayMenu();
+      },
+    },
+    {
+      label: 'Start with Windows',
+      type: 'checkbox',
+      checked: shellPrefs().startAtLogin,
+      // Dev runs would register the bare Electron binary, so the toggle is only
+      // meaningful in a packaged install.
+      enabled: PACKAGED,
+      click: (item) => {
+        setShellPref('startAtLogin', item.checked);
+        applyLoginItem(item.checked);
+        buildTrayMenu();
+      },
+    },
+    { type: 'separator' },
+    // The ONLY real exit path once close-to-tray is on. isQuitting releases the
+    // window's close guard, otherwise app.quit() would be cancelled by it and
+    // the app would appear unquittable.
+    {
+      label: 'Quit NARUKAMI',
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      },
+    },
   ]);
 }
 
@@ -527,12 +656,17 @@ function createTray(): void {
   tray.on('mouse-move', () => buildTrayMenu());
 }
 
-async function createWindow(): Promise<BrowserWindow> {
+async function createWindow(startHidden = false): Promise<BrowserWindow> {
   const win = new BrowserWindow({
     width: 1440,
     height: 900,
     minWidth: 900,
     minHeight: 600,
+    // Auto-started at login we come up straight into the tray. The window is
+    // still fully created and the SPA still loads, so "Open NARUKAMI" is instant
+    // and the backend/terminals are live either way — it just isn't shown.
+    show: !startHidden,
+    skipTaskbar: startHidden,
     backgroundColor: '#08080a',
     title: 'NARUKAMI',
     icon: appIconPath(),
@@ -562,6 +696,19 @@ async function createWindow(): Promise<BrowserWindow> {
     return { action: 'deny' };
   });
   wireVisibilitySignal(win);
+
+  // Close = hide to the tray, NOT exit. Without this the app dies with its
+  // window and takes the backend (PC Stats, phone server, every live terminal)
+  // with it. `isQuitting` lets a real Quit through; so does turning the pref off.
+  win.on('close', (e) => {
+    if (isQuitting || !shellPrefs().runInBackground) return;
+    e.preventDefault();
+    win.hide();
+    // Hidden windows keep a taskbar button on Windows unless this is set; a
+    // background app should live in the tray only.
+    win.setSkipTaskbar(true);
+  });
+
   await win.loadURL(appUrl);
   return win;
 }
@@ -986,12 +1133,11 @@ const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
   app.quit();
 } else {
+  // Relaunching (Start menu / desktop shortcut) while we sit in the tray must
+  // bring the window BACK. The old focus()-only path was a no-op on a hidden
+  // window, so a second launch would look like nothing happened.
   app.on('second-instance', () => {
-    const win = BrowserWindow.getAllWindows()[0];
-    if (win) {
-      if (win.isMinimized()) win.restore();
-      win.focus();
-    }
+    showMainWindow();
   });
 }
 
@@ -1018,7 +1164,10 @@ app.whenReady().then(async () => {
     void ensureLhmRunning().then((r) =>
       process.stderr.write(`[narukami] LibreHardwareMonitor: ${r}\n`),
     );
-    const win = await createWindow();
+    // Re-assert the login item on every boot so the registry entry tracks the
+    // pref (and re-points at the exe after a reinstall to a different path).
+    applyLoginItem(shellPrefs().startAtLogin);
+    const win = await createWindow(launchedHidden());
     createTray();
     mainWindow = win;
     win.on('closed', () => {
@@ -1042,6 +1191,17 @@ app.whenReady().then(async () => {
   });
 });
 
+// Any OTHER exit route (Alt+F4 on the last window with the pref off, the
+// updater's quitAndInstall, a signal) still has to release the close guard, or
+// the window would veto its own teardown and the process would hang.
+app.on('before-quit', () => {
+  isQuitting = true;
+});
+
 app.on('window-all-closed', () => {
+  // Background residency: with the pref on, having no windows is the NORMAL
+  // resting state — the tray icon and the embedded backend are the app. Quitting
+  // here is what used to kill PC Stats and the phone server on window close.
+  if (shellPrefs().runInBackground) return;
   if (process.platform !== 'darwin') app.quit();
 });

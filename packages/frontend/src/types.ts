@@ -45,12 +45,20 @@ export interface FileNode {
   path: string; // project-relative, POSIX separators
   type: 'dir' | 'file';
   children?: FileNode[];
+  // Dirs only: false = children weren't sent with the tree; fetch them from
+  // /dir when the user expands. Absent means `children` is the full listing.
+  loaded?: boolean;
 }
 
 export interface ProjectTree {
   root: string;
   tree: FileNode[];
-  truncated: boolean;
+  lazy: boolean; // some directories load on demand (big project)
+}
+
+export interface DirListing {
+  path: string; // project-relative dir that was listed ('' = project root)
+  children: FileNode[];
 }
 
 export interface FileContent {
@@ -58,6 +66,13 @@ export interface FileContent {
   content: string;
   size: number;
   mtimeMs: number; // file mtime at open; sent back on save for conflict detection
+}
+
+// Staleness probe for the open file — no content, so polling it stays cheap.
+export interface FileStat {
+  path: string;
+  mtimeMs: number;
+  size: number;
 }
 
 // --- editor git integration (mirror packages/backend/src/services/gitEditor.ts) ---
@@ -233,10 +248,59 @@ export interface EodEntry {
   updatedAt: string;
 }
 
+// --- Settings tab (mirrors packages/backend/src/services/aiProvider.ts) ---
+
+/** Which credential NARUKAMI hands to the `claude` processes it spawns. */
+export type AiProvider = 'claude-code' | 'api-key';
+
+/** The AI config as the UI is allowed to see it — the key itself never ships. */
+export interface AiSettings {
+  provider: AiProvider;
+  hasKey: boolean;
+  keyPreview: string; // masked, e.g. 'sk-ant-…1234' ('' when no key)
+  baseUrl: string;
+  defaultEffort: string;
+  /** Anthropic credential vars present in the backend's OWN environment. */
+  inheritedAuthVars: string[];
+  /** What a Claude launch will actually authenticate with, right now. */
+  effective: 'api-key' | 'inherited-env' | 'claude-code-login';
+}
+
+/** Read-only diagnostics behind the Settings → About block. */
+export interface AboutInfo {
+  version: string | null;
+  platform: string;
+  arch: string;
+  node: string;
+  backendUrl: string | null;
+  godHome: string;
+  godInstalled: boolean;
+  database: string | null;
+}
+
+/** Notification prefs (stored server-side under the 'prefs' settings key).
+ *  All default ON — that is the behaviour before this setting existed. */
+export interface AppPrefs {
+  desktopNotifications?: boolean; // native OS notification when the app is backgrounded
+  inAppToasts?: boolean; // in-window toast cards
+  taskDoneNotifications?: boolean; // "Claude finished a task" (idle-edge) notices
+}
+
+/** A peer view in the main content area (the view-switch strip). */
+export type View =
+  | 'runner'
+  | 'editor'
+  | 'eod'
+  | 'release'
+  | 'argus'
+  | 'armory'
+  | 'browser'
+  | 'settings';
+
 // Persisted UI layout (stored server-side under the 'ui' settings key).
 export interface UiSettings {
   selectedId?: string | null;
-  view?: 'runner' | 'editor' | 'eod' | 'release' | 'argus' | 'armory' | 'browser';
+  view?: View;
   dockPosition?: 'bottom' | 'right';
   dockHeight?: number;
   dockWidth?: number;
@@ -250,7 +314,7 @@ export interface UiSettings {
 
 export interface WorkspaceState {
   runs: RestoredRun[];
-  settings: { ui?: UiSettings } & Record<string, unknown>;
+  settings: { ui?: UiSettings; prefs?: AppPrefs } & Record<string, unknown>;
 }
 
 // ── Argus Panoptes (god-monitor) ─────────────────────────────────────────────

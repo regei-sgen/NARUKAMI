@@ -5,6 +5,7 @@ import * as pty from 'node-pty';
 import { Prisma } from '../generated/prisma';
 import { prisma } from '../db';
 import { buildClaudeMcpArgs, cleanupMcpConfig } from './mcpConfig';
+import { claudeSpawnEnv } from './aiProvider';
 import { godSpawnEnv } from './godclaude';
 import { resolveExecutable, wrapForWindows } from './exec';
 
@@ -43,8 +44,16 @@ export interface RunTransport {
 /** Wrap a local node-pty process as a RunTransport. `args` may be a verbatim
  * command-line STRING: node-pty's argv→string join escapes quotes with CRT
  * backslash rules, which cmd.exe's parser does not understand — so cmd
- * invocations must bypass the join entirely (see shellFor). */
-function ptyTransport(file: string, args: string | string[], cwd: string): RunTransport {
+ * invocations must bypass the join entirely (see shellFor).
+ *
+ * `extraEnv` is a per-launch overlay applied LAST (it wins over the inherited
+ * environment). Only Claude launches pass one — see startClaude. */
+function ptyTransport(
+  file: string,
+  args: string | string[],
+  cwd: string,
+  extraEnv: Record<string, string> = {},
+): RunTransport {
   const proc = pty.spawn(file, args, {
     name: 'xterm-color',
     cols: 80,
@@ -53,7 +62,7 @@ function ptyTransport(file: string, args: string | string[], cwd: string): RunTr
     // godSpawnEnv points the GODCLAUDE layer's state home at NARUKAMI's own
     // embedded god home, so Claude sessions (and `godmode.mjs` invocations) in
     // NARUKAMI terminals use NARUKAMI's godclaude — never the native ~/.claude.
-    env: { ...cleanEnv(), ...godSpawnEnv() },
+    env: { ...cleanEnv(), ...godSpawnEnv(), ...extraEnv },
   });
   return {
     pid: proc.pid,
@@ -358,8 +367,14 @@ export function registerRun(runId: string, transport: RunTransport): void {
 }
 
 /** Spawn a local pty, wire it up, and track it. Throws if spawn fails. */
-function spawnManaged(runId: string, file: string, args: string | string[], cwd: string): { pid: number } {
-  const transport = ptyTransport(file, args, cwd);
+function spawnManaged(
+  runId: string,
+  file: string,
+  args: string | string[],
+  cwd: string,
+  extraEnv?: Record<string, string>,
+): { pid: number } {
+  const transport = ptyTransport(file, args, cwd, extraEnv);
   registerRun(runId, transport);
   return { pid: transport.pid };
 }
@@ -449,7 +464,11 @@ export function startClaude(opts: {
     resumeSessionId: opts.resumeSessionId,
   });
   const { file, args } = wrapForWindows(claudeBin, rawArgs);
-  const res = spawnManaged(opts.runId, file, args, opts.cwd);
+  // The configured AI credential (Settings → AI provider). Empty in the default
+  // 'claude-code' mode, so the session authenticates with the CLI's own login
+  // exactly as before. Applied ONLY here — project commands and plain shells are
+  // untrusted and must never see the key.
+  const res = spawnManaged(opts.runId, file, args, opts.cwd, claudeSpawnEnv());
 
   if (opts.initInput) {
     scheduleClaudeInit(opts.runId, opts.initInput, opts.settleMs ?? 700, opts.maxWaitMs ?? 15000);

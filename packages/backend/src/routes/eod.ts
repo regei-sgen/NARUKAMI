@@ -1,15 +1,26 @@
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../db';
-import { AnalyzerError, generateEodReport, type EodProjectInput } from '../services/analyzer';
+import {
+  AnalyzerError,
+  generateEodReport,
+  summarizeSession,
+  type EodProjectInput,
+} from '../services/analyzer';
 import { commitsToText, gitCommitsForDay } from '../services/gitLog';
 import {
   claudeSessionActivity,
   collectActiveProjects,
-  collectSessionContext,
   normPath,
   prettyName,
   type RegisteredProject,
 } from '../services/eodActivity';
+import {
+  collectSessionsForRange,
+  isSubstantiveSession,
+  sessionSubstance,
+  sessionToPromptText,
+  type SessionRecord,
+} from '../services/eodSessions';
 
 /** Local 'YYYY-MM-DD' key for a date (server local time). */
 export function dayKey(d: Date): string {
@@ -175,6 +186,106 @@ function serializeReport(r: EodReportRow) {
   return { ...r, projects };
 }
 
+// ── session-digest layer ────────────────────────────────────────────────────
+// Digesting a session is one `claude -p` call, so a busy day is the expensive
+// part of the report. Three guards keep it bounded: a per-project cap (with the
+// remainder REPORTED, never silently dropped), a small concurrency pool, and a
+// content-addressed cache so regenerating a report doesn't re-read yesterday.
+
+/** Most sessions digested per project per report. Spent on the MOST SUBSTANTIAL
+ *  sessions (see isSubstantiveSession); any remainder is reported to the prompt. */
+const MAX_SESSIONS_PER_PROJECT = 16;
+/** Parallel `claude -p` digests. Each spawns a Claude process — keep it modest. */
+const DIGEST_CONCURRENCY = 4;
+const DIGEST_CACHE_PREFIX = 'eodDigest:';
+/** Cached digests older than this are swept on each generation. */
+const DIGEST_CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+
+/** Cache key: session + its byte size + last entry, so an extended session re-digests. */
+function digestKey(rec: SessionRecord): string {
+  return `${DIGEST_CACHE_PREFIX}${rec.sessionId}:${rec.bytes}:${rec.endedAt ?? ''}`;
+}
+
+async function cachedDigest(rec: SessionRecord): Promise<string | null> {
+  try {
+    const row = await prisma.appSetting.findUnique({ where: { key: digestKey(rec) } });
+    if (!row) return null;
+    const v: unknown = JSON.parse(row.value);
+    return typeof v === 'string' && v.trim() ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+async function storeDigest(rec: SessionRecord, digest: string): Promise<void> {
+  try {
+    const key = digestKey(rec);
+    await prisma.appSetting.upsert({
+      where: { key },
+      update: { value: JSON.stringify(digest) },
+      create: { key, value: JSON.stringify(digest) },
+    });
+  } catch {
+    // Caching is an optimization — never fail a report over it.
+  }
+}
+
+/** Drop digest rows we haven't touched in a fortnight so the table can't grow forever. */
+async function sweepDigestCache(): Promise<void> {
+  try {
+    await prisma.appSetting.deleteMany({
+      where: {
+        key: { startsWith: DIGEST_CACHE_PREFIX },
+        updatedAt: { lt: new Date(Date.now() - DIGEST_CACHE_TTL_MS) },
+      },
+    });
+  } catch {
+    // best-effort
+  }
+}
+
+/**
+ * Layer 1: digest each session of a project, at most DIGEST_CONCURRENCY at a
+ * time. A session whose digest fails is skipped rather than sinking the report —
+ * the roll-up still has the remaining digests, commits and runs to work from.
+ */
+async function digestSessions(
+  projectName: string,
+  projectPath: string,
+  records: SessionRecord[],
+): Promise<string[]> {
+  const out: string[] = new Array(records.length).fill('');
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const i = next;
+      next += 1;
+      if (i >= records.length) return;
+      const rec = records[i];
+      try {
+        const hit = await cachedDigest(rec);
+        if (hit) {
+          out[i] = hit;
+          continue;
+        }
+        const digest = await summarizeSession(projectPath, projectName, sessionToPromptText(rec));
+        if (digest) {
+          out[i] = digest;
+          await storeDigest(rec, digest);
+        }
+      } catch (err) {
+        process.stderr.write(
+          `[narukami] EOD: session ${rec.sessionId} digest failed — ${String(err)}\n`,
+        );
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(DIGEST_CONCURRENCY, records.length) }, () => worker()),
+  );
+  return out.filter((d) => d.trim().length > 0);
+}
+
 /** Runs (started or ended) within [start,end) for a project path. */
 function runsWhere(path: string, start: Date, end: Date) {
   return {
@@ -225,7 +336,9 @@ export async function eodRoutes(app: FastifyInstance): Promise<void> {
       const registered = await prisma.project.findMany({ select: { name: true, path: true } });
       const nameByPath = new Map(registered.map((r) => [normPath(r.path), r.name]));
       const sessionMap = claudeSessionActivity(start, end);
-      const contextMap = collectSessionContext(start, end);
+      // Layer 0: read every in-range transcript END TO END, one record per session.
+      const sessionsByPath = await collectSessionsForRange(start, end);
+      void sweepDigestCache();
 
       const inputs: EodProjectInput[] = [];
       const included: Array<{ name: string; path: string }> = [];
@@ -237,10 +350,40 @@ export async function eodRoutes(app: FastifyInstance): Promise<void> {
           orderBy: { startedAt: 'asc' },
         });
         const runsText = runRows.map((r) => itemLine(toItem(r))).join('\n');
-        const sessions = sessionMap.get(normPath(p))?.count ?? 0;
-        const sessionContext = contextMap.get(normPath(p)) ?? '';
         const name = nameByPath.get(normPath(p)) ?? prettyName(p);
-        inputs.push({ name, commitsText: commitsToText(commits), runsText, sessions, sessionContext });
+
+        const all = sessionsByPath.get(normPath(p)) ?? [];
+        // Drop the headless one-shot stubs first (report generation writes its
+        // own transcripts), then spend the budget on the MOST SUBSTANTIAL
+        // sessions rather than the most recent — newest-first handed the budget
+        // to the stubs. Restored to chronological order so the day still reads
+        // in sequence.
+        const real = all.filter(isSubstantiveSession);
+        const picked = [...real]
+          .sort((a, b) => sessionSubstance(b) - sessionSubstance(a))
+          .slice(0, MAX_SESSIONS_PER_PROJECT)
+          .sort((a, b) => String(a.startedAt ?? '').localeCompare(String(b.startedAt ?? '')));
+        const sessionsOmitted = real.length - picked.length;
+        // Layer 1: one digest per session.
+        const sessionDigests = await digestSessions(name, p, picked);
+        // Coverage is the report's credibility: say plainly how much of the day
+        // actually reached the model, so a partial report is never mistaken for
+        // a complete one.
+        process.stderr.write(
+          `[narukami] EOD ${name}: ${all.length} transcript(s) in range, ${real.length} substantive ` +
+            `(${all.length - real.length} one-shot stub(s) skipped), ${picked.length} selected, ` +
+            `${sessionDigests.length} digested, ${sessionsOmitted} over budget\n`,
+        );
+
+        inputs.push({
+          name,
+          commitsText: commitsToText(commits),
+          runsText,
+          // Prefer the count we actually read; fall back to the mtime scan.
+          sessions: real.length || sessionMap.get(normPath(p))?.count || 0,
+          sessionDigests,
+          sessionsOmitted,
+        });
         included.push({ name, path: p });
       }
 

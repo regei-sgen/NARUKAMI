@@ -30,10 +30,16 @@ const IGNORE_DIRS = new Set([
   '.idea',
 ]);
 
-const MAX_ENTRIES = 4000; // cap tree size so a huge repo can't blow up the payload
-const MAX_DEPTH = 12;
+// Budget for the EAGERLY-sent tree only. It never hides entries: a directory that
+// doesn't fit is returned with `loaded:false` and the client fetches its full
+// listing from /dir on expand. (The old code shared one budget across a
+// depth-first walk, so one huge subtree ate it and every LATER SIBLING was
+// silently dropped — a 44-entry project root rendered as 3 rows.)
+const MAX_EAGER_NODES = 6000;
+const MAX_DEPTH = 32; // recursion rail; deeper dirs are lazy, not hidden
 const MAX_READ_BYTES = 1024 * 1024; // 1 MiB — refuse to open anything larger
 const MAX_WRITE_BYTES = 5 * 1024 * 1024; // 5 MiB write ceiling
+const MAX_NAME_MATCHES = 300; // cap for the file-name search response
 
 // Content-search bounds so grepping a big repo can't hang or blow up the payload.
 const MAX_SEARCH_MATCHES = 500;
@@ -45,6 +51,10 @@ interface FileNode {
   path: string; // project-relative, POSIX separators
   type: 'dir' | 'file';
   children?: FileNode[];
+  // Dirs only. `false` = children were NOT included in this payload (too far past
+  // the eager budget); the client loads them on demand from /dir. Absent means
+  // `children` is the complete listing.
+  loaded?: boolean;
 }
 
 class PathError extends Error {}
@@ -81,71 +91,112 @@ export function resolveInProject(root: string, rel: string): string {
   return abs;
 }
 
-/** Build a bounded, ignore-filtered file tree rooted at the project directory. */
-function buildTree(root: string): { tree: FileNode[]; truncated: boolean } {
-  const rootResolved = path.resolve(root);
-  let count = 0;
-  let truncated = false;
-
-  const walk = (dirAbs: string, depth: number): FileNode[] => {
-    if (depth > MAX_DEPTH) {
-      truncated = true;
-      return [];
-    }
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(dirAbs, { withFileTypes: true });
-    } catch {
-      return [];
-    }
-    // Directories first, then files, each alphabetical.
-    entries.sort((a, b) => {
-      const ad = a.isDirectory() ? 0 : 1;
-      const bd = b.isDirectory() ? 0 : 1;
-      if (ad !== bd) return ad - bd;
-      return a.name.localeCompare(b.name);
-    });
-
-    const nodes: FileNode[] = [];
-    for (const e of entries) {
-      if (count >= MAX_ENTRIES) {
-        truncated = true;
-        break;
-      }
-      // Skip symlinks entirely — avoids loops and out-of-root listings.
-      if (e.isSymbolicLink()) continue;
-      const isDir = e.isDirectory();
-      if (isDir && IGNORE_DIRS.has(e.name)) continue;
-
-      const abs = path.join(dirAbs, e.name);
-      const rel = path.relative(rootResolved, abs).split(path.sep).join('/');
-      count++;
-
-      if (isDir) {
-        nodes.push({ name: e.name, path: rel, type: 'dir', children: walk(abs, depth + 1) });
-      } else if (e.isFile()) {
-        nodes.push({ name: e.name, path: rel, type: 'file' });
-      }
-    }
-    return nodes;
-  };
-
-  return { tree: walk(rootResolved, 0), truncated };
+/**
+ * One directory's listable entries: real files + non-ignored directories, sorted
+ * dirs-first then alphabetically. Symlinks are skipped entirely (loops and
+ * out-of-root listings). An unreadable directory lists as empty, never throws.
+ */
+function readEntries(dirAbs: string): fs.Dirent[] {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dirAbs, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const keep = entries.filter((e) => {
+    if (e.isSymbolicLink()) return false;
+    if (e.isDirectory()) return !IGNORE_DIRS.has(e.name);
+    return e.isFile();
+  });
+  keep.sort((a, b) => {
+    const ad = a.isDirectory() ? 0 : 1;
+    const bd = b.isDirectory() ? 0 : 1;
+    if (ad !== bd) return ad - bd;
+    return a.name.localeCompare(b.name);
+  });
+  return keep;
 }
 
-/** Flatten a file tree to its file paths (project-relative, POSIX). */
-function flattenFiles(nodes: FileNode[]): string[] {
-  const out: string[] = [];
-  const rec = (ns: FileNode[]): void => {
-    for (const n of ns) {
-      if (n.type === 'dir') {
-        if (n.children) rec(n.children);
-      } else {
-        out.push(n.path);
+/** Node for one dirent, with the project-relative POSIX path filled in. */
+function toNode(rootResolved: string, dirAbs: string, e: fs.Dirent): FileNode {
+  const abs = path.join(dirAbs, e.name);
+  const rel = path.relative(rootResolved, abs).split(path.sep).join('/');
+  return e.isDirectory()
+    ? { name: e.name, path: rel, type: 'dir' }
+    : { name: e.name, path: rel, type: 'file' };
+}
+
+/**
+ * Build the ignore-filtered project tree, BREADTH-FIRST and all-or-nothing per
+ * directory. Two invariants make the Explorer honest:
+ *   1. every directory in the payload is listed COMPLETELY or marked
+ *      `loaded:false` — never a partial sibling list;
+ *   2. the project root is always complete, whatever the budget.
+ * Breadth-first means the budget buys the shallow levels users actually look at
+ * first, and anything past it stays reachable through /dir.
+ */
+export function buildTree(
+  root: string,
+  maxNodes: number = MAX_EAGER_NODES,
+): { tree: FileNode[]; lazy: boolean } {
+  const rootResolved = path.resolve(root);
+  const tree: FileNode[] = [];
+  let count = 0;
+  let lazy = false;
+
+  // {abs, node} — node is null for the root level, whose listing is unconditional.
+  const queue: { abs: string; node: FileNode | null; depth: number }[] = [
+    { abs: rootResolved, node: null, depth: 0 },
+  ];
+
+  for (let head = 0; head < queue.length; head += 1) {
+    const { abs, node, depth } = queue[head];
+    const entries = readEntries(abs);
+
+    // Defer the WHOLE directory rather than cut it off mid-list.
+    if (node && (depth > MAX_DEPTH || count + entries.length > maxNodes)) {
+      node.loaded = false;
+      lazy = true;
+      continue;
+    }
+
+    const children: FileNode[] = [];
+    for (const e of entries) {
+      const child = toNode(rootResolved, abs, e);
+      count += 1;
+      children.push(child);
+      if (child.type === 'dir') {
+        queue.push({ abs: path.join(abs, e.name), node: child, depth: depth + 1 });
       }
     }
-  };
-  rec(nodes);
+    if (node) node.children = children;
+    else tree.push(...children);
+  }
+
+  return { tree, lazy };
+}
+
+/**
+ * Every file in the project, project-relative and path-sorted. Uncapped on
+ * purpose: this backs name + content search, which must see the whole project
+ * (the old search flattened the capped tree, so it silently never looked past
+ * the first few thousand entries).
+ */
+export function walkAllFiles(root: string): string[] {
+  const rootResolved = path.resolve(root);
+  const out: string[] = [];
+  const stack: { abs: string; depth: number }[] = [{ abs: rootResolved, depth: 0 }];
+
+  while (stack.length) {
+    const { abs, depth } = stack.pop()!;
+    if (depth > MAX_DEPTH) continue;
+    for (const e of readEntries(abs)) {
+      const childAbs = path.join(abs, e.name);
+      if (e.isDirectory()) stack.push({ abs: childAbs, depth: depth + 1 });
+      else out.push(path.relative(rootResolved, childAbs).split(path.sep).join('/'));
+    }
+  }
+  out.sort((a, b) => a.localeCompare(b));
   return out;
 }
 
@@ -218,7 +269,8 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  // Project file tree (bounded, ignore-filtered).
+  // Project file tree (ignore-filtered). Complete per directory: anything past the
+  // eager budget comes back as `loaded:false` and is fetched from /dir on expand.
   app.get<{ Params: { id: string } }>('/api/projects/:id/tree', async (req, reply) => {
     const project = await prisma.project.findUnique({ where: { id: req.params.id } });
     if (!project) return reply.code(404).send({ error: 'Project not found.' });
@@ -231,9 +283,75 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).send({ error: `Project path no longer exists: ${project.path}` });
     }
 
-    const { tree, truncated } = buildTree(project.path);
-    return { root: project.path, tree, truncated };
+    const { tree, lazy } = buildTree(project.path);
+    return { root: project.path, tree, lazy };
   });
+
+  // Immediate children of ONE directory — the whole listing, no budget. Backs
+  // lazy expansion of directories the initial tree deferred; each subdirectory
+  // comes back `loaded:false` so expansion stays one level at a time.
+  app.get<{ Params: { id: string }; Querystring: { path?: string } }>(
+    '/api/projects/:id/dir',
+    async (req, reply) => {
+      const project = await prisma.project.findUnique({ where: { id: req.params.id } });
+      if (!project) return reply.code(404).send({ error: 'Project not found.' });
+
+      const rel = typeof req.query.path === 'string' ? req.query.path : '';
+      let abs: string;
+      try {
+        abs = resolveInProject(project.path, rel); // reject `..` / symlink escapes
+      } catch (err) {
+        return reply.code(400).send({ error: (err as Error).message });
+      }
+      try {
+        if (!fs.statSync(abs).isDirectory()) {
+          return reply.code(400).send({ error: 'Not a directory.' });
+        }
+      } catch {
+        return reply.code(404).send({ error: 'Directory not found.' });
+      }
+
+      const rootResolved = path.resolve(project.path);
+      const children = readEntries(abs).map((e) => {
+        const node = toNode(rootResolved, abs, e);
+        if (node.type === 'dir') node.loaded = false;
+        return node;
+      });
+      return { path: path.relative(rootResolved, abs).split(path.sep).join('/'), children };
+    },
+  );
+
+  // Find files by name across the WHOLE project (case-insensitive substring on the
+  // project-relative path). Basename hits rank above directory-only hits.
+  app.get<{ Params: { id: string }; Querystring: { q?: string } }>(
+    '/api/projects/:id/files',
+    async (req, reply) => {
+      const project = await prisma.project.findUnique({ where: { id: req.params.id } });
+      if (!project) return reply.code(404).send({ error: 'Project not found.' });
+
+      const q = typeof req.query.q === 'string' ? req.query.q : '';
+      if (!q.trim()) return { files: [], truncated: false };
+
+      try {
+        if (!fs.statSync(project.path).isDirectory()) {
+          return reply.code(400).send({ error: 'Project path is not a directory.' });
+        }
+      } catch {
+        return reply.code(400).send({ error: `Project path no longer exists: ${project.path}` });
+      }
+
+      const needle = q.trim().toLowerCase();
+      const hits = walkAllFiles(project.path).filter((p) => p.toLowerCase().includes(needle));
+      hits.sort((a, b) => {
+        const an = (a.split('/').pop() ?? '').toLowerCase().includes(needle) ? 0 : 1;
+        const bn = (b.split('/').pop() ?? '').toLowerCase().includes(needle) ? 0 : 1;
+        if (an !== bn) return an - bn;
+        if (a.length !== b.length) return a.length - b.length;
+        return a.localeCompare(b);
+      });
+      return { files: hits.slice(0, MAX_NAME_MATCHES), truncated: hits.length > MAX_NAME_MATCHES };
+    },
+  );
 
   // Search file contents across the project (case-insensitive substring). Bounded
   // by ignore-dirs, per-file size, and a total match cap so a big repo is safe.
@@ -256,7 +374,7 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
 
       const rootResolved = path.resolve(project.path);
       const needle = q.toLowerCase();
-      const files = flattenFiles(buildTree(project.path).tree);
+      const files = walkAllFiles(project.path);
 
       const matches: SearchMatch[] = [];
       let truncated = false;
@@ -344,6 +462,44 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
         // The client sends this back on save so we can detect an on-disk change
         // made since the file was opened (conflict / last-write-wins guard).
         mtimeMs: stat.mtimeMs,
+      };
+    },
+  );
+
+  // Cheap staleness probe for an OPEN file: mtime + size, no content read. The
+  // editor polls this to tell whether the copy in the buffer still matches disk
+  // (Claude and other tools edit files behind the editor's back), so the poll
+  // costs a stat rather than re-reading up to a megabyte every few seconds.
+  app.get<{ Params: { id: string }; Querystring: { path?: string } }>(
+    '/api/projects/:id/file-stat',
+    async (req, reply) => {
+      const project = await prisma.project.findUnique({ where: { id: req.params.id } });
+      if (!project) return reply.code(404).send({ error: 'Project not found.' });
+
+      const rel = req.query.path;
+      if (typeof rel !== 'string' || !rel.trim()) {
+        return reply.code(400).send({ error: 'A file path is required.' });
+      }
+
+      let abs: string;
+      try {
+        abs = resolveInProject(project.path, rel);
+      } catch (err) {
+        return reply.code(400).send({ error: (err as Error).message });
+      }
+
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(abs);
+      } catch {
+        return reply.code(404).send({ error: 'File not found.' });
+      }
+      if (stat.isDirectory()) return reply.code(400).send({ error: 'Path is a directory.' });
+
+      return {
+        path: rel.replace(/^[\\/]+/, '').split('\\').join('/'),
+        mtimeMs: stat.mtimeMs,
+        size: stat.size,
       };
     },
   );

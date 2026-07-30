@@ -15,6 +15,13 @@ function reportTitle(dayKey: string): string {
  * Slack: `#`/`##`/`###` headings → `*bold*`, `-`/`*` bullets → `• `, `---` → blank.
  * Exported for testing.
  */
+/** Markdown `**bold**` → Slack's single-asterisk `*bold*`. Slack has no `**`,
+ *  and the report's per-project sub-headings (**Delivered**, **Overview** — …)
+ *  would otherwise paste — and preview — with literal asterisks. */
+function inlineBold(s: string): string {
+  return s.replace(/\*\*(.+?)\*\*/g, '*$1*');
+}
+
 export function toSlack(md: string): string {
   const out: string[] = [];
   for (const raw of md.split('\n')) {
@@ -25,27 +32,59 @@ export function toSlack(md: string): string {
     }
     const h = line.match(/^#{1,6}\s+(.*)$/);
     if (h) {
-      out.push(`*${h[1].replace(/^EOD\s*--\s*/, 'EOD — ')}*`);
+      out.push(`*${inlineBold(h[1]).replace(/^EOD\s*--\s*/, 'EOD — ').replace(/\*/g, '')}*`);
       continue;
     }
-    const b = line.match(/^\s*[-*]\s+(.*)$/);
+    // Nested bullets carry the report's sub-lists ("did X, made up of: a, b, c").
+    // Flattening every level to one "• " lost that structure, so indentation is
+    // mapped to Slack-safe leading spaces instead of being stripped.
+    const b = line.match(/^([ \t]*)[-*]\s+(.*)$/);
     if (b) {
-      out.push(`• ${b[1]}`);
+      const cols = b[1].replace(/\t/g, '  ').length;
+      const depth = cols >= 6 ? 2 : cols >= 2 ? 1 : 0;
+      out.push(`${'    '.repeat(depth)}• ${inlineBold(b[2])}`);
       continue;
     }
-    out.push(line);
+    out.push(inlineBold(line));
   }
   return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/** Split a Slack line on `*bold*` runs so the preview shows weight, not asterisks. */
+function withBold(line: string, key: string): ReactNode[] {
+  const parts: ReactNode[] = [];
+  const re = /\*([^*]+)\*/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(line)) !== null) {
+    if (m.index > last) parts.push(line.slice(last, m.index));
+    parts.push(<strong key={`${key}-b${m.index}`}>{m[1]}</strong>);
+    last = m.index + m[0].length;
+  }
+  if (last < line.length) parts.push(line.slice(last));
+  return parts.length ? parts : [line];
 }
 
 /** Render Slack mrkdwn to styled elements for the on-screen preview. */
 export function renderSlack(slack: string): ReactNode[] {
   return slack.split('\n').map((line, i) => {
     if (!line.trim()) return <div key={i} className="eods-gap" />;
-    const bold = line.match(/^\*(.+)\*$/);
+    const bold = line.match(/^\*([^*]+)\*$/);
     if (bold) return <div key={i} className="eods-h">{bold[1]}</div>;
-    if (line.startsWith('• ')) return <div key={i} className="eods-b">{line}</div>;
-    return <div key={i} className="eods-p">{line}</div>;
+    const bullet = line.match(/^( *)• (.*)$/);
+    if (bullet) {
+      const depth = Math.min(2, Math.floor(bullet[1].length / 4));
+      return (
+        <div
+          key={i}
+          className="eods-b"
+          style={depth ? { paddingLeft: `${depth * 18}px` } : undefined}
+        >
+          {`• ${bullet[2]}`.length ? withBold(`• ${bullet[2]}`, String(i)) : null}
+        </div>
+      );
+    }
+    return <div key={i} className="eods-p">{withBold(line, String(i))}</div>;
   });
 }
 
