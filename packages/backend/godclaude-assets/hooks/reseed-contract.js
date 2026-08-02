@@ -61,11 +61,16 @@ function main(raw) {
   });
 }
 
-let data = '';
-process.stdin.on('data', (c) => (data += c));
-process.stdin.on('end', () => {
-  let out = '';
-  try { out = main(data); } catch (_) { out = ''; }
-  if (out) process.stdout.write(out);
-  process.exit(0);
-});
+// In-process entrypoint — see detect-edit-loop.js. Without it the wrapper spawns a second `node`.
+module.exports = main;
+
+if (require.main === module) {
+  let data = '';
+  process.stdin.on('data', (c) => (data += c));
+  process.stdin.on('end', () => {
+    let out = '';
+    try { out = main(data); } catch (_) { out = ''; }
+    if (out) process.stdout.write(out);
+    process.exit(0);
+  });
+}

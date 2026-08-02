@@ -19,7 +19,6 @@
     "\\bin\\s+good\\s+shape\\b",
     "\\bcover(s|ed)?\\s+(all\\s+)?(the\\s+)?(edge\\s+)?cases?\\b",
     "\\bhandles?\\s+(all\\s+(the\\s+)?|the\\s+|every\\s+)?(edge\\s+)?cases\\b",
-
     "\\broot[- ]?cause(d)?\\b",
     "\\bculprit\\b",
     "\\brepro(duce[ds]?|duced)?\\b",
@@ -29,7 +28,6 @@
     "\\bnow (passes|green)\\b",
     "\\bthe (bug|issue) was\\b",
     "\\bcaused by\\b",
-
     "\\blooks?\\s+(good|right|correct|great)\\b",
     "\\brenders?\\s+correctly\\b",
     "\\bpixel[- ]perfect\\b",
@@ -56,13 +54,12 @@
     "\\b(bundle\\s+exec\\s+)?rspec\\b",
     "\\bphpunit\\b",
     "\\b(eslint|ruff|flake8|mypy|clippy)\\b",
-
     "\\bpytest\\b[^\\n]*-k\\b",
     "\\bnode\\b[^\\n]*\\b(repro|test|spec|bug|debug|verify)\\b",
     "\\b(grep|rg|Select-String)\\b[^\\n]*\\blog",
-
     "\\b(playwright|puppeteer)\\b[^\\n]*\\bscreenshot\\b",
-    "\\b(pa11y|axe|backstop|chromatic|percy|lighthouse)\\b"
+    "\\b(pa11y|axe|backstop|chromatic|percy|lighthouse)\\b",
+    "\\b(?:chrome|chromium|msedge|brave|headless-shell)(?:\\.exe)?\\b[^\\n]*--headless\\b[^\\n]*--screenshot"
   ],
   "extraVerifyTools": [
     "mcp__chrome-devtools__take_screenshot",
@@ -90,12 +87,33 @@
   ],
   "reReadClears": false,
   "confirmCommands": [
-    { "label": "git push", "pattern": "\\bgit\\s+(?:-\\S+(?:\\s+(?:\"[^\"]*\"|'[^']*'|[^\\s\"'])+)?\\s+)*push\\b" },
-    { "label": "publish via gh (PR / release / repo / workflow)", "pattern": "\\bgh\\s+(pr|release|repo|workflow)\\s+(create|merge|edit|delete|run)\\b" },
-    { "label": "deploy", "pattern": "\\brun\\s+(?:[\\w-]+:)?deploy\\b|\\bmake\\s+(?:[\\w-]+:)?deploy\\b|\\b(vercel|netlify|firebase|fly|flyctl|serverless|sls|surge|wrangler|heroku|render|railway)\\s+(deploy|publish|--prod)\\b|\\bgcloud\\s+\\w+\\s+deploy\\b|(\\.[\\\\/]|\\b(?:bash|sh|node|python3?|ruby|pwsh|powershell)\\s+(?:\\.[\\\\/])?)deploy\\.(sh|ps1|py|js|rb)\\b" },
-    { "label": "infra apply / destroy", "pattern": "\\b(kubectl\\b[\\s\\S]*?\\b(apply|delete|replace|patch|rollout|scale|drain|cordon)|terraform\\b[\\s\\S]*?\\b(apply|destroy)|helm\\b[\\s\\S]*?\\b(install|upgrade|uninstall|rollback)|pulumi\\s+(up|destroy)|ansible-playbook)\\b" },
-    { "label": "publish a package or image", "pattern": "\\b((npm|pnpm|yarn|bun)\\s+publish|docker\\b[\\s\\S]*?\\bpush|podman\\b[\\s\\S]*?\\bpush)\\b" },
-    { "label": "mutate live cloud infra", "pattern": "\\b(aws\\s+(s3\\s+(rm|sync|cp)|ecs|lambda\\s+(update|invoke|publish)|cloudformation\\s+(deploy|create-stack|update-stack|delete-stack)|elasticbeanstalk)|gcloud\\b[\\s\\S]*?\\b(deploy|delete)|az\\b[\\s\\S]*?\\b(deploy|delete))\\b" },
-    { "label": "read or move a secret / credential file", "pattern": "(\\.env\\b(?!\\.(?:example|sample|template|dist))|\\bid_(rsa|ed25519|ecdsa|dsa)\\b|\\.(pem|pfx|p12|key|keystore|jks)\\b|\\.ssh[\\\\/]|\\.aws[\\\\/]credentials\\b|\\.npmrc\\b|\\.pypirc\\b|\\bGOOGLE_APPLICATION_CREDENTIALS\\b|service[_-]?account[\\w.-]*\\.json\\b)" }
+    {
+      "label": "git push",
+      "pattern": "\\bgit\\s+(?:-\\S+(?:\\s+(?:\"[^\"]*\"|'[^']*'|[^\\s\"'])+)?\\s+)*push\\b"
+    },
+    {
+      "label": "publish via gh (PR / release / repo / workflow)",
+      "pattern": "\\bgh\\s+(pr|release|repo|workflow)\\s+(create|merge|edit|delete|run)\\b"
+    },
+    {
+      "label": "deploy",
+      "pattern": "\\brun\\s+(?:[\\w-]+:)?deploy\\b|\\bmake\\s+(?:[\\w-]+:)?deploy\\b|\\b(vercel|netlify|firebase|fly|flyctl|serverless|sls|surge|wrangler|heroku|render|railway)\\s+(deploy|publish|--prod)\\b|\\bgcloud\\s+\\w+\\s+deploy\\b|(\\.[\\\\/]|\\b(?:bash|sh|node|python3?|ruby|pwsh|powershell)\\s+(?:\\.[\\\\/])?)deploy\\.(sh|ps1|py|js|rb)\\b"
+    },
+    {
+      "label": "infra apply / destroy",
+      "pattern": "\\b(kubectl\\b[\\s\\S]*?\\b(apply|delete|replace|patch|rollout|scale|drain|cordon)|terraform\\b[\\s\\S]*?\\b(apply|destroy)|helm\\b[\\s\\S]*?\\b(install|upgrade|uninstall|rollback)|pulumi\\s+(up|destroy)|ansible-playbook)\\b"
+    },
+    {
+      "label": "publish a package or image",
+      "pattern": "\\b((npm|pnpm|yarn|bun)\\s+publish|docker\\b[\\s\\S]*?\\bpush|podman\\b[\\s\\S]*?\\bpush)\\b"
+    },
+    {
+      "label": "mutate live cloud infra",
+      "pattern": "\\b(aws\\s+(s3\\s+(rm|sync|cp)|ecs|lambda\\s+(update|invoke|publish)|cloudformation\\s+(deploy|create-stack|update-stack|delete-stack)|elasticbeanstalk)|gcloud\\b[\\s\\S]*?\\b(deploy|delete)|az\\b[\\s\\S]*?\\b(deploy|delete))\\b"
+    },
+    {
+      "label": "read or move a secret / credential file",
+      "pattern": "(\\.env\\b(?!\\.(?:example|sample|template|dist))|\\bid_(rsa|ed25519|ecdsa|dsa)\\b|\\.(pem|pfx|p12|key|keystore|jks)\\b|\\.ssh[\\\\/]|\\.aws[\\\\/]credentials\\b|\\.npmrc\\b|\\.pypirc\\b|\\bGOOGLE_APPLICATION_CREDENTIALS\\b|service[_-]?account[\\w.-]*\\.json\\b)"
+    }
   ]
 }

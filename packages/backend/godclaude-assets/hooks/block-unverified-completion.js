@@ -525,16 +525,30 @@ function decide(data) {
     // against what was asked. Purely additive to an already-decided BLOCK: it cannot cause an allow.
     let askLine = '';
     try {
-      const firstUser = objs.find(o => o && o.type === 'user' && o.message &&
-        (typeof o.message.content === 'string' ||
-         (Array.isArray(o.message.content) && o.message.content.some(b => b && b.type === 'text'))));
+      // Scan BACKWARDS for the most recent real user request. The first version used objs.find(),
+      // which returns the FIRST user turn — in a long session that is hours-stale archaeology, and
+      // it fired for real: a bounce told the agent to verify against "what is the github ci all
+      // about?" while the actual task was something else entirely. Naming the wrong goal is worse
+      // than naming none, because the checklist's whole instruction is "compare against what was
+      // asked". Tool RESULTS are also type:'user', so they are excluded explicitly.
       let ask = '';
-      if (firstUser) {
-        const c = firstUser.message.content;
-        ask = typeof c === 'string' ? c : c.filter(b => b && b.type === 'text').map(b => b.text).join(' ');
+      for (let i = objs.length - 1; i >= 0; i--) {
+        const o = objs[i];
+        if (!o || o.type !== 'user' || !o.message) continue;
+        const c = o.message.content;
+        let t = '';
+        if (typeof c === 'string') t = c;
+        else if (Array.isArray(c)) {
+          if (c.some(b => b && b.type === 'tool_result')) continue;   // a tool result, not a request
+          t = c.filter(b => b && b.type === 'text').map(b => b.text).join(' ');
+        }
+        t = String(t).replace(/\s+/g, ' ').trim();
+        // Skip hook-injected system chatter so the checklist quotes the human, not the harness.
+        if (!t || /^\[(?:GODCLAUDE|autopilot|SYSTEM)/i.test(t)) continue;
+        ask = t;
+        break;
       }
-      ask = String(ask).replace(/\s+/g, ' ').trim();
-      if (ask) askLine = `\nWhat you were originally asked: "${ask.slice(0, 300)}${ask.length > 300 ? '…' : ''}"\n`;
+      if (ask) askLine = `\nWhat you were asked to do: "${ask.slice(0, 300)}${ask.length > 300 ? '…' : ''}"\n`;
     } catch (_) { /* fail-open: no ask line */ }
     const checklist =
       `\nBefore you stop, run this pass:\n` +

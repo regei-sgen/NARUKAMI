@@ -69,11 +69,18 @@ function main(raw) {
   });
 }
 
-let data = '';
-process.stdin.on('data', (c) => (data += c));
-process.stdin.on('end', () => {
-  let out = '';
-  try { out = main(data); } catch (_) { out = ''; }
-  if (out) process.stdout.write(out);
-  process.exit(0);
-});
+// In-process entrypoint: godmode-gate.mjs requires this module and calls it directly, avoiding a
+// second `node` start (~150 ms) per matching tool call. Without this export the wrapper falls back
+// to spawning the file as a CLI — which is what it was doing.
+module.exports = main;
+
+if (require.main === module) {
+  let data = '';
+  process.stdin.on('data', (c) => (data += c));
+  process.stdin.on('end', () => {
+    let out = '';
+    try { out = main(data); } catch (_) { out = ''; }
+    if (out) process.stdout.write(out);
+    process.exit(0);
+  });
+}
