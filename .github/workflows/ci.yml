@@ -14,7 +14,9 @@
 #
 # Job layout, and why:
 #   verify  — BLOCKING. typecheck (all three workspaces) + unit tests + coverage
-#             floors + the LAN-skip audit. Every step here exits 0 locally.
+#             floors + the LAN-skip audit, plus (since 2026-08-02) the vendored
+#             GODCLAUDE hook suite and its payload-hash check. Every step here
+#             exits 0 locally.
 #   lint    — BLOCKING as of 2026-08-02. It was advisory while 22 errors /
 #             6 warnings of pre-existing violations sat in application source;
 #             all 28 have since been fixed at the call sites (no rule was
@@ -81,6 +83,27 @@ jobs:
         env:
           NARUKAMI_REQUIRE_LAN: '1'
         run: npm run test:coverage
+
+      # The vendored GODCLAUDE payload ships onto end users' machines via
+      # provision(), and it carries its OWN regression suite. Until 2026-08-02
+      # nothing ran it: not CI, not any npm script, and eslint.config.mjs ignores
+      # the directory outright — so the ~15 hook scripts in the installer were
+      # the only code here with zero automated coverage of any kind.
+      # `npm run test:hooks` shells _test-hooks.mjs, which ends in
+      # `process.exit(allPass ? 0 : 1)`, so a red suite fails this job.
+      - name: vendored godclaude hook suite
+        run: npm run test:hooks
+
+      # Guards the OTHER half of the same problem: refreshIfProvisioned() only
+      # re-copies the payload when the VENDOR.json stamp moves, so editing a
+      # vendored hook without re-stamping leaves every already-provisioned user
+      # on the old bytes. This recomputes the hash and fails if VENDOR.json is
+      # stale. The hash is line-ending-normalised on purpose — the vendoring
+      # machine can hold CRLF while this runner checks out LF (.gitattributes
+      # `* text=auto eol=lf`), and a raw-byte hash would go red on a payload
+      # nobody touched. See scripts/hash-vendor-assets.mjs.
+      - name: vendored payload hash is current
+        run: npm run vendor:check
 
       - name: upload coverage
         if: always()

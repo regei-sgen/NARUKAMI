@@ -14,6 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { computeContentHash } from './hash-vendor-assets.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..');
@@ -63,6 +64,17 @@ const manifest = {
   files: FILES,
   dirs: DIRS,
 };
+
+// Stamp the payload hash in the same breath as the copy. `version` is whatever
+// upstream's package.json said and can repeat across two different payloads;
+// contentHash is derived from the bytes, and it is what the backend's
+// refreshIfProvisioned() uses to decide an already-provisioned user is stale.
+// Computed here (not left to a follow-up command) so a re-vendor can never
+// produce an unstamped payload — `npm run vendor:check` verifies it in CI.
+const { hash, count } = computeContentHash(manifest);
+manifest.contentHash = hash;
+
 fs.writeFileSync(path.join(DEST, 'VENDOR.json'), JSON.stringify(manifest, null, 2) + '\n');
 
 console.log(`Vendored godclaude ${version} -> ${DEST} (${copied} entries)`);
+console.log(`  contentHash ${hash} (${count} files)`);

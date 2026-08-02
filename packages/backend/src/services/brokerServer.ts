@@ -174,7 +174,7 @@ function handleBrokerSocket(socket: net.Socket): void {
       if (!line) continue;
       let msg: { t?: string; token?: unknown; runId?: unknown; pid?: unknown };
       try {
-        msg = JSON.parse(line);
+        msg = JSON.parse(line) as typeof msg;
       } catch {
         continue;
       }

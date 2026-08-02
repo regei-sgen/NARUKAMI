@@ -46,6 +46,23 @@ console.log(`perf log:  ${PERF}`);
 console.log(`audit log: ${AUDIT}`);
 console.log(`scope:     ${allHistory ? 'ALL history (--all)' : `last ${windowDays} days (default; --all for full history)`}`);
 if (perfSpan) console.log(`window:    ${perfSpan.from}  →  ${perfSpan.to}`);
+// LOUD when this report describes a SANDBOX corpus rather than the daily driver. DET_HOOKS_HOME is a
+// deliberate isolation seam (NARUKAMI pins it so harness development doesn't pollute the real tree),
+// but it silently splits the measurements: the same gate p95 reads ~830ms in the sandbox and ~415ms
+// in the real home. Reading half the data without knowing it is how a tuning gets aimed at the wrong
+// number — so name the corpus instead of quietly reporting on it.
+{
+  const realHome = (os.homedir() || process.env.USERPROFILE || '').replace(/\\/g, '/');
+  if (process.env.DET_HOOKS_HOME && HOME !== realHome) {
+    console.log(bar);
+    console.log(`!! SANDBOX CORPUS — DET_HOOKS_HOME is set, so this report covers ONLY`);
+    console.log(`     ${HOME}`);
+    console.log(`   and NOT your real harness at`);
+    console.log(`     ${realHome}`);
+    console.log(`   The two diverge; do not compare numbers across them. For daily-driver`);
+    console.log(`   figures, re-run with DET_HOOKS_HOME unset.`);
+  }
+}
 
 console.log(`\n▎Per-hook latency (ACTIVE invocations only)`);
 if (!hookStats.length) {

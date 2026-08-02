@@ -9,9 +9,10 @@
 // keeps whatever mode you're already in). It is transparent (the anti-drift hook announces every
 // switch) and correctable (an explicit /goddev or `godmode:` keyword wins; `autopilot off` disables it).
 //
-// Scoring: each signal carries a weight (2 = strong/distinctive, 1 = weak/supporting). A switch
-// happens only when the top mode's score >= THRESHOLD AND beats the runner-up by >= MARGIN. A single
-// STRONG signal triggers; a single WEAK signal does not; two modes tied on strong signals => no switch.
+// Scoring: each signal carries a weight (3 = decisive/deliverable-defining, 2 = strong/distinctive,
+// 1 = weak/supporting). A switch happens only when the top mode's score >= THRESHOLD AND beats the
+// runner-up by >= MARGIN. A single STRONG signal triggers; a single WEAK signal does not; two modes
+// tied on strong signals => no switch.
 
 const fs = require('node:fs');
 const R = require('./godmode-mode.js'); // homeDir
@@ -63,7 +64,13 @@ const SIGNALS = {
     // an explicit request to PRODUCE a plan (a plan as the deliverable): "make a plan", "make 3 plans",
     // "draft a plan", "give me a plan". A producing-verb + a/N plan(s) — distinct from casual "I plan to
     // visit" / "a plan for the weekend" (no producing verb), which stay below threshold on the weak hit.
-    [2, /\b(make|create|draft|write|give|produce|outline|propose|prepare|draw\s+up)\b[^.\n]{0,15}\bplans?\b/i],
+    // Weight 3 (decisive): the plan IS the deliverable, so it must OUT-SCORE the dev-signal words that
+    // naturally describe the plan's SUBJECT ("make a plan to implement the checkout feature" scores
+    // developer implement+feature=3 — at weight 2 planner tied at 3 and the tie routed to developer).
+    [3, /\b(make|create|draft|write|give|produce|outline|propose|prepare|draw\s+up)\b[^.\n]{0,15}\bplans?\b/i],
+    // "plan out X" / "plan how to X" / "plan first/before" — plan-as-the-next-step phrasing with no
+    // producing verb ("plan how to fix this bug" scored only the weak hit and lost to developer's "bug").
+    [2, /\bplan\s+(out|how|first|before)\b/i],
     [1, /\bplans?\b/i], [1, /\broadmap\b/i], [1, /\bblueprint\b/i], [1, /\btrade[- ]?offs?\b/i], [1, /\bbreak\s+(this|it)\s+down\b/i], [1, /\bstrategy\b/i], [1, /\bproposal\b/i],
   ],
   'ci-cd': [

@@ -19,12 +19,16 @@
     "test:unit": "node scripts/run-unit-tests.mjs",
     "test:integration": "npm run test:integration -w backend",
     "test:coverage": "node scripts/run-unit-tests.mjs --coverage",
+    "test:hooks": "node packages/backend/godclaude-assets/hooks/_test-hooks.mjs",
+    "vendor:hash": "node scripts/hash-vendor-assets.mjs",
+    "vendor:check": "node scripts/hash-vendor-assets.mjs --check",
     "lint": "eslint .",
     "lint:strict": "eslint . --max-warnings 0",
-    "verify": "npm run typecheck && npm run lint:strict && npm run test:coverage",
+    "verify": "npm run typecheck && npm run lint:strict && npm run test:coverage && npm run test:hooks && npm run vendor:check",
     "migrate": "npm run migrate -w backend",
     "desktop": "npm run build && npm run start -w desktop",
-    "desktop:dist": "npm run build && npm run dist -w desktop"
+    "desktop:dist": "npm run build && npm run dist -w desktop",
+    "harness:parity": "node scripts/check-harness-parity.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",

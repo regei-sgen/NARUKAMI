@@ -204,7 +204,7 @@ export function MobileTerminal({ runId, shareToken }: { runId: string; shareToke
           rows?: number;
         };
         try {
-          msg = JSON.parse(ev.data as string);
+          msg = JSON.parse(ev.data as string) as typeof msg;
         } catch {
           return;
         }

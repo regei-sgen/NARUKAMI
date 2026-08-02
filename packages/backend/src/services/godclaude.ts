@@ -62,9 +62,22 @@ export function locateAssets(): string | null {
 
 interface VendorManifest {
   version?: string;
+  /**
+   * sha256 over the payload's line-ending-normalised bytes, stamped by
+   * scripts/hash-vendor-assets.mjs and verified in CI. Optional: a payload
+   * vendored before 2026-08-02 has none, and the refresh below falls back to
+   * `version` alone rather than failing.
+   */
+  contentHash?: string;
   vendoredAt?: string;
   files?: string[];
   dirs?: string[];
+}
+
+/** What identifies THIS build's vendored payload. */
+interface VendorStamp {
+  version: string;
+  contentHash: string | null;
 }
 
 function readJson<T>(file: string): T | null {
@@ -75,23 +88,34 @@ function readJson<T>(file: string): T | null {
   }
 }
 
-/** Version of the assets shipped with this build ('unknown' when unstated, null when absent). */
 // Memoized: vendored assets are immutable for the process lifetime, but the 5s
 // status poll called this every tick — 4 statSyncs + a readFileSync+parse per
 // call on the Fastify event loop for a constant.
-let vendoredVersionCache: string | null | undefined;
-export function vendoredVersion(): string | null {
-  if (vendoredVersionCache === undefined) {
+let vendorStampCache: VendorStamp | null | undefined;
+function vendorStamp(): VendorStamp | null {
+  if (vendorStampCache === undefined) {
     const assets = locateAssets();
-    vendoredVersionCache = assets
-      ? readJson<VendorManifest>(path.join(assets, 'VENDOR.json'))?.version ?? 'unknown'
+    const m = assets ? readJson<VendorManifest>(path.join(assets, 'VENDOR.json')) : null;
+    vendorStampCache = assets
+      ? { version: m?.version ?? 'unknown', contentHash: m?.contentHash ?? null }
       : null;
   }
-  return vendoredVersionCache;
+  return vendorStampCache;
+}
+
+/** Version of the assets shipped with this build ('unknown' when unstated, null when absent). */
+export function vendoredVersion(): string | null {
+  return vendorStamp()?.version ?? null;
 }
 
 interface InstallManifest {
   version: string;
+  /**
+   * Payload hash recorded at install time. Absent on any home provisioned
+   * before the hash existed — `isPayloadStale` treats that as stale exactly
+   * once, so those homes re-provision and gain a hash.
+   */
+  contentHash?: string;
   provisionedAt: string;
   assetsFrom: string;
 }
@@ -142,6 +166,7 @@ export async function provision(): Promise<{ ok: boolean; error?: string }> {
     }
     const manifest: InstallManifest = {
       version: vendor?.version ?? 'unknown',
+      ...(vendor?.contentHash ? { contentHash: vendor.contentHash } : {}),
       provisionedAt: new Date().toISOString(),
       assetsFrom: assets.replace(/\\/g, '/'),
     };
@@ -152,13 +177,37 @@ export async function provision(): Promise<{ ok: boolean; error?: string }> {
   }
 }
 
-/** At boot: refresh an EXISTING install's assets when the vendored version moved. Best-effort. */
+/**
+ * Does an installed god home need its assets re-copied? Pure, so the decision is
+ * testable without touching a real home.
+ *
+ * `version` alone used to be the whole cache key, and it is hand-typed — copied
+ * from the upstream repo by scripts/vendor-godclaude.mjs. So editing a vendored
+ * hook in-repo without bumping the string left every already-provisioned user
+ * running the OLD bytes forever, silently. `contentHash` is derived from the
+ * payload itself, so that edit now moves the key on its own.
+ *
+ * Either field moving is enough. A vendored payload with no hash (pre-2026-08-02)
+ * falls back to version-only — fail-open, no worse than before. An INSTALL with
+ * no hash against a payload that has one counts as stale, which re-provisions
+ * that home once and stamps a hash into its manifest; provision() is an
+ * idempotent overwrite of asset paths only, so state files survive it.
+ */
+export function isPayloadStale(
+  installed: Pick<InstallManifest, 'version' | 'contentHash'>,
+  vendored: VendorStamp,
+): boolean {
+  if (vendored.version !== installed.version) return true;
+  return vendored.contentHash !== null && vendored.contentHash !== installed.contentHash;
+}
+
+/** At boot: refresh an EXISTING install's assets when the vendored payload moved. Best-effort. */
 export async function refreshIfProvisioned(): Promise<void> {
   try {
     const installed = installedManifest();
     if (!installed) return; // never auto-install — that's the user's click
-    const vendored = vendoredVersion();
-    if (vendored && vendored !== installed.version) await provision();
+    const vendored = vendorStamp();
+    if (vendored && isPayloadStale(installed, vendored)) await provision();
   } catch {
     /* boot must not fail on this */
   }

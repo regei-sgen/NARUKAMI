@@ -23,9 +23,47 @@
 // hook cannot block — so this returns '' and does its work as a side effect. Fail-safe: any error =>
 // no-op. Honors DET_HOOKS_HOME (tests).
 
+const fs = require('node:fs');
 const os = require('node:os');
 let STATE; try { STATE = require('./godstate-core.js'); } catch (_) { STATE = null; } // per-session store
 const HOME = (process.env.DET_HOOKS_HOME || os.homedir() || process.env.USERPROFILE || '').replace(/\\/g, '/');
+const CLAUDE_DIR = `${HOME}/.claude`;
+
+// ---- session outcome record -------------------------------------------------------------------
+// The harness measured latencies and counters but never whether a session ACCOMPLISHED anything —
+// there was no end-to-end signal of any kind, so "did that harness change help?" was unanswerable.
+// This appends one JSONL line per session. Fields that cannot be derived honestly are OMITTED
+// rather than written as a fake zero: a missing key means "not measured", which is a different
+// claim from "measured zero", and conflating them is how a metric starts lying.
+function writeOutcome(sid, reason) {
+  const rec = { ts: new Date().toISOString(), sid: String(sid).slice(0, 64), reason: reason || 'unknown' };
+  try {
+    const modes = new Set();
+    // Modes actually used this session, from the monitor heartbeats.
+    try {
+      const hb = fs.readFileSync(`${CLAUDE_DIR}/godmonitor.log`, 'utf8').trim().split('\n').slice(-400);
+      for (const line of hb) {
+        try { const j = JSON.parse(line); if (j && j.effective) modes.add(j.effective); } catch (_) {}
+      }
+    } catch (_) {}
+    if (modes.size) rec.modes = [...modes];
+
+    // Gate activity for THIS session is not attributable from hook-audit.log (its lines carry no
+    // session id), so gateBlocks/gateVerifies are deliberately omitted rather than guessed. Wiring
+    // the sid into the gate's audit lines is the prerequisite for adding them.
+    const dir = `${CLAUDE_DIR}/godmode-sessions/${String(sid).replace(/[^A-Za-z0-9._-]/g, '_')}`;
+    try {
+      const counts = JSON.parse(fs.readFileSync(`${dir}/edit-counts.json`, 'utf8'));
+      const files = Object.keys(counts);
+      rec.filesMutated = files.length;
+      rec.totalEdits = files.reduce((n, f) => n + counts[f], 0);
+      const worst = files.sort((a, b) => counts[b] - counts[a])[0];
+      if (worst) rec.maxEditsOneFile = counts[worst];
+    } catch (_) { /* no edit-count state ⇒ omit, do not write 0 */ }
+
+    fs.appendFileSync(`${CLAUDE_DIR}/session-outcomes.jsonl`, JSON.stringify(rec) + '\n');
+  } catch (_) { /* outcome logging must never affect cleanup */ }
+}
 
 // Reasons that mean the session is CONTINUING, not ending-for-good — preserve its overlay so a resumed
 // or context-cleared session keeps the mode it had. Everything else is a genuine end => clear the pick.
@@ -39,6 +77,7 @@ function run(data) {
   if (!sid) return '';                                   // no session id => no overlay to clear (never global)
   const reason = typeof input.reason === 'string' ? input.reason.trim().toLowerCase() : '';
   if (KEEP_REASONS.has(reason)) return '';               // resume / clear / … => a continuation; leave it intact
+  writeOutcome(sid, reason);                             // record the outcome BEFORE the state it reads is cleared
   try {
     // Clear ONLY this session's overlay (scope:'session' never touches the global seed or other sessions).
     // Drop the explicit PIN + the selected MODE so the ended session resolves to the global seed again;

@@ -24,5 +24,12 @@
     "^Glob$",
     "mcp__.*(search|symbol|definition|references|outline|codebase|index)"
   ],
-  "reReadClears": false
+  "reReadClears": false,
+  "denyTools": [
+    {
+      "tool": "Write|Edit|MultiEdit|NotebookEdit",
+      "except": "(scratchpad|/tmp/|AppData/Local/Temp|.md$)",
+      "reason": "godplan produces a PLAN, not an implementation. Writing the plan itself (.md) is allowed; changing source is not — that is the build step, and sliding into it is the exact drift this mode exists to prevent."
+    }
+  ]
 }

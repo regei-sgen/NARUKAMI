@@ -140,8 +140,8 @@ export function ease(from: number, to: number, k: number): number {
  */
 export function resample(series: number[], length: number): number[] {
   if (length <= 0) return [];
-  if (series.length === 0) return new Array(length).fill(0);
-  if (series.length === 1) return new Array(length).fill(series[0]);
+  if (series.length === 0) return new Array<number>(length).fill(0);
+  if (series.length === 1) return new Array<number>(length).fill(series[0]);
   const out: number[] = [];
   for (let i = 0; i < length; i += 1) {
     const t = (i / (length - 1)) * (series.length - 1);

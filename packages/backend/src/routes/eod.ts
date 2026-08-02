@@ -179,7 +179,7 @@ interface EodReportRow {
 function serializeReport(r: EodReportRow) {
   let projects: Array<{ name: string; path: string }> = [];
   try {
-    projects = JSON.parse(r.projects);
+    projects = JSON.parse(r.projects) as Array<{ name: string; path: string }>;
   } catch {
     projects = [];
   }
@@ -254,7 +254,7 @@ async function digestSessions(
   projectPath: string,
   records: SessionRecord[],
 ): Promise<string[]> {
-  const out: string[] = new Array(records.length).fill('');
+  const out: string[] = new Array<string>(records.length).fill('');
   let next = 0;
   const worker = async (): Promise<void> => {
     for (;;) {

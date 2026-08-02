@@ -120,6 +120,12 @@ function run(data) {
   // happens, inject the NEW mode's full contract (not just the terse reminder) so the switch is adopted
   // in depth, not just enforced by the gate. `switchedTo` = the new mode when the mode actually changed.
   let switchedTo = '';
+  // Routing telemetry. senseMode() returns {mode, score, margin, hits} and every field except the
+  // winner was discarded, so router accuracy was unmeasurable by construction: nothing recorded WHY
+  // a mode won, how close the runner-up was, or whether the "decision" was really the hard-coded
+  // default fallthrough (~59% of switches). Captured here and written into the heartbeat below.
+  // The prompt is truncated hard and never recorded in full.
+  let routeDetail = null;
   let prevMode = 'general'; try { prevMode = resolveMode(HOME, cwd, sid); } catch (_) {}
 
   // (1) OPT-IN explicit keyword switch — HIGHEST priority. `godmode:<name>` at a word boundary, only
@@ -167,6 +173,13 @@ function run(data) {
           if (persistMode(sid, target, false)) {
             switchedTo = target;
             const sensed = senseMode(prompt);
+            routeDetail = {
+              matched: !!sensed,                                  // false ⇒ DEFAULT fallthrough, not a decision
+              signals: sensed ? sensed.hits.slice(0, 5) : [],
+              score: sensed ? sensed.score : 0,
+              margin: sensed ? sensed.margin : 0,
+              promptHead: String(prompt || '').replace(/\s+/g, ' ').slice(0, 80),
+            };
             const why = sensed ? `signals: ${sensed.hits.slice(0, 3).join(', ')}` : 'substantive task → default god mode';
             const godName = (R.GODNAME && R.GODNAME[target]) ? ` · ${R.GODNAME[target]}` : ''; // Kami pseudonym (display only; the machine-parsed banner keeps the bare id)
             senseNote = `[autopilot] switched to ${target}${godName} (${PRIMARY[target] || target}) — ${why}. Wrong? pick ` +
@@ -280,7 +293,8 @@ function run(data) {
   if (switchedTo && MON && typeof MON.logHeartbeat === 'function' && typeof MON.healthCheck === 'function') {
     try {
       const hc = MON.healthCheck(HOME, cwd, sid);
-      MON.logHeartbeat(HOME, { event: 'switch', requested: hc.requested, effective: hc.effective, drift: hc.drift, ok: hc.ok, sensing: true, issues: hc.issues });
+      // Additive only — existing consumers keep reading the same keys; `route` is new.
+      MON.logHeartbeat(HOME, { event: 'switch', requested: hc.requested, effective: hc.effective, drift: hc.drift, ok: hc.ok, sensing: true, issues: hc.issues, route: routeDetail || undefined });
     } catch (_) {}
   }
 

@@ -10,6 +10,7 @@ Core stance: a plan is only as good as the reality it is built on. Ground every 
 6. **Distinguish decision / spike / plan.** A decision needs a rationale; an unknown needs a SPIKE (a small experiment) before it can be planned as if known. Don't plan an unknown as settled.
 7. **No false confidence.** "Solid plan / ready to build / this will work" is a claim — back it with the parts of the codebase you actually inspected, and flag what you did NOT verify.
 8. **Research live facts; don't recall them.** When the plan turns on a library capability / API / version behavior, verify it upstream.
+9. **GODPLAN replaces Claude Code's built-in plan mode.** Do NOT call EnterPlanMode — the generic plan flow enforces none of rules 1–8. Deliver the plan directly in your response under this contract. (A PreToolUse gate denies EnterPlanMode while the layer is armed, so this is enforced, not advisory.)
 
 ## planner mode — what "proof of work" means here
 

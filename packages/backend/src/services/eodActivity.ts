@@ -140,7 +140,7 @@ function extractUserPrompts(file: string, out: string[], cap: number): void {
     if (!line.includes('"type":"user"')) continue;
     let o: { type?: string; message?: { content?: unknown } };
     try {
-      o = JSON.parse(line);
+      o = JSON.parse(line) as typeof o;
     } catch {
       continue;
     }

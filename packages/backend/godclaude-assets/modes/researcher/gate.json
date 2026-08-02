@@ -29,5 +29,12 @@
     "\\bdoi:\\s*\\S+",
     "\\bretrieved\\b[^\\n]*\\b20\\d\\d\\b"
   ],
-  "reReadClears": true
+  "reReadClears": true,
+  "denyTools": [
+    {
+      "tool": "Write|Edit|MultiEdit|NotebookEdit",
+      "except": "(scratchpad|/tmp/|AppData/Local/Temp|.md$)",
+      "reason": "godscout gathers and cites; it does not modify the codebase. Notes and reports (.md) and scratchpad files are allowed — source edits are not. Hand implementation to /goddev."
+    }
+  ]
 }

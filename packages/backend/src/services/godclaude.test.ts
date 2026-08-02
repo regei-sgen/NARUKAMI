@@ -7,6 +7,7 @@ import {
   godClaudeDir,
   godHome,
   godSpawnEnv,
+  isPayloadStale,
   isProvisioned,
   locateAssets,
   provision,
@@ -51,6 +52,58 @@ describe('vendored assets', () => {
     expect(locateAssets()).not.toBeNull();
     expect(vendoredVersion()).toMatch(/^\d+\.\d+\.\d+$/);
   });
+
+  it('the vendored payload carries a content hash stamped by scripts/hash-vendor-assets.mjs', () => {
+    const assets = locateAssets();
+    expect(assets).not.toBeNull();
+    const vendor = JSON.parse(
+      fs.readFileSync(path.join(assets as string, 'VENDOR.json'), 'utf8'),
+    ) as { contentHash?: string };
+    expect(vendor.contentHash).toMatch(/^sha256:[0-9a-f]{64}$/);
+  });
+});
+
+/**
+ * The staleness rule refreshIfProvisioned() runs at boot. `version` alone used
+ * to be the whole key, which made an edit to a vendored hook invisible to every
+ * already-provisioned user; the third case below is that exact bug.
+ */
+describe('isPayloadStale', () => {
+  const HASH_A = 'sha256:' + 'a'.repeat(64);
+  const HASH_B = 'sha256:' + 'b'.repeat(64);
+
+  it('is not stale when version and content hash both match', () => {
+    expect(
+      isPayloadStale({ version: '1.7.3', contentHash: HASH_A }, { version: '1.7.3', contentHash: HASH_A }),
+    ).toBe(false);
+  });
+
+  it('is stale when the version moved', () => {
+    expect(
+      isPayloadStale({ version: '1.7.3', contentHash: HASH_A }, { version: '1.8.0', contentHash: HASH_A }),
+    ).toBe(true);
+  });
+
+  it('is stale when a vendored file changed but the version string did NOT', () => {
+    expect(
+      isPayloadStale({ version: '1.7.3', contentHash: HASH_A }, { version: '1.7.3', contentHash: HASH_B }),
+    ).toBe(true);
+  });
+
+  it('treats an install predating the hash as stale exactly once', () => {
+    expect(isPayloadStale({ version: '1.7.3' }, { version: '1.7.3', contentHash: HASH_A })).toBe(true);
+    // …and after that refresh stamped the hash in, it settles.
+    expect(
+      isPayloadStale({ version: '1.7.3', contentHash: HASH_A }, { version: '1.7.3', contentHash: HASH_A }),
+    ).toBe(false);
+  });
+
+  it('falls back to version-only when the vendored payload has no hash (fail-open)', () => {
+    expect(isPayloadStale({ version: '1.7.3', contentHash: HASH_A }, { version: '1.7.3', contentHash: null })).toBe(
+      false,
+    );
+    expect(isPayloadStale({ version: '1.7.3' }, { version: '1.8.0', contentHash: null })).toBe(true);
+  });
 });
 
 describe('provision', () => {
@@ -80,6 +133,17 @@ describe('provision', () => {
       expect(fs.existsSync(path.join(dir, f)), `${f} missing`).toBe(true);
     }
     expect(godSpawnEnv()).toEqual({ DET_HOOKS_HOME: tmpHome });
+  });
+
+  it('records the vendored content hash in the install manifest', async () => {
+    await provision();
+    const installed = JSON.parse(
+      fs.readFileSync(path.join(godClaudeDir(), 'narukami-godclaude.json'), 'utf8'),
+    ) as { version?: string; contentHash?: string };
+    expect(installed.version).toMatch(/^\d+\.\d+\.\d+$/);
+    // Without this, refreshIfProvisioned() has nothing to compare and a hook
+    // edit that leaves `version` untouched never reaches this home.
+    expect(installed.contentHash).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
 
   it('is idempotent and preserves state files across re-provision', async () => {

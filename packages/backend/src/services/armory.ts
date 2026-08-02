@@ -72,11 +72,16 @@ export function flattenHooks(settings: unknown, scope: Scope, project?: string):
   const out: ArmoryHook[] = [];
   for (const event of Object.keys(hooks)) {
     const groups = hooks[event];
+    // `Array.isArray` narrows an `unknown` to `any[]`, which would silently
+    // re-introduce `any` into every access below — re-assert `unknown[]` so the
+    // shapes stay explicit casts (type-level only; no runtime change).
     if (!Array.isArray(groups)) continue;
-    for (const g of groups) {
+    for (const raw of groups as unknown[]) {
+      const g = raw as { matcher?: unknown; hooks?: unknown } | null;
       const matcher = typeof g?.matcher === 'string' && g.matcher ? g.matcher : '*';
-      const inner = Array.isArray(g?.hooks) ? g.hooks : [];
-      for (const h of inner) {
+      const inner: unknown[] = Array.isArray(g?.hooks) ? (g.hooks as unknown[]) : [];
+      for (const rawHook of inner) {
+        const h = rawHook as { command?: unknown; type?: unknown } | null;
         const command = String(h?.command ?? h?.type ?? '').trim();
         if (command) out.push({ event, matcher, command, scope, project });
       }

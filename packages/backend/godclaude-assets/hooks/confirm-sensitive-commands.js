@@ -46,8 +46,28 @@ const SHELL = new Set(['Bash', 'PowerShell']); // the tools that actually run sh
 // corrected regex: it consumes `-C <dir>` / `-c k=v` option-args (incl. quoted paths with spaces like
 // `git -C "C:/My Repo" push`) that the old `(?:-\S+\s+)*` form let bypass. Kept git-push-only to avoid
 // false prompts; per-mode gate.json still adds mode-specific guards (developer/web-builder: publish/docker).
+// 2026-08-02: extended from ONE entry to the layer-wide destructive/sensitive set. Live probes showed
+// `rm -rf <home>` and credential-file reads passing unchallenged in EVERY mode — the only authority
+// boundary that existed was on git push. These ASK (propose-and-confirm); the absolute cases are
+// additionally covered by permissions.deny in settings.json, which denies outright. Patterns are kept
+// tight to avoid nuisance prompts on ordinary work: a scoped `rm -rf ./build` is untouched, only
+// recursive force-deletes aimed at a root/home/drive or a wildcard are flagged.
 const BASE_CONFIRM = [
   { base: true, label: 'git push', pattern: '\\bgit\\s+(?:-\\S+(?:\\s+(?:"[^"]*"|\'[^\']*\'|[^\\s"\'])+)?\\s+)*push\\b' },
+  { base: true, label: 'history-rewriting git operation', pattern: '\\bgit\\s+(?:reset\\s+--hard|push\\s+(?:--force\\b|-f\\b)|filter-branch\\b|update-ref\\s+-d\\b)' },
+  // recursive force delete aimed at a root, a home, a drive root, or a bare wildcard
+  { base: true, label: 'recursive force delete', pattern: '\\brm\\s+(?:-[a-zA-Z]*\\s+)*-?[a-zA-Z]*[rR][a-zA-Z]*f|\\brm\\s+(?:-[a-zA-Z]*\\s+)*-?[a-zA-Z]*f[a-zA-Z]*[rR]' },
+  { base: true, label: 'recursive delete (PowerShell)', pattern: '\\bRemove-Item\\b[^\\n]*-Recurse\\b[^\\n]*-Force\\b|\\bRemove-Item\\b[^\\n]*-Force\\b[^\\n]*-Recurse\\b' },
+  // pipe-to-shell: fetch-and-execute is the classic supply-chain foothold
+  // spansPipe: this rule is ABOUT the pipe, so it must be tested against the whole command line.
+  // segments() splits on shell operators, which would put `curl …` and `sh` in different segments and
+  // make a pipe-spanning pattern unmatchable — the reason this rule silently allowed on first probe.
+  { base: true, spansPipe: true, label: 'pipe-to-shell', pattern: '\\b(?:curl|wget|iwr|Invoke-WebRequest)\\b[^\\n|]*\\|\\s*(?:sudo\\s+)?(?:sh|bash|zsh|pwsh|powershell|iex|Invoke-Expression)\\b' },
+  // reading secrets: a credential store or private key should be a deliberate, confirmed act
+  // `.env.example` / `.sample` / `.template` / `.dist` are TEMPLATES committed to the repo, not
+  // secrets — flagging them is a nuisance prompt on ordinary work (regression case 109c pins this).
+  { base: true, label: 'credential / key file read', pattern: '\\b(?:cat|type|Get-Content|head|tail|less|more)\\b[^\\n]*(?:\\.credentials\\.json|\\.env\\b(?!\\.(?:example|sample|template|dist|defaults?)\\b)(?:\\.[\\w-]+)?|id_rsa\\b|id_ed25519\\b|\\.pem\\b|\\.pfx\\b|\\.p12\\b)' },
+  { base: true, label: 'disk / partition write', pattern: '\\b(?:mkfs(?:\\.\\w+)?|diskpart|format\\s+[A-Za-z]:)\\b|\\bdd\\s+[^\\n]*\\bof=/dev/' },
 ];
 
 // Compile one confirmCommands entry — a {label, pattern} object (preferred) or a bare regex string —
@@ -56,8 +76,9 @@ function compile(entry) {
   const src = (entry && typeof entry === 'object') ? entry.pattern : entry;
   const label = (entry && typeof entry === 'object' && entry.label) ? entry.label : 'sensitive command';
   const base = !!(entry && typeof entry === 'object' && entry.base);
+  const spansPipe = !!(entry && typeof entry === 'object' && entry.spansPipe);
   if (typeof src !== 'string' || !src) return null;
-  try { return { label, base, re: new RegExp(src, 'i') }; } catch (_) { return null; }
+  try { return { label, base, spansPipe, re: new RegExp(src, 'i') }; } catch (_) { return null; }
 }
 
 // Split a command line into independently-tested segments. Testing per-segment means
@@ -114,7 +135,9 @@ function run(data) {
 
     const segs = segments(command);
     let hit = null;
-    for (const r of rules) { if (segs.some(s => r.re.test(s))) { hit = r; break; } }
+    // Segment-scoped by default (a rule describes ONE command); spansPipe rules describe the
+    // composition itself and so are tested against the full line.
+    for (const r of rules) { if (r.spansPipe ? r.re.test(command) : segs.some(s => r.re.test(s))) { hit = r; break; } }
     if (!hit) return '';                                                 // nothing sensitive → allow
 
     const event = input.hook_event_name || 'PreToolUse';

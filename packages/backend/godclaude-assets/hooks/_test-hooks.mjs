@@ -2552,7 +2552,61 @@ expect('118d. godsite: `docker build .` → ALLOW (building is fine; only publis
   expect('342b. …and still ALLOWs (pure chat is exempt)', /"decision"\s*:\s*"block"/.test(out), false);
 }
 
-// ---- report ----
+// ====================================================================================
+// ===== GODPLAN OWNS PLANNING: router tie-break + EnterPlanMode redirect ===============
+// (a) Router: a produce-a-plan request is the DELIVERABLE, so it must out-score the dev
+// signals that merely describe the plan's SUBJECT. At weight 2, "make a plan to implement
+// the new checkout feature" tied planner 3 vs developer 3 (implement+feature) → no confident
+// signal → the aggressive fallback routed to DEVELOPER. The produce-a-plan signal is now
+// weight 3 (decisive), plus a strong "plan out/how/first/before" phrasing signal.
+// (b) redirect-plan-mode.js: while the layer is armed, a built-in EnterPlanMode call is
+// DENIED (godplan owns planning) and the session is switched to planner unless an explicit
+// pin is set. Fail-OPEN on bad input / planner missing; dormant wrapper stays a no-op.
+// ====================================================================================
+{
+  expect('350a. sense: "make a plan to implement the new checkout feature" → planner (plan is the deliverable, beats dev-subject tie)', senseSays('make a plan to implement the new checkout feature'), 'planner');
+  expect('350b. sense: "make me a plan first before you build the api endpoint" → planner', senseSays('make me a plan first before you build the api endpoint'), 'planner');
+  expect('350c. sense: "plan how to fix this bug in the parser" → planner (plan-out/how phrasing)', senseSays('plan how to fix this bug in the parser'), 'planner');
+  expect('350d. sense: "implement the plan we agreed on" → developer (executing a plan is dev work, no over-routing)', senseSays('implement the plan we agreed on'), 'developer');
+  expect('350e. sense: "review this plan for gaps" → reviewer (no over-routing)', senseSays('review this plan for gaps'), 'reviewer');
+  expect('350f. sense: casual "i plan to visit my parents, anyway fix the bug" → developer (no over-routing)', senseSays('i plan to visit my parents this weekend, anyway fix the bug'), 'developer');
+}
+{
+  const PLANREDIR = `${HOOKS}/redirect-plan-mode.js`;
+  const h = `${FIX}/planredir`;
+  fs.mkdirSync(`${h}/.claude`, { recursive: true });
+  const prEnv = { ...process.env, DET_HOOKS_HOME: h, GODMODE_MODE: '', GODMODE_MODES_DIR: MODES_DIR, GODMODE_PERF: '0' };
+  const runPlanRedir = (payload, env = prEnv, via = '') => {
+    const args = via === 'wrap' ? [WRAP, PLANREDIR] : [PLANREDIR];
+    const input = typeof payload === 'string' ? payload : JSON.stringify(payload);
+    try { return execFileSync('node', args, { input, encoding: 'utf8', env }); } catch (e) { return (e.stdout || '') + (e.stderr || ''); }
+  };
+  const enterPlan = { hook_event_name: 'PreToolUse', tool_name: 'EnterPlanMode', tool_input: {}, session_id: '', cwd: 'C:/work' };
+  const denied = (out) => /"permissionDecision"\s*:\s*"deny"/.test(out);
+
+  let out = runPlanRedir(enterPlan);
+  expect('351a. planredir: EnterPlanMode (general, unpinned) → DENY with godplan guidance', denied(out) && /godplan/i.test(out), true);
+  expect('351b. planredir: …and the session mode is switched to planner', readModeFile(h), 'planner');
+  out = runPlanRedir(enterPlan);
+  expect('351c. planredir: EnterPlanMode while planner ACTIVE → still DENY (already-active wording)', denied(out) && /ALREADY the active mode/.test(out), true);
+  fs.writeFileSync(`${h}/.claude/godmode-mode`, 'developer\n'); fs.writeFileSync(`${h}/.claude/godmode-explicit`, 'explicit\n');
+  out = runPlanRedir(enterPlan);
+  expect('351d. planredir: explicit PIN (developer) → DENY but the pin is respected (mode not overwritten)', denied(out) && /pinned/.test(out) && readModeFile(h) === 'developer', true);
+  fs.rmSync(`${h}/.claude/godmode-explicit`, { force: true });
+  expect('351e. planredir: other tool (Read) → ALLOW (no output)', runPlanRedir({ ...enterPlan, tool_name: 'Read' }).trim(), '');
+  expect('351f. planredir: unparsable input → ALLOW (fail-open, no output)', runPlanRedir('not json').trim(), '');
+  expect('351g. planredir: planner mode not installed → ALLOW (fail-open)', runPlanRedir(enterPlan, { ...prEnv, GODMODE_MODES_DIR: `${h}/nomodes` }).trim(), '');
+  expect('352a. planredir wrapper DORMANT: EnterPlanMode → ALLOW (layer off, no redirect)', runPlanRedir(enterPlan, { ...prEnv, GODMODE_ACTIVE: '0' }, 'wrap').trim(), '');
+  expect('352b. planredir wrapper ACTIVE: EnterPlanMode → DENY relayed', denied(runPlanRedir(enterPlan, { ...prEnv, GODMODE_ACTIVE: '1' }, 'wrap')), true);
+  // session isolation: with a session_id the switch lands in THAT session's overlay, never the global file.
+  fs.writeFileSync(`${h}/.claude/godmode-mode`, 'general\n');
+  const sid = 'aaaabbbb-1111-2222-3333-444455556666';
+  out = runPlanRedir({ ...enterPlan, session_id: sid });
+  const overlayMode = (() => { try { return fs.readFileSync(`${h}/.claude/godmode-sessions/${sid}/mode`, 'utf8').trim(); } catch (_) { return ''; } })();
+  expect('352c. planredir: with session_id → DENY + planner written to the SESSION overlay (global file untouched)', denied(out) && overlayMode === 'planner' && readModeFile(h) === 'general', true);
+}
+
+  // ---- report ----
 let allPass = true;
 console.log('\n=== deterministic-hook layer — both-directions test ===');
 for (const c of cases) {

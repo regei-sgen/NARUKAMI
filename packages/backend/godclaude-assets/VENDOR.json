@@ -12,5 +12,6 @@
   "dirs": [
     "hooks",
     "modes"
-  ]
+  ],
+  "contentHash": "sha256:7e07cffa9e7246432c14c2634f6c310ef0c4d8bcc89d673cd1d07bc80a39a91c"
 }

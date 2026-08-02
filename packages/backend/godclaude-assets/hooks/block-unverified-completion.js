@@ -48,7 +48,13 @@ const AUDIT = `${HOME}/.claude/hook-audit.log`;
 const MAX_AUDIT_BYTES = 10 * 1024 * 1024; // rotate the audit log past 10 MB (keep one .1 backup)
 
 // --- pattern sets (module scope: built once per process, not per decision) ---
-const MUT = new Set(['Write', 'Edit', 'NotebookEdit']); // tool-level mutations we gate on
+const MUT = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']); // tool-level mutations we gate on
+// DELEGATION is mutation-equivalent. A parent that hands all its editing to a subagent shows only
+// Task/Workflow tool_uses in its own turn, so the mutation test saw "nothing changed" and exempted
+// the turn — proven live: delegate the work, then claim "all done, tests pass", gate never fires.
+// A delegated result is exactly what most needs the parent's own verification, because the parent
+// did not watch the subagent do it.
+const DELEG = new Set(['Task', 'Workflow', 'Agent']);
 const SHELL = new Set(['Bash', 'PowerShell']);          // tools that can run real commands
 const CLAIM = [
   /\b(all\s+)?done\b/i, /\ball set\b/i, /\bcomplete(d)?\b/i, /\bfinished\b/i,
@@ -327,7 +333,7 @@ function decide(data) {
       let mut0 = false;
       for (const o of o0.slice(s0)) {
         if (o.type === 'assistant' && o.message && Array.isArray(o.message.content)) {
-          for (const b of o.message.content) if (b && b.type === 'tool_use' && (MUT.has(b.name) || (SHELL.has(b.name) && isShellMutation(b.input && b.input.command)))) { mut0 = true; break; }
+          for (const b of o.message.content) if (b && b.type === 'tool_use' && (MUT.has(b.name) || DELEG.has(b.name) || (SHELL.has(b.name) && isShellMutation(b.input && b.input.command)))) { mut0 = true; break; }
         }
         if (mut0) break;
       }
@@ -426,11 +432,14 @@ function decide(data) {
     // are tracked separately: they don't produce a re-readable artifact and typically FOLLOW verification
     // (test → commit), so they don't reset that ordering window — see the shell-mutation clause below.
     let lastMutIdx = -1;
-    for (let i = 0; i < toolUses.length; i++) if (MUT.has(toolUses[i].name)) lastMutIdx = i;
+    // Delegation counts for the ordering window too: verification must come AFTER the subagent
+    // returned, not before it was dispatched.
+    for (let i = 0; i < toolUses.length; i++) if (MUT.has(toolUses[i].name) || DELEG.has(toolUses[i].name)) lastMutIdx = i;
     const mutations = toolUses.filter(t => MUT.has(t.name));
+    const delegations = toolUses.filter(t => DELEG.has(t.name));
     const shellMuts = toolUses.filter(t => SHELL.has(t.name) && isShellMutation(t.input && t.input.command));
     audit(`DIAG event=${event} mode=${MODELABEL} tx=${tp.split(/[\\/]/).pop()} settled=${settled} idx=${startIdx}/${objs.length} muts=${mutations.length} shellMuts=${shellMuts.length} lastMut=${lastMutIdx} tools=[${toolUses.map(t => t.name).join(',')}] tail=${JSON.stringify((lastText || '').slice(-70))}`);
-    if (lastMutIdx < 0 && !shellMuts.length) return allow('no mutation this turn (exempt)');
+    if (lastMutIdx < 0 && !shellMuts.length && !delegations.length) return allow('no mutation this turn (exempt)');
     const writtenPaths = mutations
       .map(t => (t.input.file_path || t.input.notebook_path || '').replace(/\\/g, '/'))
       .filter(Boolean);
@@ -495,19 +504,45 @@ function decide(data) {
     if (verified) return allow(`claim+mutation but verified (${why}) [mode=${MODELABEL}]`);
 
     // Wording adapts to WHAT was mutated: file edits (Write/Edit) and/or shell mutations (rm/git commit/…).
-    const fileN = mutations.length, shellN = shellMuts.length;
-    const mutSummary = fileN && shellN ? `mutated ${fileN} file(s) and ran ${shellN} mutating command(s)`
-      : fileN ? `mutated ${fileN} file(s)`
-      : `ran ${shellN} mutating command(s)`;
+    const fileN = mutations.length, shellN = shellMuts.length, delegN = delegations.length;
+    const sumParts = [];
+    if (fileN) sumParts.push(`mutated ${fileN} file(s)`);
+    if (shellN) sumParts.push(`ran ${shellN} mutating command(s)`);
+    if (delegN) sumParts.push(`delegated ${delegN} task(s) to subagent(s)`);
+    const mutSummary = sumParts.join(' and ') || 'changed state';
     const changedLine = writtenPaths.length
       ? `Files changed this turn: ${writtenPaths.join(', ')}.`
       : shellN ? `Mutating command(s): ${shellMuts.map(t => (t.input.command || '').replace(/\s+/g, ' ').trim().slice(0, 60)).join(' | ')}.`
+      : delegN ? `Delegated work: ${delegations.map(t => String((t.input && (t.input.description || t.input.prompt)) || 'subagent task').replace(/\s+/g, ' ').trim().slice(0, 60)).join(' | ')}. You did not watch the subagent work — verify its output yourself.`
       : `Files changed this turn: (paths not captured).`;
     const reReadBullet = !fileN
       ? `  - A shell mutation (commit/install/rm/redirect) clears when a passing test/build/check ran in the SAME turn — run one, OR\n`
       : RE_READ_CLEARS
       ? `  - Re-read the file(s) you changed (after the edit) and confirm the change is actually present and correct, OR\n`
       : `  - (A bare re-read does NOT count in ${MODELABEL} mode — seeing your edit is not proof it works.)\n`;
+    // Re-inject the ORIGINAL request. A bounce that only says "go verify" leaves the agent to
+    // re-derive the goal, and the observed failure is verifying against its own code instead of
+    // against what was asked. Purely additive to an already-decided BLOCK: it cannot cause an allow.
+    let askLine = '';
+    try {
+      const firstUser = objs.find(o => o && o.type === 'user' && o.message &&
+        (typeof o.message.content === 'string' ||
+         (Array.isArray(o.message.content) && o.message.content.some(b => b && b.type === 'text'))));
+      let ask = '';
+      if (firstUser) {
+        const c = firstUser.message.content;
+        ask = typeof c === 'string' ? c : c.filter(b => b && b.type === 'text').map(b => b.text).join(' ');
+      }
+      ask = String(ask).replace(/\s+/g, ' ').trim();
+      if (ask) askLine = `\nWhat you were originally asked: "${ask.slice(0, 300)}${ask.length > 300 ? '…' : ''}"\n`;
+    } catch (_) { /* fail-open: no ask line */ }
+    const checklist =
+      `\nBefore you stop, run this pass:\n` +
+      `  PLAN   — restate the acceptance criterion for the request above.\n` +
+      `  BUILD  — confirm the change you made addresses THAT, not a nearby problem.\n` +
+      `  VERIFY — run the test/build/command that exercises the changed path and READ its full output.\n` +
+      `  FIX    — if it failed, fix it and re-run; do not report around it.\n` +
+      `Compare against what was asked, NOT against your own code.\n`;
     return block(
       `Proof-of-work gate (${event}${MODELABEL !== 'general' ? `, ${MODELABEL} mode` : ''}): you are ending a turn that ${mutSummary} and asserts completion ` +
       `(matched ${claimPat}), but this turn shows NO passing verification for that work.\n\n` +
@@ -517,6 +552,8 @@ function decide(data) {
       `  - If you genuinely cannot verify, REWRITE your closing message to drop the completion claim and state explicitly what is unverified and why.\n\n` +
       `Note: writing "exit 0" / "tests pass" / "$ cmd" as text does NOT count unless a real command actually ran.\n` +
       `${changedLine}\n` +
+      askLine +
+      checklist +
       `This is one bounce (circuit breaker allows the next stop), so make it count: verify or downgrade the claim.`
     );
   } catch (err) {
