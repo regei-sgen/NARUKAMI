@@ -29,6 +29,14 @@ const END = `${HOOKS}/godsession-end.js`;
 const FIX = `${HOOKS}/_testfix`;
 fs.mkdirSync(FIX, { recursive: true });
 fs.mkdirSync(`${FIX}/.claude`, { recursive: true }); // sandbox home so gate audit/log writes never touch the real ~/.claude
+// Seed the sandbox home with THIS PAYLOAD's base contract. The injector resolves it as
+// `${HOME}/.claude/deterministic-contract.md`, so without this the contract tests read the
+// DEVELOPER'S OWN ~/.claude and passed only because that file happened to exist locally — they
+// went red the first time CI ran them on a clean runner (run 30753523627, cases 23 and 24).
+// This suite ships inside the payload and must verify the PAYLOAD, never the host machine.
+try {
+  fs.copyFileSync(path.resolve(HOOKS, '..', 'deterministic-contract.md'), `${FIX}/.claude/deterministic-contract.md`);
+} catch (_) { /* absent in a partial checkout → the contract cases will fail loudly, which is correct */ }
 // Mode-system seams: the modes live one dir up (assets/modes in source, ~/.claude/modes when
 // installed). GODMODE_MODES_DIR lets us point the resolver/gate at them without an install.
 const MODES_DIR = path.resolve(HOOKS, '..', 'modes').replace(/\\/g, '/');
@@ -400,11 +408,12 @@ const expect = (name, got, want) => cases.push({ name, pass: got === want, got, 
 
 // 23-25. injectors
 {
-  const o = runInject(INJECT, 'SessionStart');
+  // home: FIX — read the payload's own contract from the sandbox, not the host's ~/.claude.
+  const o = runInject(INJECT, 'SessionStart', { home: FIX });
   expect('23. inject SessionStart has contract', /Deterministic Operating Contract/.test(o) && /"hookEventName":"SessionStart"/.test(o), true);
 }
 {
-  const o = runInject(INJECT, 'SubagentStart');
+  const o = runInject(INJECT, 'SubagentStart', { home: FIX });
   expect('24. inject echoes SubagentStart event', /"hookEventName":"SubagentStart"/.test(o) && /Deterministic Operating Contract/.test(o), true);
 }
 {
