@@ -14,6 +14,7 @@ import {
   tokenMatches,
 } from './statsLan';
 import { statsLanRoutes } from '../routes/statsLan';
+import { getPcStats } from './pcstats';
 
 describe('safeAssetPath', () => {
   const root = path.resolve('/srv/dist');
@@ -112,7 +113,12 @@ describe('read-only LAN stats server', () => {
   beforeAll(async () => {
     const h = await startStatsLan(PORT);
     token = h.token;
-  });
+    // The FIRST getPcStats() pays for a cold PowerShell/WMI probe whose exec
+    // budget is 8 s, plus up to 1.2 s of LHM fetch — more than the 5 s test
+    // timeout, and it genuinely took that long on a hosted CI runner. Warm it
+    // here so the tests below assert auth gating, not first-probe latency.
+    await getPcStats();
+  }, 30_000);
   afterAll(async () => {
     await stopStatsLan();
   });

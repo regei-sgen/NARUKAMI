@@ -22,14 +22,14 @@
 #             which still carries the same narrow rule set). `npm run lint`
 #             now exits 0, and the blocking script is lint:strict
 #             (--max-warnings 0) so warnings cannot creep back in either.
-#   integration — STILL NON-BLOCKING, for one honest reason: these tests shell
-#             the real vendored god CLIs with 30 s timeouts and need a real git
-#             binary, and they have never been observed on a HOSTED runner —
-#             only locally on Windows, where they are green (6 files / 48
-#             tests). Promote this to blocking after one clean observed run.
-#             (The test that used to be RED here — a stale assertion against the
-#             deleted GET /api/godclaude/logs route — was removed, so a red
-#             result now means a genuine environment or product problem.)
+#   integration — BLOCKING as of 2026-08-02. It was advisory while unproven on
+#             a hosted runner; run 30738526049 then ran the suite clean on
+#             windows-latest (the "integration tests" step itself succeeded —
+#             not a continue-on-error mask), which was the stated promotion
+#             criterion. A red result here now means a genuine environment or
+#             product problem — the test that used to be RED (a stale assertion
+#             against the deleted GET /api/godclaude/logs route) was removed
+#             before this file was added.
 
 name: CI
 
@@ -110,14 +110,14 @@ jobs:
         run: npm run lint:strict
 
   integration:
-    name: integration (advisory — unproven on a hosted runner)
+    name: integration (blocking)
     runs-on: windows-latest
     timeout-minutes: 30
-    # Advisory. Green locally on Windows (6 files / 48 tests) but never yet
-    # observed on a hosted runner: these shell the real vendored god CLIs with
-    # 30 s timeouts and need a real git binary. Flip to `false` after one clean
-    # observed run — do NOT flip it by loosening or skipping tests.
-    continue-on-error: true
+    # Blocking since 2026-08-02, after the first clean hosted-runner run
+    # (30738526049) — the promotion criterion the advisory phase set. These
+    # tests shell the real vendored god CLIs with 30 s timeouts and need a real
+    # git binary. Do not re-add continue-on-error to hide a red run; fix the
+    # cause instead.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
