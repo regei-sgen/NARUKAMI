@@ -1,21 +1,27 @@
-import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
-
-const execFileAsync = promisify(execFile);
+// Cycle-safe: godclaude.ts imports collectSessions/readUsage from here, but both
+// directions only dereference the binding INSIDE function bodies, never at
+// module-evaluation time.
+import { godClaudeDir } from './godclaude';
 
 /**
- * Argus Panoptes — read-only projection over the GODCLAUDE hook layer under
- * ~/.claude. Everything here READS; nothing ever writes into ~/.claude.
+ * Argus — read-only projection over the GODCLAUDE state tree under ~/.claude.
+ * Everything here READS; nothing ever writes into ~/.claude.
  *
- * Two data strategies (see docs/ARGUS-PANOPTES-PLAN.md):
- *   - Mode resolution / health / gate+perf math → shell GODCLAUDE's own `--json`
- *     CLIs (authoritative; never diverges from the god layer's logic).
- *   - Sessions / usage / logs / memory-graph → parse the on-disk files directly,
- *     fail-soft (a bad/missing file yields a documented empty default, never throws).
+ * Sessions / usage / memory-graph are parsed off disk directly and fail-soft (a
+ * bad or missing file yields a documented empty default, never throws). The
+ * original plan's other half — shelling the native god `--json` CLIs for
+ * health/gate/perf — was superseded by the EMBEDDED god layer
+ * (services/godclaude.ts, which runs those CLIs against NARUKAMI's own home),
+ * so the native shell-out path and its combined status snapshot were removed.
+ *
+ * The byte-bounded log tailer (`tailLog` + its allowlist and `splitTail` helper)
+ * was removed too: it only ever fed the planned LogFeed panel, which was never
+ * built on either the native or the embedded side, so both /api/argus/logs and
+ * /api/godclaude/logs had zero clients.
  */
 
 /** Root of the GODCLAUDE state tree. Overridable for tests. */
@@ -23,76 +29,17 @@ export function claudeDir(): string {
   return process.env.ARGUS_CLAUDE_DIR ?? path.join(os.homedir(), '.claude');
 }
 
-// ── shell-out to the god CLIs ────────────────────────────────────────────────
-
-const CLI_TIMEOUT_MS = 15_000;
-const CLI_MAX_BUFFER = 16 * 1024 * 1024;
-
 /**
- * Run a GODCLAUDE `.mjs` CLI with `--json` and parse its stdout. Uses the current
- * Node/Electron binary; ELECTRON_RUN_AS_NODE lets a packaged Electron run it as
- * plain Node. Returns null (never throws) if the script is absent, errors, times
- * out, or emits non-JSON.
+ * godmode-stats.mjs --json → perf / gate aggregates / suggestions. The shape is
+ * shared: services/godclaude.ts runs that CLI against the EMBEDDED home and
+ * parses into this interface.
  */
-async function runGodJson<T>(scriptName: string): Promise<T | null> {
-  const scriptPath = path.join(claudeDir(), scriptName);
-  if (!fs.existsSync(scriptPath)) return null;
-  try {
-    const { stdout } = await execFileAsync(process.execPath, [scriptPath, '--json'], {
-      timeout: CLI_TIMEOUT_MS,
-      maxBuffer: CLI_MAX_BUFFER,
-      windowsHide: true,
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-    });
-    return JSON.parse(stdout) as T;
-  } catch {
-    return null;
-  }
-}
-
-// Small TTL cache so a ~2s frontend poll doesn't re-spawn the CLIs on every tick.
-interface CacheEntry<T> {
-  t: number;
-  v: T;
-}
-const cache = new Map<string, CacheEntry<unknown>>();
-
-async function cached<T>(key: string, ttlMs: number, produce: () => Promise<T>): Promise<T> {
-  const hit = cache.get(key) as CacheEntry<T> | undefined;
-  const now = Date.now();
-  if (hit && now - hit.t < ttlMs) return hit.v;
-  const v = await produce();
-  cache.set(key, { t: now, v });
-  return v;
-}
-
-/** godmonitor.mjs --json → health / modes / activity / heartbeats / routing. */
-export interface GodSnapshot {
-  health: Record<string, unknown>;
-  modes: Array<Record<string, unknown>>;
-  activity: Record<string, { allow: number; block: number }>;
-  heartbeats: Array<Record<string, unknown>>;
-  routing: Record<string, unknown>;
-}
-
-/** godmode-stats.mjs --json → perf / gate aggregates / suggestions. */
 export interface GodStats {
   perfSpan: { from: string; to: string } | null;
   dispatch: Record<string, number>;
   hookStats: Array<Record<string, unknown>>;
   gate: Record<string, unknown>;
   suggestions: string[];
-}
-
-export function readSnapshot(): Promise<GodSnapshot | null> {
-  // 10s, matching the embedded path (services/godclaude.ts): each miss spawns a
-  // full Electron-as-node godmonitor.mjs run, which is expensive on Windows —
-  // a monitoring dashboard doesn't need sub-10s freshness.
-  return cached('snapshot', 10_000, () => runGodJson<GodSnapshot>('godmonitor.mjs'));
-}
-
-export function readStats(): Promise<GodStats | null> {
-  return cached('stats', 30_000, () => runGodJson<GodStats>('godmode-stats.mjs'));
 }
 
 // ── live Claude session fleet ────────────────────────────────────────────────
@@ -218,13 +165,47 @@ export interface Usage {
   rate_limits?: Record<string, { used_percentage?: number; resets_at?: number }>;
 }
 
-export async function readUsage(): Promise<Usage | null> {
+/** Read one home's usage-live.json. Fail-soft: missing/torn/non-object → null. */
+async function readUsageFile(dir: string): Promise<Usage | null> {
   try {
-    const raw = await fsp.readFile(path.join(claudeDir(), 'usage-live.json'), 'utf8');
-    return JSON.parse(raw) as Usage;
+    const raw = await fsp.readFile(path.join(dir, 'usage-live.json'), 'utf8');
+    const parsed: unknown = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? (parsed as Usage) : null;
   } catch {
     return null;
   }
+}
+
+/** `ts` for ordering; a file without a numeric ts sorts oldest but still counts. */
+function usageTs(u: Usage): number {
+  return typeof u.ts === 'number' ? u.ts : Number.NEGATIVE_INFINITY;
+}
+
+/**
+ * Account rate-limit usage, merged across BOTH godclaude homes, newest `ts` wins.
+ *
+ * usage-live.json is written by the statusline hook into `${DET_HOOKS_HOME}/.claude`,
+ * and NARUKAMI sets DET_HOOKS_HOME to its EMBEDDED god home (services/godclaude.ts
+ * godSpawnEnv) on every pty, headless analyzer run and broker shell. So sessions
+ * launched from NARUKAMI write ~/.narukami/godclaude/.claude/usage-live.json while
+ * native `claude` terminals write ~/.claude/usage-live.json. Reading only the
+ * native path froze the always-visible header meter (routes/vitals.ts) at whatever
+ * the last NATIVE session left — observed a full day stale with different numbers.
+ *
+ * Fail-soft in both directions: if one side is missing or corrupt we return the
+ * other, and only return null when NEITHER side yields a readable object.
+ *
+ * NOTE: this also changes the semantics of the native Argus panel, which used to
+ * show strictly the native home's reading. That is intended — rate limits are
+ * ACCOUNT-wide, not per-home, so the newest reading from either home is the truest
+ * picture of the account regardless of which home's session produced it.
+ */
+export async function readUsage(): Promise<Usage | null> {
+  // Deduped: a test/config where the two resolve to the same dir must not double-read.
+  const dirs = Array.from(new Set([claudeDir(), godClaudeDir()]));
+  const found = (await Promise.all(dirs.map(readUsageFile))).filter((u): u is Usage => u !== null);
+  if (found.length === 0) return null;
+  return found.reduce((best, u) => (usageTs(u) > usageTs(best) ? u : best));
 }
 
 // ── memory / Obsidian knowledge graph ────────────────────────────────────────
@@ -502,121 +483,3 @@ export async function readNote(project: string, slug: string): Promise<MemoryNot
   };
 }
 
-// ── log tails (byte-bounded — never slurp the multi-MB append-only logs) ──────
-
-export type LogSource = 'monitor' | 'perf' | 'audit';
-
-const LOG_FILES: Record<LogSource, { file: string; json: boolean }> = {
-  monitor: { file: 'godmonitor.log', json: true },
-  perf: { file: 'godmode-perf.log', json: true },
-  audit: { file: 'hook-audit.log', json: false },
-};
-
-/** Split a tail buffer into the last `n` complete lines. `partialFirst` drops a
- *  leading half-line when the read started mid-file. Pure. */
-export function splitTail(text: string, n: number, partialFirst: boolean): string[] {
-  let lines = text.split(/\r?\n/);
-  if (partialFirst && lines.length) lines = lines.slice(1);
-  lines = lines.filter((l) => l.length > 0);
-  return lines.slice(-n);
-}
-
-export interface LogResult {
-  source: string;
-  file: string;
-  exists: boolean;
-  count: number;
-  lines: unknown[];
-}
-
-/**
- * Tail an allowlisted god log. `source` maps through a fixed table (never a
- * client path). Reads only the last window of bytes, so a 3 MB append-only log
- * is cheap and rotation-safe. `baseDir` selects the god state tree — native
- * ~/.claude by default; the embedded godclaude routes pass their own home.
- */
-export async function tailLog(
-  source: string,
-  limit: number,
-  baseDir: string = claudeDir(),
-): Promise<LogResult | { error: string }> {
-  const spec = LOG_FILES[source as LogSource];
-  if (!spec) return { error: `unknown log source "${source}" (use monitor|perf|audit)` };
-  const n = Math.max(1, Math.min(2000, Math.floor(limit) || 200));
-  const file = path.join(baseDir, spec.file);
-
-  let size = 0;
-  try {
-    size = (await fsp.stat(file)).size;
-  } catch {
-    return { source, file, exists: false, count: 0, lines: [] };
-  }
-
-  // Read a window sized to the request (bounded 64 KB .. 4 MB).
-  const window = Math.min(size, Math.max(64 * 1024, Math.min(4 * 1024 * 1024, n * 600)));
-  const start = size - window;
-  let text = '';
-  try {
-    const fd = await fsp.open(file, 'r');
-    try {
-      const buf = Buffer.alloc(window);
-      await fd.read(buf, 0, window, start);
-      text = buf.toString('utf8');
-    } finally {
-      await fd.close();
-    }
-  } catch {
-    return { source, file, exists: true, count: 0, lines: [] };
-  }
-
-  const rawLines = splitTail(text, n, start > 0);
-  const lines = spec.json
-    ? rawLines.map((l) => {
-        try {
-          return JSON.parse(l);
-        } catch {
-          return { raw: l };
-        }
-      })
-    : rawLines.map((l) => ({ raw: l }));
-
-  return { source, file, exists: true, count: lines.length, lines };
-}
-
-// ── combined status snapshot (the single feed the tab polls) ─────────────────
-
-export interface ArgusStatus {
-  ok: boolean;
-  ts: string;
-  godclaudeDetected: boolean;
-  health: Record<string, unknown> | null;
-  modes: Array<Record<string, unknown>>;
-  activity: Record<string, { allow: number; block: number }>;
-  heartbeats: Array<Record<string, unknown>>;
-  routing: Record<string, unknown> | null;
-  stats: GodStats | null;
-  sessions: ArgusSessions;
-  usage: Usage | null;
-}
-
-export async function collectStatus(narukamiIds?: ReadonlySet<string>): Promise<ArgusStatus> {
-  const [snap, stats, sessions, usage] = await Promise.all([
-    readSnapshot(),
-    readStats(),
-    collectSessions(Date.now(), narukamiIds),
-    readUsage(),
-  ]);
-  return {
-    ok: true,
-    ts: new Date().toISOString(),
-    godclaudeDetected: snap != null,
-    health: snap?.health ?? null,
-    modes: snap?.modes ?? [],
-    activity: snap?.activity ?? {},
-    heartbeats: snap?.heartbeats ?? [],
-    routing: snap?.routing ?? null,
-    stats,
-    sessions,
-    usage,
-  };
-}

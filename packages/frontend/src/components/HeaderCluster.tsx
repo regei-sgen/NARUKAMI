@@ -111,7 +111,11 @@ export const HeaderCluster = memo(function HeaderCluster({ runs, workingIds, onF
 
   // Paused while the window is hidden — the history ring lives server-side,
   // so the sparklines simply catch up on the immediate visible-again refresh.
-  usePollWhileVisible(load, POLL_MS);
+  // Stable void-returning wrapper: the poll helper expects `() => void` and the
+  // callback must keep its identity or the interval re-arms every render.
+  // `load` swallows its own errors (keeps the last feed), so nothing is dropped.
+  const poll = useCallback(() => void load(), [load]);
+  usePollWhileVisible(poll, POLL_MS);
 
   const history = feed?.history ?? [];
   // Stable per feed tick, so the memoized Sparks skip repaints between polls.

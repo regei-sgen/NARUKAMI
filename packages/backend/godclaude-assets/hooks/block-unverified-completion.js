@@ -53,7 +53,16 @@ const SHELL = new Set(['Bash', 'PowerShell']);          // tools that can run re
 const CLAIM = [
   /\b(all\s+)?done\b/i, /\ball set\b/i, /\bcomplete(d)?\b/i, /\bfinished\b/i,
   /\bfixed\b/i, /\bresolved\b/i, /\bverified\b/i, /\bconfirmed\b/i, /\bvalidated\b/i,
-  /\b(it\s+)?works\b/i, /\bworking\b/i, /\bready\b/i, /\bpass(es|ing)?\b/i,
+  /\b(it\s+)?works\b/i,
+  // PREDICATIVE 'working' only: "everything is working" is a claim; "still working ON it" / "working THROUGH
+  // the list" is work IN FLIGHT — the opposite of a completion claim — and bare /\bworking\b/ bounced it.
+  /\b(?:is|are|was|were|it'?s|that'?s|they'?re|we'?re|everything'?s|all|confirmed|verified|now|fully|already)\s+(?:now\s+|all\s+|fully\s+|again\s+|properly\s+|correctly\s+){0,2}working\b(?!\s+(?:on|with|through|toward|towards|as|from|in|at|around)\b)/i,
+  // 'ready' NOT followed by for/to: "the fix is ready" claims completion; "ready to test" / "ready for your
+  // review" is a HAND-OFF (the work is being passed back, not asserted done).
+  /\bready\b(?!\s+(?:for|to)\b)/i,
+  // 'pass' only with a TEST subject: "the suite passes" is a claim; "pass the token to the helper" /
+  // "passing a callback" is ordinary prose about code.
+  /\b(?:tests?|suite|specs?|build|builds|checks?|lint|linter|typecheck|type-check|ci|assertions?|cases?|repro|everything|all|both|it|they|them|these|those|\d+(?:\/\d+)?)\s+(?:now\s+|still\s+|all\s+|again\s+|finally\s+|cleanly\s+){0,2}pass(es|ing)?\b/i,
   /\bsuccessfully\b/i, /\bshould\s+(now\s+)?(work|be fixed|pass)\b/i, /\bimplemented\b/i
 ];
 // WP-1.3: dropped bare `\bdiff\b` (a `git diff`/`diff` merely DISPLAYS your own edit — it exercises nothing,
@@ -91,6 +100,17 @@ const FAILSIG = /Traceback \(most recent call last\)|\bAssertionError\b|\bnpm ER
 // claim. The window is short (negator immediately before the word, across ≤2 hedging adverbs) so "not only
 // does it work, it's fast" — where the negator attaches elsewhere — still trips the gate.
 const NEG = /(?:\bnot\b|\bno\s+longer\b|\bnever\b|\bcannot\b|\bcan'?t\b|\bwon'?t\b|\bisn'?t\b|\baren'?t\b|\bwasn'?t\b|\bweren'?t\b|\bdoesn'?t\b|\bdon'?t\b|\bdidn'?t\b|\bhasn'?t\b|\bhaven'?t\b|\bwouldn'?t\b|\bcouldn'?t\b|\bshouldn'?t\b|\bunverified\b|\bunconfirmed\b|\buntested\b|\bfails?\s+to\b|\bfailing\s+to\b|\bunable\s+to\b)\s+(?:yet\s+|quite\s+|fully\s+|currently\s+|really\s+|actually\s+|even\s+|still\s+|consistently\s+|always\s+|properly\s+|completely\s+|reliably\s+|necessarily\s+){0,2}$/i;
+// NEGATED VERIFICATION — the second honest-negative shape, and the one the gate's OWN block message asks for
+// ("state explicitly what is unverified and why"). Here the negator attaches to a VERIFICATION VERB and the
+// claim word is the object of that same clause: "I could not verify that this works", "I cannot confirm the
+// suite passes", "I do not know whether the build passes". NEG (above) can't see these — it only reaches a
+// claim word sitting immediately after the negator — so the gate was bouncing precisely the accurate
+// self-report it demands. DELIBERATELY NOT a generic negation bridge: it requires a verification verb, and
+// the bridge to the claim word is capped at 5 tokens that may not cross a clause boundary (punctuation can't
+// match [\w'-]+, and but/and/so/however/though/because/since are excluded). That keeps the negator ATTACHED:
+// "I could not verify the old behavior, but the new code works" and "...verify it but the tests pass" both
+// still read as claims and BLOCK, as do the 301b/301c fixtures whose negator governs a non-verification verb.
+const NEG_VERIFY = /(?:\bnot\b|\bnever\b|\bcannot\b|\bcan'?t\b|\bwon'?t\b|\bisn'?t\b|\baren'?t\b|\bwasn'?t\b|\bweren'?t\b|\bdoesn'?t\b|\bdon'?t\b|\bdidn'?t\b|\bhasn'?t\b|\bhaven'?t\b|\bhadn'?t\b|\bwouldn'?t\b|\bcouldn'?t\b|\bshouldn'?t\b|\bunable\s+to\b|\bno\s+way\s+to\b)\s+(?:yet\s+|fully\s+|actually\s+|really\s+|even\s+|myself\s+|independently\s+|properly\s+|directly\s+){0,2}(?:verify|verified|confirm|confirmed|test|tested|check|checked|validate|validated|prove|proved|proven|reproduce|reproduced|observe|observed|measure|measured|demonstrate|demonstrated|know|say|claim|assert|tell|be\s+(?:sure|certain|confident))\b\s+(?:that\s+|whether\s+|if\s+|it\s+)?(?:(?!(?:but|and|so|however|though|although|then|because|since|while|whereas)\b)[\w'’-]+\s+){0,5}$/i;
 
 // --- per-mode overrides (ADDITIVE; 'general' => none => base behavior is byte-for-byte unchanged) ---
 // A mode's gate.json may add claim words and accepted proofs, register verification TOOL NAMES
@@ -149,15 +169,18 @@ function samePath(fp, w) {
   return lo.endsWith('/' + sh); // boundary suffix only — never a bare substring
 }
 
-// True iff `re` has at least one match in `text` that is NOT immediately preceded by a negator (NEG). Lets an
-// honest-negative closing message ("it's still not working, the tests don't pass") through, while any genuine
+// True iff `re` has at least one match in `text` that is NOT negated. Two shapes count as negated: a claim
+// word immediately after a negator (NEG, 40-char window) and a claim word governed by a negated VERIFICATION
+// verb in the same clause (NEG_VERIFY — needs a wider window because the verb + its complementizer sit
+// between them; the pattern's own 5-token same-clause cap is what actually bounds it). Lets an honest-negative
+// closing message ("it's still not working"; "I could not verify that this works") through, while any genuine
 // un-negated claim word in the same message still counts as a completion claim.
 function matchesUnnegated(text, re) {
   const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g');
   let m;
   while ((m = g.exec(text)) !== null) {
     const before = text.slice(Math.max(0, m.index - 40), m.index);
-    if (!NEG.test(before)) return true;
+    if (!NEG.test(before) && !NEG_VERIFY.test(text.slice(Math.max(0, m.index - 90), m.index))) return true;
     if (m.index === g.lastIndex) g.lastIndex++; // guard against a zero-width match looping forever
   }
   return false;
@@ -209,18 +232,25 @@ function decide(data) {
     // The subagent's own transcript lives at <main-transcript-without-.jsonl>/subagents/agent-<agent_id>.jsonl
     // (workflow-spawned subagents nest one level DEEPER, under subagents/workflows/<run-id>/). Derive it so
     // we judge the SUBAGENT's closing message, not the parent's still-running turn.
+    // `probed` records every candidate path this derivation tried, so the fail-open DIAG can say WHICH paths
+    // were probed rather than just "not found". The 14-day audit shows 86% of SubagentStops fail open here and
+    // the cause is NOT the obvious creation race (sampled agent ids never appear on disk, even hours later),
+    // so the layer has to report its own evidence before anyone can fix the real cause.
+    const probed = [];
     const deriveSubagentTp = () => {
       if (!input.agent_id) return '';
       const base = tp.replace(/\.jsonl$/i, '');
       const direct = `${base}/subagents/agent-${input.agent_id}.jsonl`;
+      probed.push(direct);
       if (fs.existsSync(direct)) return direct;
+      const wf = `${base}/subagents/workflows`;
       try {
-        const wf = `${base}/subagents/workflows`;
         for (const d of fs.readdirSync(wf)) {
           const c = `${wf}/${d}/agent-${input.agent_id}.jsonl`;
+          probed.push(c);
           if (fs.existsSync(c)) return c;
         }
-      } catch (_) {}
+      } catch (e) { probed.push(`${wf}/* (readdir failed: ${e && e.code})`); }
       return '';
     };
     if (event === 'SubagentStop') {
@@ -234,7 +264,18 @@ function decide(data) {
       let found = deriveSubagentTp();
       for (let r = 0; !found && r < 2; r++) { sleepSync(150); found = deriveSubagentTp(); }
       if (found) tp = found;
-      else { audit(`DIAG event=SubagentStop mode=${MODELABEL} derived path not found for agent-${input.agent_id || '(no agent_id)'} → fail-open (not parent-judged)`); return allow('subagent transcript not found — cannot judge subagent (fail-open)'); }
+      else {
+        // OBSERVABILITY (audit item 12): log the evidence, not just the verdict — the input transcript_path we
+        // derived FROM, whether the subagents dir exists at all, and every probed candidate with its final
+        // existsSync. The fail-open itself is UNCHANGED and deliberate: the root cause is not established, so
+        // turning it into a block would trap real sessions on an unknown. This makes the next diagnosis possible.
+        const subDir = `${tp.replace(/\.jsonl$/i, '')}/subagents`;
+        const seen = [...new Set(probed)].map(p => `${p}:${fs.existsSync(p) ? 'EXISTS' : 'missing'}`);
+        audit(`DIAG event=SubagentStop mode=${MODELABEL} derived path not found for agent-${input.agent_id || '(no agent_id)'} → fail-open (not parent-judged)` +
+          ` input.transcript_path=${input.transcript_path} txExists=${fs.existsSync(input.transcript_path || '')}` +
+          ` subagentsDir=${subDir}:${fs.existsSync(subDir) ? 'EXISTS' : 'missing'} probed=[${seen.join(' | ')}]`);
+        return allow('subagent transcript not found — cannot judge subagent (fail-open)');
+      }
     }
 
     const parseObjs = (raw) => { const a = []; for (const l of raw.split('\n')) { if (!l.trim()) continue; try { a.push(JSON.parse(l)); } catch (_) {} } return a; };
@@ -263,6 +304,11 @@ function decide(data) {
     // mutation IS present do we enter the flush loop below to capture the (still-racing) completion claim.
     let objs = [], settled = false, lastSize = -1;
     {
+      // statSync BEFORE the read on purpose: a size taken before the bytes we parse can only UNDER-count, so a
+      // later stat that differs still forces a re-read (safe). Taken after, it could OVER-count and let the loop
+      // skip a re-read it actually needed.
+      let size0 = -1;
+      try { size0 = fs.statSync(tp).size; } catch (_) {}
       let raw0 = '';
       try { raw0 = fs.readFileSync(tp, 'utf8'); } catch (_) { return allow('transcript unreadable'); }
       const o0 = parseObjs(raw0);
@@ -286,7 +332,13 @@ function decide(data) {
         if (mut0) break;
       }
       if (!mut0) { audit(`DIAG event=${event} mode=${MODELABEL} fast-exit (no mutation → exempt; no flush wait) tx=${tp.split(/[\\/]/).pop()}`); return allow('no file mutation this turn (exempt) [fast-path, no flush wait]'); }
-      objs = o0; // mutation present → seed the flush loop with what we already read
+      // Mutation present → seed the flush loop with what we ALREADY read. Seeding lastSize too is the point:
+      // it used to stay -1, so the loop's "did the file grow?" guard was true on attempt 0 and it read and
+      // parsed the identical bytes a SECOND time (measured: 2 full reads per mutation turn). And settling is
+      // decided here rather than one iteration later, which also kills a degenerate path: when statSync throws,
+      // size stays -1 == lastSize forever, so the loop skipped the re-read on every attempt and burned all
+      // 8×150ms of sleeps on a turn whose closing text was already on disk.
+      objs = o0; lastSize = size0; settled = endsOnAsstText(o0);
     }
 
     // FLUSH-RACE GUARD: at Stop/SubagentStop time the FINAL assistant text (the closing
@@ -299,12 +351,13 @@ function decide(data) {
     // so the full 8× wait was wasted; a real racing claim still lands within the shorter window or is judged
     // on the parent's own Stop. The main-agent Stop keeps the full budget where the closing claim reliably comes.
     const maxAttempts = event === 'SubagentStop' ? 2 : 8;
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    for (let attempt = 0; !settled && attempt < maxAttempts; attempt++) {
       let size = -1;
       try { size = fs.statSync(tp).size; } catch (_) {}
-      // Re-read when the file grew, OR while we still have nothing parsed (so a transient
-      // statSync miss can never skip the one-and-only read and force a false "empty transcript").
-      if (size !== lastSize || !objs.length) {
+      // Re-read when the file grew, when the size is UNKNOWN (statSync failed — we cannot tell whether it
+      // grew, so re-reading is the only way the loop can ever make progress), OR while we still have nothing
+      // parsed (so a transient statSync miss can never skip the one-and-only read → false "empty transcript").
+      if (size !== lastSize || size < 0 || !objs.length) {
         let raw = '';
         try { raw = fs.readFileSync(tp, 'utf8'); } catch (_) { return allow('transcript unreadable'); }
         objs = parseObjs(raw);

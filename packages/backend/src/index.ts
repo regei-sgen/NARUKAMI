@@ -5,7 +5,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import { HOST, PORT } from './config';
-import { getToken, isAllowedHost, isAllowedOrigin, isLoopbackHost, requireAuth } from './auth';
+import { getToken, isAllowedHost, isAllowedOrigin, isTrustedLocalRequest, requireAuth } from './auth';
 import { projectRoutes } from './routes/projects';
 import { runRoutes } from './routes/runs';
 import { fileRoutes } from './routes/files';
@@ -13,7 +13,6 @@ import { workspaceRoutes } from './routes/workspace';
 import { eodRoutes } from './routes/eod';
 import { releaseRoutes } from './routes/release';
 import { gitRoutes } from './routes/git';
-import { telemetryRoutes } from './routes/telemetry';
 import { terminalRoutes } from './routes/terminals';
 import { argusRoutes } from './routes/argus';
 import { godclaudeRoutes } from './routes/godclaude';
@@ -23,6 +22,7 @@ import { statsLanRoutes } from './routes/statsLan';
 import { armoryRoutes } from './routes/armory';
 import { settingsRoutes } from './routes/settings';
 import { shareRoutes } from './routes/share';
+import { browserLogRoutes } from './routes/browserLogs';
 import { loadAiConfig } from './services/aiProvider';
 import { reconcileRelay } from './services/mobileShare';
 import { setupWebSocket } from './ws';
@@ -49,20 +49,10 @@ export interface StartResult {
 }
 
 /**
- * Build + start the NARUKAMI backend. Used both by the CLI (`main` below) and
- * in-process by the Electron desktop shell (which passes a port + frontendDir).
+ * Boot housekeeping around the single-instance lock. Exported so the lock's
+ * regression test can drive the real wiring without booting a whole server.
  */
-export async function start(opts: StartOptions = {}): Promise<StartResult> {
-  const host = opts.host ?? HOST;
-  const desiredPort = opts.port ?? PORT;
-  const token = getToken();
-
-  // Self-heal the schema for installs seeded by an older app version BEFORE any
-  // query runs — the packaged app never migrates its copied SQLite DB, so a newly
-  // added column (e.g. Run.claudeSessionId) would otherwise be missing and every
-  // query that references it (Argus polls it ~2s) would fail with "no such column".
-  await ensureSchema();
-
+export async function reconcileOnBoot(): Promise<void> {
   // Runs the previous process left as 'running' have dead ptys — reconcile them.
   // BUT only if no other live instance is using this same database: otherwise we
   // would mark THAT instance's genuinely-running runs 'exited' (shared-SQLite
@@ -92,8 +82,61 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
     } catch (err) {
       process.stderr.write(`[narukami] run-log retention sweep failed: ${String(err)}\n`);
     }
-    claimInstanceLock();
   }
+  // Outside the else on purpose: an instance that found a peer must ALSO record
+  // itself, or the next boot sees no live instance and reconciles ITS runs to
+  // 'exited' while their ptys are still alive.
+  claimInstanceLock();
+}
+
+/**
+ * Packaged-desktop SPA handler: serves index.html with the master token injected.
+ *
+ * SECURITY: inject the master token ONLY for a caller we can prove is on this
+ * machine. A LAN client — a phone reaching us through the share relay — gets the
+ * RAW, tokenless page; it authenticates with its scoped share token instead
+ * (read from the `?m=` query by the mobile view). Handing the master token to a
+ * LAN device would grant it full RCE, so this gate is critical — which is why it
+ * reads the SOCKET (isTrustedLocalRequest) and not just the Host header: the
+ * relay is a byte pipe, so a LAN client forging `Host: 127.0.0.1` used to be
+ * handed the master token.
+ *
+ * Exported so the relay regression test can drive the real decision without
+ * booting a whole server.
+ */
+export function makeIndexSender(
+  dir: string,
+  token: string,
+): (req: FastifyRequest, reply: FastifyReply) => FastifyReply {
+  const rawHtml = fs.readFileSync(path.join(dir, 'index.html'), 'utf8');
+  const injected = rawHtml.replace(
+    '</head>',
+    `<script>window.__NARUKAMI__=${JSON.stringify({ token })};</script></head>`,
+  );
+  return (req: FastifyRequest, reply: FastifyReply) =>
+    reply
+      .type('text/html')
+      .send(
+        isTrustedLocalRequest(req.headers.host, req.raw.socket.remotePort) ? injected : rawHtml,
+      );
+}
+
+/**
+ * Build + start the NARUKAMI backend. Used both by the CLI (`main` below) and
+ * in-process by the Electron desktop shell (which passes a port + frontendDir).
+ */
+export async function start(opts: StartOptions = {}): Promise<StartResult> {
+  const host = opts.host ?? HOST;
+  const desiredPort = opts.port ?? PORT;
+  const token = getToken();
+
+  // Self-heal the schema for installs seeded by an older app version BEFORE any
+  // query runs — the packaged app never migrates its copied SQLite DB, so a newly
+  // added column (e.g. Run.claudeSessionId) would otherwise be missing and every
+  // query that references it (Argus polls it ~2s) would fail with "no such column".
+  await ensureSchema();
+
+  await reconcileOnBoot();
 
   // Remove any per-run MCP config files (which embed a bearer token) left in the
   // temp dir by a prior session's now-dead Claude processes.
@@ -191,7 +234,6 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
   await app.register(workspaceRoutes);
   await app.register(eodRoutes);
   await app.register(releaseRoutes);
-  await app.register(telemetryRoutes);
   await app.register(terminalRoutes);
   await app.register(argusRoutes);
   await app.register(godclaudeRoutes);
@@ -201,6 +243,7 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
   await app.register(armoryRoutes);
   await app.register(settingsRoutes);
   await app.register(shareRoutes);
+  await app.register(browserLogRoutes);
 
   // Packaged desktop mode: serve the built frontend from this same server so the
   // renderer is same-origin. The bearer token is injected into index.html so the
@@ -208,18 +251,7 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
   if (opts.frontendDir && fs.existsSync(path.join(opts.frontendDir, 'index.html'))) {
     const dir = opts.frontendDir;
     await app.register(fastifyStatic, { root: dir, prefix: '/', index: false, wildcard: false });
-    const rawHtml = fs.readFileSync(path.join(dir, 'index.html'), 'utf8');
-    const injected = rawHtml.replace(
-      '</head>',
-      `<script>window.__NARUKAMI__=${JSON.stringify({ token })};</script></head>`,
-    );
-    // SECURITY: inject the master token ONLY for a loopback (this-machine)
-    // requester. A LAN client — a phone reaching us through the share relay —
-    // gets the RAW, tokenless page; it authenticates with its scoped share token
-    // instead (read from the `?m=` query by the mobile view). Handing the master
-    // token to a LAN device would grant it full RCE, so this gate is critical.
-    const sendIndex = (req: FastifyRequest, reply: FastifyReply) =>
-      reply.type('text/html').send(isLoopbackHost(req.headers.host) ? injected : rawHtml);
+    const sendIndex = makeIndexSender(dir, token);
     app.get('/', async (req, reply) => sendIndex(req, reply));
     // SPA fallback for any non-API GET that isn't a real asset file.
     app.setNotFoundHandler((req, reply) => {

@@ -4,6 +4,7 @@ import type { AnalyzerCommand, AnalyzerResult } from '../types';
 import { claudeSpawnEnv } from './aiProvider';
 import { godSpawnEnv } from './godclaude';
 import { resolveExecutable, wrapForWindows } from './exec';
+import { cleanEnv } from './runner';
 
 const execFileAsync = promisify(execFile);
 
@@ -188,11 +189,14 @@ async function runClaude(
       windowsHide: true,
       timeout: timeoutMs,
       killSignal: 'SIGKILL',
-      // Headless analysis sessions are NARUKAMI sessions too — same embedded
-      // godclaude home as the interactive terminals, and the same configured AI
-      // credential (empty in the default 'claude-code' mode). In headless mode
-      // an injected ANTHROPIC_API_KEY is always used, with no approval prompt.
-      env: { ...process.env, ...godSpawnEnv(), ...claudeSpawnEnv() },
+      // Headless analysis sessions are NARUKAMI sessions too — same cleanEnv
+      // base as the interactive terminals (a raw process.env spread would leak
+      // RUNNER_TOKEN_FILE, DATABASE_URL and the NARUKAMI_*/PRISMA_* wiring into
+      // every `claude -p`), the same embedded godclaude home, and the same
+      // configured AI credential (empty in the default 'claude-code' mode). In
+      // headless mode an injected ANTHROPIC_API_KEY is always used, with no
+      // approval prompt.
+      env: { ...cleanEnv(), ...godSpawnEnv(), ...claudeSpawnEnv() },
     });
     return stdout;
   } catch (err) {

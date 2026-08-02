@@ -13,9 +13,12 @@ import { getPcStats } from './pcstats';
  * that can reach that port can lift the token and drive /api/runs, which spawns
  * shells. Rather than relax that, this is a separate listener that:
  *
- *   - serves exactly ONE route, GET /api/pcstats (plus /health), and 404s
- *     everything else — no HTML, no token injection, no terminal/file/run APIs;
- *   - has its OWN token, required on every request, never embedded in a page;
+ *   - serves exactly ONE route, GET /api/pcstats (plus the unauthenticated
+ *     /health probe), and 404s everything else — no terminal/file/run APIs.
+ *     When a frontendDir is configured it also hands out that built SPA, but
+ *     ONLY behind the token: every byte other than /health is authenticated;
+ *   - has its OWN token, required on every request, embedded only in a page
+ *     that was itself fetched with that token;
  *   - is off unless explicitly started, and is read-only by construction.
  *
  * Worst case if the token leaks on your network: someone learns your CPU
@@ -73,6 +76,27 @@ export function tokenMatches(header: string | undefined, expected: string): bool
 
 export function isStatsLanRunning(): boolean {
   return handle !== null;
+}
+
+/**
+ * The cookie the authed index response sets so the page's own subresources can
+ * authenticate themselves: `<script src>` and Monaco's lazy `import()` carry no
+ * Authorization header, so without it a token-gated asset branch 401s the SPA
+ * into a blank page.
+ */
+export const STATS_COOKIE = 'nk_stats';
+
+/**
+ * Read one cookie out of a raw Cookie header. Pure — a listener with exactly
+ * one cookie does not need a parser dependency.
+ */
+export function readCookie(header: string | undefined, name: string): string | undefined {
+  for (const part of (header ?? '').split(';')) {
+    const eq = part.indexOf('=');
+    if (eq < 0) continue;
+    if (part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
+  }
+  return undefined;
 }
 
 const MIME: Record<string, string> = {
@@ -176,36 +200,43 @@ export async function startStatsLan(port = 4311, frontendDir?: string): Promise<
 
     const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
     const authed =
-      tokenMatches(req.headers.authorization, token) || tokenMatches(query.get('token') ?? undefined, token);
+      tokenMatches(req.headers.authorization, token) ||
+      tokenMatches(query.get('token') ?? undefined, token) ||
+      // set on the authed index response so the page's own subresources pass
+      tokenMatches(readCookie(req.headers.cookie, STATS_COOKIE), token);
+
+    // Nothing below this line is public. The gate has to sit ABOVE the static
+    // branch: frontendDir is a built SPA dist, and serving it unauthenticated
+    // hands out every file that happens to live in that directory.
+    if (!authed) {
+      send(401, { error: 'Unauthorized' });
+      return;
+    }
 
     // --- optional SPA so the phone gets the real UI over Wi-Fi ---------------
     if (spaIndex && frontendDir && req.method === 'GET') {
       if (path === '/' || path === '/index.html') {
-        if (!authed) {
-          send(401, { error: 'Unauthorized' });
-          return;
-        }
         // Same injection the desktop backend uses — but this token opens only
         // /api/pcstats on this listener.
         const html = fs
           .readFileSync(spaIndex, 'utf8')
           .replace('</head>', `<script>window.__NARUKAMI__=${JSON.stringify({ token })};</script></head>`);
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+        res.writeHead(200, {
+          'content-type': 'text/html; charset=utf-8',
+          'cache-control': 'no-store',
+          // HttpOnly so page script can't read it back; Lax is enough because
+          // every request that needs it is same-site by construction.
+          'set-cookie': `${STATS_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax`,
+        });
         res.end(html);
         return;
       }
-      // Bundle assets carry no secrets, so they're served like any static file.
       const asset = safeAssetPath(frontendDir, path);
       if (asset && asset !== spaIndex && fs.existsSync(asset) && fs.statSync(asset).isFile()) {
         res.writeHead(200, { 'content-type': MIME[path.slice(path.lastIndexOf('.'))] ?? 'application/octet-stream' });
         fs.createReadStream(asset).pipe(res);
         return;
       }
-    }
-
-    if (!authed) {
-      send(401, { error: 'Unauthorized' });
-      return;
     }
 
     if (req.method === 'GET' && path === '/api/pcstats') {

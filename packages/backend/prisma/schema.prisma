@@ -23,7 +23,6 @@ model Project {
   commands    RunCommand[]
   runs        Run[]
   analyses    Analysis[]
-  eodEntries  EodEntry[]
   releases    Release[]
 }
 
@@ -62,6 +61,12 @@ model Run {
   logs        RunLog[]
 
   @@index([dockOpen])
+  // Covers the per-project "latest run" lookup (projects list, take: 1) and the
+  // project-scoped resume lookup. Mirrored in db.ts as CREATE INDEX IF NOT EXISTS:
+  // the packaged app copies a template DB and never migrates, so a schema-only
+  // index would never reach an already-seeded install.
+  @@index([projectId, startedAt])
+  @@index([claudeSessionId])
 }
 
 // Key/value store for persisted UI state (dock size, selected project, view,
@@ -90,24 +95,6 @@ model Analysis {
   createdAt  DateTime @default(now())
 }
 
-// End-of-Day snapshot: what a project finished on a given day. Compiled on
-// demand (button) into one row per project per day. Retention: keep the newest
-// 10 days per project; older ones are pruned on each compile.
-model EodEntry {
-  id        String   @id @default(cuid())
-  projectId String
-  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  day       String   // local date key 'YYYY-MM-DD' — one EOD per project per day
-  items     String   // JSON array snapshot of finished runs that day
-  note      String?  // user-editable free-text note
-  summary   String?  // AI-generated narrative (claude -p), on demand
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@unique([projectId, day])
-  @@index([projectId, day])
-}
-
 // SGA Release: one release-zip build of the SG Claude Assistant repo (bump the
 // three version files → git-archive zip → AI patch notes). The zip lands at
 // ~/sgen-claude-chat-v<version>.zip; summary/notes are generated on demand
@@ -131,7 +118,8 @@ model Release {
 
 // End-of-Day REPORT: one cross-project markdown report per day, generated (AI)
 // from the projects active that day (Claude sessions native+NARUKAMI, runs, git
-// commits). Distinct from EodEntry (the older per-project run snapshot).
+// commits). One report per day, cross-project; there is no per-project variant
+// (the older EodEntry model was dropped — see REMOVED_TABLES in src/db.ts).
 model EodReport {
   id        String   @id @default(cuid())
   day       String   @unique // local 'YYYY-MM-DD' — one report per day

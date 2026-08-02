@@ -1,5 +1,31 @@
-import { describe, it, expect } from 'vitest';
-import { parseStatusFull, bucketChanges } from './gitChanges';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { parseStatusFull, bucketChanges, gitSourceControl } from './gitChanges';
+
+// Record every git argv while still running the real git — the source-control
+// panel polls, so what matters is HOW MANY child processes a repeated call spawns.
+const hoisted = vi.hoisted(() => ({ argv: [] as string[][] }));
+vi.mock('node:child_process', async () => {
+  const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+  const { promisify } = await import('node:util');
+  const realAsync = promisify(actual.execFile);
+  const execFile = ((...args: unknown[]) =>
+    (actual.execFile as (...a: unknown[]) => unknown)(...args)) as unknown as Record<symbol, unknown>;
+  execFile[promisify.custom as unknown as symbol] = (file: string, args: string[], opts: object) => {
+    hoisted.argv.push(args);
+    return (realAsync as (f: string, a: string[], o: object) => Promise<{ stdout: string }>)(file, args, opts);
+  };
+  return { ...actual, execFile };
+});
+
+function countArgv(match: (args: string[]) => boolean): number {
+  return hoisted.argv.filter(match).length;
+}
+const isShowPrefix = (args: string[]) => args.includes('rev-parse') && args.includes('--show-prefix');
+const isStatus = (args: string[]) => args.includes('status');
 
 // Build a NUL-terminated porcelain -z stream from raw records.
 function z(...records: string[]): string {
@@ -67,5 +93,40 @@ describe('bucketChanges', () => {
   it('strips a monorepo prefix and drops out-of-subtree paths', () => {
     const r = bucketChanges(parseStatusFull(z(' M app/src/a.ts', ' M other/b.ts')), 'app/');
     expect(r.unstaged).toEqual([{ path: 'src/a.ts', type: 'modified', staged: false }]);
+  });
+});
+
+describe('gitSourceControl prefix cache (against a real temp repo)', () => {
+  let repo: string;
+
+  beforeEach(() => {
+    hoisted.argv.length = 0;
+    // Every test gets a fresh mkdtemp path, so nothing else can be cached under it.
+    repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'git-chg-')));
+    execFileSync('git', ['init', repo], { stdio: 'pipe' });
+    execFileSync('git', ['-C', repo, 'symbolic-ref', 'HEAD', 'refs/heads/work'], { stdio: 'pipe' });
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'x\n');
+  });
+  afterEach(() => {
+    fs.rmSync(repo, { recursive: true, force: true });
+  });
+
+  it('spawns rev-parse --show-prefix once per path across repeated polls', async () => {
+    const first = await gitSourceControl(repo);
+    await gitSourceControl(repo);
+    const third = await gitSourceControl(repo);
+
+    expect(countArgv(isStatus)).toBe(3); // status still runs every poll
+    expect(countArgv(isShowPrefix)).toBe(1); // …the constant prefix does not
+    expect(third).toEqual(first); // same answer, one fewer child process
+    expect(first.isRepo).toBe(true);
+    expect(first.unstaged).toEqual([{ path: 'a.txt', type: 'untracked', staged: false }]);
+  });
+
+  it('does not report a repo that has since vanished as a repo forever', async () => {
+    expect((await gitSourceControl(repo)).isRepo).toBe(true);
+    fs.rmSync(path.join(repo, '.git'), { recursive: true, force: true });
+    await gitSourceControl(repo); // status fails here; the stale entry must be dropped
+    expect((await gitSourceControl(repo)).isRepo).toBe(false);
   });
 });

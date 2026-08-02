@@ -23,7 +23,9 @@ describe('ensureSchema (additive self-heal)', () => {
     const file = path.join(dir, 'test.db').replace(/\\/g, '/');
     const c = new PrismaClient({ datasources: { db: { url: 'file:' + file } } });
     // Old-schema tables: deliberately WITHOUT the self-healed columns.
-    await c.$executeRawUnsafe('CREATE TABLE "Run" ("id" TEXT PRIMARY KEY, "kind" TEXT, "pid" INTEGER)');
+    await c.$executeRawUnsafe(
+      'CREATE TABLE "Run" ("id" TEXT PRIMARY KEY, "projectId" TEXT, "kind" TEXT, "pid" INTEGER, "startedAt" DATETIME)',
+    );
     await c.$executeRawUnsafe('CREATE TABLE "Project" ("id" TEXT PRIMARY KEY, "name" TEXT)');
     await c.$executeRawUnsafe('CREATE TABLE "RunCommand" ("id" TEXT PRIMARY KEY, "label" TEXT)');
     return c;
@@ -31,6 +33,13 @@ describe('ensureSchema (additive self-heal)', () => {
 
   async function cols(c: PrismaClient, table: string): Promise<string[]> {
     const r = await c.$queryRawUnsafe<Array<{ name: string }>>(`PRAGMA table_info("${table}")`);
+    return r.map((x) => x.name);
+  }
+
+  async function idx(c: PrismaClient, table: string): Promise<string[]> {
+    const r = await c.$queryRawUnsafe<Array<{ name: string }>>(
+      `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='${table}'`,
+    );
     return r.map((x) => x.name);
   }
 
@@ -74,6 +83,89 @@ describe('ensureSchema (additive self-heal)', () => {
       expect(await cols(c, 'Run')).toEqual(before.run);
       expect(await cols(c, 'Project')).toEqual(before.project);
       expect(await cols(c, 'RunCommand')).toEqual(before.runCommand);
+    } finally {
+      await c.$disconnect();
+    }
+  });
+
+  // A schema-only @@index is invisible to every already-installed app: the
+  // packaged desktop copies a template DB once and never migrates. The index must
+  // therefore be created here, AFTER the additive-column pass — Run_claudeSessionId_idx
+  // covers a column this very run adds.
+  it('creates the Run lookup indexes on an old DB and is idempotent', async () => {
+    const c = await oldSchemaClient();
+    try {
+      // Only SQLite's own PK autoindex exists before the self-heal.
+      expect(await idx(c, 'Run')).not.toContain('Run_projectId_startedAt_idx');
+      await ensureSchema(c);
+      const after = (await idx(c, 'Run')).sort();
+      expect(after).toContain('Run_projectId_startedAt_idx');
+      expect(after).toContain('Run_claudeSessionId_idx');
+      await ensureSchema(c); // second boot: CREATE INDEX IF NOT EXISTS, no duplicates
+      expect((await idx(c, 'Run')).sort()).toEqual(after);
+    } finally {
+      await c.$disconnect();
+    }
+  });
+
+  async function tables(c: PrismaClient): Promise<string[]> {
+    const r = await c.$queryRawUnsafe<Array<{ name: string }>>(
+      "SELECT name FROM sqlite_master WHERE type='table'",
+    );
+    return r.map((x) => x.name);
+  }
+
+  // Same reasoning as REMOVED_COLUMNS, one level up: a whole `model` deleted from
+  // schema.prisma never disappears from a DB seeded by the packaged app, because
+  // that app copies a template DB and never migrates. EodEntry (the abandoned
+  // per-project EOD snapshot, superseded by EodReport) is dropped here.
+  it("drops a removed feature's leftover table (EodEntry) and is idempotent", async () => {
+    const c = await oldSchemaClient();
+    try {
+      await c.$executeRawUnsafe(
+        `CREATE TABLE "EodEntry" (
+           "id" TEXT NOT NULL PRIMARY KEY,
+           "projectId" TEXT NOT NULL,
+           "day" TEXT NOT NULL,
+           "items" TEXT NOT NULL,
+           "note" TEXT,
+           "summary" TEXT,
+           "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+           "updatedAt" DATETIME NOT NULL
+         )`,
+      );
+      await c.$executeRawUnsafe(
+        `CREATE INDEX "EodEntry_projectId_day_idx" ON "EodEntry"("projectId", "day")`,
+      );
+      await c.$executeRawUnsafe(
+        `CREATE UNIQUE INDEX "EodEntry_projectId_day_key" ON "EodEntry"("projectId", "day")`,
+      );
+      expect(await tables(c)).toContain('EodEntry');
+
+      await ensureSchema(c);
+      expect(await tables(c)).not.toContain('EodEntry'); // dropped
+      // DROP TABLE takes the table's indexes with it — no orphans in sqlite_master.
+      expect(await idx(c, 'EodEntry')).toEqual([]);
+      // The tables the app still uses are untouched by the drop pass.
+      expect(await tables(c)).toContain('Project');
+      expect(await tables(c)).toContain('Run');
+      expect(await tables(c)).toContain('EodReport'); // created by the additive pass
+
+      await ensureSchema(c); // second boot: already gone, must not error
+      expect(await tables(c)).not.toContain('EodEntry');
+    } finally {
+      await c.$disconnect();
+    }
+  });
+
+  // A fresh install never had EodEntry at all; the drop pass must be a silent
+  // no-op rather than an error, and must not resurrect the table.
+  it('is a no-op on a DB that never had the removed table', async () => {
+    const c = await oldSchemaClient();
+    try {
+      expect(await tables(c)).not.toContain('EodEntry');
+      await ensureSchema(c);
+      expect(await tables(c)).not.toContain('EodEntry');
     } finally {
       await c.$disconnect();
     }

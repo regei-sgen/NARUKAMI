@@ -72,6 +72,28 @@ async function ensureServer(): Promise<number> {
 }
 
 /**
+ * Close the loopback listener and forget the memoized port. Nothing in
+ * production calls this — the broker listener lives for the life of the process.
+ * It exists so the handshake tests can drive the REAL listener (the one
+ * {@link startAdminShell} mints tokens against) without leaving a bound socket
+ * behind; `server` is module-private, so there is no other way to release it.
+ * Synchronous and idempotent: `close()` stops accepting, `unref()` makes sure a
+ * still-open broker connection can't hold the event loop open by itself.
+ */
+export function stopBrokerServer(): void {
+  const srv = server;
+  server = null;
+  serverPort = 0;
+  if (!srv) return;
+  try {
+    srv.close();
+    srv.unref();
+  } catch {
+    /* already closed */
+  }
+}
+
+/**
  * A RunTransport backed by the elevated broker's socket. Frames are
  * newline-delimited JSON; terminal bytes are base64 so control characters can't
  * corrupt the framing.

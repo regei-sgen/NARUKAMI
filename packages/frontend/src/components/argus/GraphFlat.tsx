@@ -2,9 +2,10 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { onWindowVisibility, windowHidden } from '../../lib/visibility';
 
 /**
- * GraphFlat — a dependency-free, interactive 2D force-directed graph. Unlike
- * GraphGlobe (which pins nodes onto a rotating sphere), this lays the graph out
- * FLAT: repulsion + edge springs + a gentle centering pull. Interactions: drag
+ * GraphFlat — a dependency-free, interactive 2D force-directed graph. It is the
+ * only memory-graph renderer (an earlier 3D sphere variant was removed): nodes
+ * are laid out FLAT by repulsion + edge springs + a gentle centering pull, with
+ * no fixed radius holding them in place. Interactions: drag
  * the background to pan, scroll to zoom (cursor-anchored), drag a node to move
  * (and pin) it, hover for a tooltip, click to select, double-click to reset.
  * Styled with NARUKAMI's default (red/black) design tokens via `mg-*` classes.

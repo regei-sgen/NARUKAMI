@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { prisma } from '../db';
 import {
   getLiveTranscriptTail,
+  getRunActivity,
   isRunning,
   liveRunIds,
   stripAnsi,
@@ -12,6 +13,58 @@ import {
 const MAX_SEND_CHARS = 10_000;
 const DEFAULT_READ_LINES = 120;
 const MAX_READ_LINES = 2_000;
+
+// Idle-detection window for GET /:id/idle. The floor stops a caller from turning
+// the endpoint into a busy-wait on sub-100ms gaps between pty chunks (ConPTY
+// emits a storm of them); the 10-minute ceiling keeps a mistyped threshold from
+// making `idle` effectively unreachable for the run's whole life.
+const DEFAULT_IDLE_MS = 1_500;
+const MIN_IDLE_MS = 100;
+const MAX_IDLE_MS = 600_000;
+
+// Newest-first page size / hard page cap for the persisted-history read below.
+// 200 rows is ~90 KB of a real run's logs (measured: 3,155 rows / 1.39 MB on a
+// busy tab ≈ 440 B per flushed chunk), so the default 64 KB window is normally
+// satisfied by ONE query.
+const LOG_PAGE = 200;
+const MAX_LOG_PAGES = 20;
+
+/**
+ * Tail of a dead run's persisted logs, bounded to `maxChars`.
+ *
+ * The route used to load EVERY RunLog row for the run just to hand tailLines()
+ * the last ~120 lines — on a path an orchestrator polls repeatedly. Walk the
+ * rows newest-first instead and stop as soon as the window is full, so the cost
+ * is proportional to what is returned, not to how long the tab was open. Same
+ * budget discipline the live branch already applies.
+ */
+async function persistedTail(runId: string, maxChars: number): Promise<string> {
+  const parts: string[] = [];
+  let chars = 0;
+  for (let page = 0; page < MAX_LOG_PAGES; page += 1) {
+    const rows = await prisma.runLog.findMany({
+      where: { runId },
+      // Secondary sort on the (monotonic) cuid so identical timestamps can't
+      // make the pages overlap or skip a row.
+      orderBy: [{ ts: 'desc' }, { id: 'desc' }],
+      skip: page * LOG_PAGE,
+      take: LOG_PAGE,
+      select: { chunk: true },
+    });
+    for (const r of rows) {
+      parts.push(r.chunk);
+      chars += r.chunk.length;
+      if (chars >= maxChars) return parts.reverse().join('');
+    }
+    if (rows.length < LOG_PAGE) break; // reached the start of the run
+  }
+  return parts.reverse().join('');
+}
+
+/** Epoch ms → ISO string for the wire, preserving "never produced output". */
+function isoOrNull(ms: number | null): string | null {
+  return ms === null ? null : new Date(ms).toISOString();
+}
 
 /**
  * Sliding-window rate limiter. Pure state + explicit `now` so it's unit-testable
@@ -86,15 +139,93 @@ export async function terminalRoutes(app: FastifyInstance): Promise<void> {
         return { live: true, text: tailLines(stripAnsi(raw), lines) };
       }
 
-      // Not live — hand back persisted history if the run exists at all.
+      // Not live — hand back persisted history if the run exists at all. The
+      // existence check is a bare row; the history comes from the bounded tail.
       const run = await prisma.run.findUnique({
         where: { id: req.params.id },
-        include: { logs: { orderBy: { ts: 'asc' } } },
+        select: { id: true },
       });
       if (!run) return reply.code(404).send({ error: 'Terminal not found.' });
 
-      const text = run.logs.map((l) => l.chunk).join('');
+      const text = await persistedTail(run.id, window);
       return { live: false, text: tailLines(stripAnsi(text), lines) };
+    },
+  );
+
+  // Has this terminal gone quiet? The prerequisite for an orchestrator that
+  // AWAITS a terminal instead of spending a turn per read_terminal poll (and
+  // reading half-finished output). Reports how long ago the pty last produced
+  // output and whether that exceeds `ms`.
+  //
+  // An ENDED run is idle unconditionally: it can never speak again, so a waiter
+  // that treated "no output yet, still under threshold" as busy would hang.
+  app.get<{ Params: { id: string }; Querystring: { ms?: string } }>(
+    '/api/terminals/:id/idle',
+    async (req, reply) => {
+      const raw = req.query?.ms;
+      let thresholdMs = DEFAULT_IDLE_MS;
+      if (raw !== undefined) {
+        // Only an ABSENT ms defaults. Anything present is validated: Number('')
+        // is 0 and Number(['1','2']) (a repeated query key) is NaN, so both fall
+        // outside the range and are rejected rather than silently defaulted —
+        // an orchestrator must never think it waited on a threshold it didn't.
+        const n = Number(raw);
+        if (!Number.isInteger(n) || n < MIN_IDLE_MS || n > MAX_IDLE_MS) {
+          return reply.code(400).send({
+            error: `ms must be an integer between ${MIN_IDLE_MS} and ${MAX_IDLE_MS}.`,
+          });
+        }
+        thresholdMs = n;
+      }
+
+      const activity = getRunActivity(req.params.id);
+      const now = Date.now();
+
+      if (activity && activity.live) {
+        // Live: answered entirely from the in-memory record. This endpoint is
+        // polled in a wait loop, so it must not cost a query per call — and the
+        // Run row holds nothing the live answer needs.
+        const idleMs =
+          activity.lastOutputAt === null ? 0 : Math.max(0, now - activity.lastOutputAt);
+        return {
+          runId: req.params.id,
+          live: true,
+          lastOutputAt: isoOrNull(activity.lastOutputAt),
+          idleMs,
+          // A live run that has never produced a byte reports idleMs 0, and the
+          // threshold floor is 100 — so it is never called idle here.
+          idle: idleMs >= thresholdMs,
+          exited: false,
+          exitCode: null,
+        };
+      }
+
+      // Not live: either the record is gone (the normal ended case) or it is in
+      // the brief window between pty exit and the final log flush. Load the row —
+      // it both proves the id ever existed and is the contract's source for the
+      // exit code.
+      const run = await prisma.run.findUnique({
+        where: { id: req.params.id },
+        select: { id: true, exitCode: true },
+      });
+      if (!run && !activity) return reply.code(404).send({ error: 'Terminal not found.' });
+
+      const lastOutputAt = activity?.lastOutputAt ?? null;
+      return {
+        runId: req.params.id,
+        live: false,
+        // Only the in-memory record carries this timestamp. Once it is forgotten
+        // the answer is null rather than a RunLog query to date output that has,
+        // by definition, already finished — `idle` is true either way.
+        lastOutputAt: isoOrNull(lastOutputAt),
+        idleMs: lastOutputAt === null ? 0 : Math.max(0, now - lastOutputAt),
+        idle: true,
+        exited: true,
+        // The row is authoritative, but during the post-exit window it is still
+        // null (the status write lands after the final flush) while the record
+        // already knows the code — so fall back to it rather than report null.
+        exitCode: run?.exitCode ?? activity?.exitCode ?? null,
+      };
     },
   );
 

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api';
+import { usePollWhileVisible } from '../lib/usePoll';
 import type { GitChangeEntry, GitChanges } from '../types';
 import { Ic } from './icons';
 
@@ -65,16 +66,22 @@ export function ChangesPanel({ projectId, currentPath, onOpenDiff }: Props) {
     }
   }, [projectId]);
 
-  // Fetch on mount + poll every 3.5s (matches the branch-label cadence).
+  // Guard the async refetch against a late setState after unmount. Declared
+  // before the poll hook so it flips to true before the first tick runs.
   useEffect(() => {
     aliveRef.current = true;
-    void refetch();
-    const id = setInterval(() => void refetch(), 3500);
     return () => {
       aliveRef.current = false;
-      clearInterval(id);
     };
-  }, [refetch]);
+  }, []);
+
+  // Fetch on mount + poll every 3.5s (matches the branch-label cadence), paused
+  // while the window is hidden — each tick is three git child processes.
+  // `refetch` stays async (it is awaited by `act` below); the poll gets a stable
+  // void-returning wrapper so the promise isn't left floating and the interval
+  // isn't re-armed every render. `refetch` handles its own errors into `err`.
+  const poll = useCallback(() => void refetch(), [refetch]);
+  usePollWhileVisible(poll, 3500);
 
   // Run a mutation, then refetch. Serialized by `busy` so double-clicks don't race.
   const act = useCallback(

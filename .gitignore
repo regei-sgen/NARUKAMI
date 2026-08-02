@@ -37,7 +37,11 @@ Thumbs.db
 # SQLite WAL sidecars (journal_mode=WAL is set at boot; only dev.db is tracked)
 *.db-wal
 *.db-shm
-# single-instance advisory lock
+# single-instance advisory lock. In dev TOKEN_FILE is <repoRoot>/.runner-token,
+# so both land in the repo root. The lock is now a DIRECTORY with one file per
+# live pid (services/instanceLock.ts); the old single-file layout is still read
+# on boot, so keep ignoring it for machines that still have one.
+.narukami-locks/
 .narukami.lock
 
 # packaged archives / large artifacts

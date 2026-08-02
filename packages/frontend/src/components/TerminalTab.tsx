@@ -47,7 +47,9 @@ function ClaudeToggles({ run }: { run: ActiveRun }) {
     let gone = false;
     void (async () => {
       try {
-        const info = await api.getRun(run.runId);
+        // logs:false — this runs on EVERY Claude tab mount and only reads the
+        // session UUID; without it the backend serializes the whole transcript.
+        const info = await api.getRun(run.runId, { logs: false });
         const sid = (info as { claudeSessionId?: string | null }).claudeSessionId;
         if (gone || !sid) return;
         setSessionId(sid);
@@ -97,6 +99,12 @@ function ClaudeToggles({ run }: { run: ActiveRun }) {
   );
 }
 
+/** State of the "Explain this failure" request for this terminal (null = never asked). */
+type Diagnosis =
+  | { state: 'pending' }
+  | { state: 'done'; explanation: string }
+  | { state: 'error'; message: string };
+
 // Quiet period after the last output byte before we call the run "idle"/done.
 // Must span Claude's mid-response pauses (tool calls / thinking) so we don't
 // fire a premature "task done" while it's still working — hence a few seconds,
@@ -132,6 +140,8 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
   const [sharing, setSharing] = useState(false);
   // Phones seen on this run's share (pushed over the ws) → toolbar indicator.
   const [devices, setDevices] = useState<Record<string, MobileDeviceInfo>>({});
+  // "Explain this failure" — model-written post-mortem of a non-zero exit.
+  const [diagnosis, setDiagnosis] = useState<Diagnosis | null>(null);
 
   useEffect(() => {
     let disposed = false;
@@ -146,6 +156,12 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
     let onWinResize: (() => void) | null = null;
     let onContextMenu: ((ev: MouseEvent) => void) | null = null;
     let offVisibility: (() => void) | null = null;
+    // The exact node this effect attached its contextmenu listener to. Captured
+    // here rather than re-read from containerRef in the cleanup: by teardown the
+    // ref may already be null (element unmounted) or point at a DIFFERENT node
+    // (tab remount), so `containerRef.current?.removeEventListener(...)` silently
+    // removed nothing and leaked the listener on the original element.
+    let containerEl: HTMLDivElement | null = null;
 
     // Output-activity tracking for the "working" indicator + "task done" toast.
     let working = false;
@@ -198,6 +214,7 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
     const raf = requestAnimationFrame(() => {
       if (disposed) return;
       const container = containerRef.current;
+      containerEl = container;
 
       const t = new Terminal({
         cursorBlink: true,
@@ -541,6 +558,10 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
         const poll = async () => {
           if (disposed) return;
           try {
+            // Keeps logs on purpose: when UAC is denied/times out the broker
+            // writes its "[admin shell] …" explanation as the run's ONLY log row
+            // (brokerServer.cancelPending), and the terminal branch below is what
+            // paints it. A pending run has no transcript yet, so this is cheap.
             const info = await api.getRun(run.runId);
             if (disposed) return;
             if (info.live) {
@@ -559,7 +580,7 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
           } catch {
             /* transient — keep polling */
           }
-          pollTimer = setTimeout(poll, 800);
+          pollTimer = setTimeout(() => void poll(), 800);
         };
         void poll();
       } else {
@@ -577,7 +598,7 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
       if (working) onActivity?.(run.runId, false, false); // tab unmounting → clear working
       if (offVisibility) offVisibility();
       if (onWinResize) window.removeEventListener('resize', onWinResize);
-      if (onContextMenu) containerRef.current?.removeEventListener('contextmenu', onContextMenu);
+      if (onContextMenu) containerEl?.removeEventListener('contextmenu', onContextMenu);
       if (ro) ro.disconnect();
       if (dataDisposable) dataDisposable.dispose();
       if (ws) {
@@ -601,7 +622,27 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
     }
   };
 
+  // Ask the backend to explain the failure (it tails this run's output and
+  // prompts the model with it). Guarded on the pending state as well as the
+  // button's `disabled` so a click that lands before the re-render can't queue a
+  // second model call — each one costs a CLI round-trip.
+  const diagnose = useCallback(async () => {
+    if (diagnosis?.state === 'pending') return;
+    setDiagnosis({ state: 'pending' });
+    try {
+      const res = await api.diagnoseRun(run.runId);
+      setDiagnosis({ state: 'done', explanation: res.explanation });
+    } catch (e) {
+      // 502 = the model/CLI call failed. Recoverable and worth showing verbatim:
+      // its message is the only clue the user gets (missing CLI, rate limit…).
+      setDiagnosis({ state: 'error', message: (e as Error).message });
+    }
+  }, [run.runId, diagnosis]);
+
   const stoppable = run.status === 'running' || run.status === 'connecting';
+  // Only a finished run that ended badly has anything to diagnose — a live run's
+  // output isn't final, and exit 0 didn't fail.
+  const failed = !stoppable && run.exitCode != null && run.exitCode !== 0;
   // Phone share monitor (fed by ws 'device' pushes): live streams + knocks.
   const deviceList = Object.values(devices);
   const connectedPhones = deviceList.filter((d) => d.connections > 0).length;
@@ -700,7 +741,7 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
                 <Ic name="refresh" /> Restart
               </button>
             )}
-            <button className="btn btn-danger term-action" onClick={stop}>
+            <button className="btn btn-danger term-action" onClick={() => void stop()}>
               Stop
             </button>
           </>
@@ -715,6 +756,17 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
                 <Ic name="spark" /> Continue
               </button>
             )}
+            {failed && (
+              <button
+                className="btn btn-claude term-action"
+                title="Ask Claude why this run failed (reads the tail of this terminal's output)"
+                disabled={diagnosis?.state === 'pending'}
+                onClick={() => void diagnose()}
+              >
+                <Ic name="spark" />{' '}
+                {diagnosis?.state === 'pending' ? 'Explaining…' : 'Explain this failure'}
+              </button>
+            )}
             <button
               className="btn btn-run term-action"
               title="Re-run this terminal (fresh process)"
@@ -726,6 +778,41 @@ export const TerminalTab = memo(function TerminalTab({ run, onStatus, onRestart,
         )}
       </div>
       <div className="terminal-surface" ref={containerRef} />
+      {diagnosis && (
+        // Same generic modal shell as the share QR, with the release tab's
+        // .rel-text block for the model's plain prose and the app-wide
+        // banner-error for a failed call (click the banner to retry).
+        <div className="modal-backdrop" onClick={() => setDiagnosis(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <span className="modal-title">
+                <Ic name="spark" /> Why “{run.customLabel ?? run.label}” failed
+              </span>
+              <button
+                className="modal-close"
+                onClick={() => setDiagnosis(null)}
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+            {diagnosis.state === 'error' && (
+              <>
+                <div className="banner banner-error">{diagnosis.message}</div>
+                <div className="rel-text">
+                  <button className="btn btn-claude" onClick={() => void diagnose()}>
+                    <Ic name="spark" /> Try again
+                  </button>
+                </div>
+              </>
+            )}
+            {diagnosis.state === 'pending' && (
+              <div className="rel-text muted">Claude is reading the output…</div>
+            )}
+            {diagnosis.state === 'done' && <div className="rel-text">{diagnosis.explanation}</div>}
+          </div>
+        </div>
+      )}
       {sharing && (
         <ShareQrModal
           runId={run.runId}

@@ -1,9 +1,12 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../db';
 import { isRunning, startClaude, startRun, startShell, stopRun } from '../services/runner';
 import { startAdminShell } from '../services/brokerServer';
 import { AnalyzerError, diagnoseRun } from '../services/analyzer';
 import { DEFAULT_EFFORT, cachedAiConfig } from '../services/aiProvider';
+import { claudeDir } from '../services/argus';
 
 // Effort injected into fresh Claude tabs when the caller doesn't pick one.
 // Shipped default `ultracode` = xhigh + dynamic workflow fan-out — maximum
@@ -14,6 +17,83 @@ import { DEFAULT_EFFORT, cachedAiConfig } from '../services/aiProvider';
 // restart can never disagree.
 function defaultClaudeEffort(): string {
   return cachedAiConfig().defaultEffort || DEFAULT_EFFORT;
+}
+
+/**
+ * Does Claude Code still hold the transcript for `sessionId` in `cwd`?
+ *
+ * Transcripts live at `<claudeDir>/projects/<cwd, every non-alphanumeric char
+ * replaced by '-'>/<sessionId>.jsonl` — the tree eodSessions.ts walks (see
+ * decodeProjectDir in argus.ts for the inverse mapping).
+ *
+ * FAIL-OPEN by design: it returns false ONLY when the project's transcript dir
+ * is readable and the file is genuinely absent. Any uncertainty (no ~/.claude,
+ * an encoded dir name we can't derive) returns true, so a wrong guess here can
+ * never turn a working Continue into a surprise fresh session — it can only fail
+ * to catch a pruned one.
+ */
+export function claudeTranscriptExists(cwd: string, sessionId: string): boolean {
+  // Session ids are minted with randomUUID; anything else can't be trusted into
+  // a path join, and starting fresh is the safe answer for it.
+  if (!/^[A-Za-z0-9-]{8,64}$/.test(sessionId)) return false;
+  const dir = path.join(claudeDir(), 'projects', cwd.replace(/[^A-Za-z0-9]/g, '-'));
+  try {
+    if (!fs.statSync(dir).isDirectory()) return true;
+  } catch {
+    return true; // can't look → don't interfere
+  }
+  return fs.existsSync(path.join(dir, `${sessionId}.jsonl`));
+}
+
+// Bounded RunLog replay. The full history of a long-lived tab was measured at
+// 2.3 MB / 3k rows, and every consumer either repaints it into xterm's
+// 5000-line scrollback or ignores it entirely — so cap the replay at roughly
+// that scrollback (5000 × ~80 cols) and read it newest-first in pages, stopping
+// as soon as the budget is met. 200 rows is ~90 KB of real logs (≈440 B per
+// flushed chunk), so a normal reply is ONE query.
+const MAX_REPLAY_CHARS = 400_000;
+// diagnoseRun only ever prompts with output.slice(-12000); reading the whole
+// table to throw all but the last 12 KB away is pure waste.
+const DIAGNOSE_CHARS = 64_000;
+const LOG_PAGE = 200;
+const MAX_LOG_PAGES = 20;
+
+interface LogRow {
+  id: string;
+  runId: string;
+  chunk: string;
+  ts: Date;
+}
+
+/**
+ * The tail of a run's persisted logs in chronological order, bounded to
+ * `maxChars`. `truncated` means the budget stopped the walk — i.e. earlier
+ * output exists and is NOT in the result, which the caller must make visible
+ * rather than silently pass off as the whole history.
+ */
+async function tailLogs(
+  runId: string,
+  maxChars: number,
+): Promise<{ logs: LogRow[]; truncated: boolean }> {
+  const out: LogRow[] = [];
+  let chars = 0;
+  for (let page = 0; page < MAX_LOG_PAGES; page += 1) {
+    const rows = (await prisma.runLog.findMany({
+      where: { runId },
+      // Secondary sort on the (monotonic) cuid so identical timestamps can't
+      // make the pages overlap or skip a row.
+      orderBy: [{ ts: 'desc' }, { id: 'desc' }],
+      skip: page * LOG_PAGE,
+      take: LOG_PAGE,
+    })) as LogRow[];
+    for (const r of rows) {
+      out.push(r);
+      chars += r.chunk.length;
+      if (chars >= maxChars) return { logs: out.reverse(), truncated: true };
+    }
+    if (rows.length < LOG_PAGE) return { logs: out.reverse(), truncated: false };
+  }
+  return { logs: out.reverse(), truncated: true };
 }
 
 export async function runRoutes(app: FastifyInstance): Promise<void> {
@@ -132,13 +212,38 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
       // its stored id — never `claude --continue`, which would reopen whatever
       // conversation was last touched in the folder (possibly a native-CLI one).
       let resumeSessionId: string | undefined;
+      let staleSession = false;
       if (resume) {
         const prior = await prisma.run.findFirst({
           where: { projectId: project.id, kind: 'claude', claudeSessionId: { not: null } },
           orderBy: { startedAt: 'desc' },
-          select: { claudeSessionId: true },
+          select: { id: true, claudeSessionId: true },
         });
-        resumeSessionId = prior?.claudeSessionId ?? undefined;
+
+        // A LIVE tab still owns that session and is writing its transcript.
+        // Resuming it would spawn a second `claude --resume <same id>` against
+        // that same conversation and persist the id on a second Run row — two
+        // rows, two ptys, one session. Refuse and name the tab to focus. (The
+        // restart route gets this right the other way: it stops the old pty
+        // BEFORE reusing the id.)
+        if (prior && isRunning(prior.id)) {
+          return reply.code(409).send({
+            error: 'That Claude session is already open in a live tab — switch to it, or start a new Claude tab.',
+            runId: prior.id,
+            sessionId: prior.claudeSessionId,
+          });
+        }
+
+        // buildClaudeArgs emits `--resume <id>` unconditionally with no fallback,
+        // so a pruned transcript kills the tab on spawn with a raw CLI error.
+        // Check the file first and fall through to a fresh session when it's gone.
+        if (prior?.claudeSessionId) {
+          if (claudeTranscriptExists(project.path, prior.claudeSessionId)) {
+            resumeSessionId = prior.claudeSessionId;
+          } else {
+            staleSession = true;
+          }
+        }
       }
 
       const run = await prisma.run.create({
@@ -150,13 +255,24 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
           runId: run.id,
           cwd: project.path,
           resumeSessionId,
-          initInput: resume ? undefined : setEffort ? `/effort ${effort}` : undefined,
+          // Keyed off the RESOLVED id, not the request: a Continue that fell
+          // through to a fresh session is a fresh session and gets the effort
+          // injection like any other; only a real resume is left untouched.
+          initInput: resumeSessionId ? undefined : setEffort ? `/effort ${effort}` : undefined,
         });
         await prisma.run.update({
           where: { id: run.id },
           data: { pid, claudeSessionId: sessionId },
         });
-        return reply.code(201).send({ runId: run.id, pid, sessionId });
+        return reply.code(201).send({
+          runId: run.id,
+          pid,
+          sessionId,
+          ...(resume ? { resumed: Boolean(resumeSessionId) } : {}),
+          ...(staleSession
+            ? { notice: 'The previous Claude session is no longer on disk — started a fresh one.' }
+            : {}),
+        });
       } catch (err) {
         await prisma.run.update({
           where: { id: run.id },
@@ -294,29 +410,49 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  // Run details + persisted logs (for reconnecting to history).
-  app.get<{ Params: { runId: string } }>('/api/runs/:runId', async (req, reply) => {
-    const run = await prisma.run.findUnique({
-      where: { id: req.params.runId },
-      include: {
-        logs: { orderBy: { ts: 'asc' } },
-        command: true,
-        project: true,
-      },
-    });
-    if (!run) return reply.code(404).send({ error: 'Run not found.' });
-    return { ...run, live: isRunning(run.id) };
-  });
+  // Run details + persisted logs (for reconnecting to history). The replay is
+  // BOUNDED (see tailLogs) — the old query returned every RunLog row, and this
+  // route is hit on every Claude tab mount, every reconnect and in the UAC poll
+  // loop. `?logs=0` skips the log query entirely, for the callers that only want
+  // the row itself (the claudeSessionId lookup, the liveness poll).
+  app.get<{ Params: { runId: string }; Querystring: { logs?: string } }>(
+    '/api/runs/:runId',
+    async (req, reply) => {
+      const raw = String(req.query?.logs ?? '').toLowerCase();
+      const wantLogs = !(raw === '0' || raw === 'false' || raw === 'none');
+
+      const run = await prisma.run.findUnique({
+        where: { id: req.params.runId },
+        include: { command: true, project: true },
+      });
+      if (!run) return reply.code(404).send({ error: 'Run not found.' });
+      if (!wantLogs) return { ...run, logsOmitted: true, live: isRunning(run.id) };
+
+      const { logs, truncated } = await tailLogs(run.id, MAX_REPLAY_CHARS);
+      // Make the cut visible: consumers concatenate these chunks straight into a
+      // terminal, and silently dropping the head would read as lost output.
+      if (truncated) {
+        logs.unshift({
+          id: `${run.id}:truncated`,
+          runId: run.id,
+          chunk: '\x1b[90m[earlier output truncated]\x1b[0m\r\n',
+          ts: logs[0]?.ts ?? new Date(),
+        });
+      }
+      return { ...run, logs, logsTruncated: truncated, live: isRunning(run.id) };
+    },
+  );
 
   // Diagnose a failed run via `claude -p` (nice-to-have).
   app.post<{ Params: { runId: string } }>('/api/runs/:runId/diagnose', async (req, reply) => {
     const run = await prisma.run.findUnique({
       where: { id: req.params.runId },
-      include: { logs: { orderBy: { ts: 'asc' } }, command: true, project: true },
+      include: { command: true, project: true },
     });
     if (!run) return reply.code(404).send({ error: 'Run not found.' });
 
-    const output = run.logs.map((l) => l.chunk).join('');
+    const { logs } = await tailLogs(run.id, DIAGNOSE_CHARS);
+    const output = logs.map((l) => l.chunk).join('');
     const command = run.command?.command ?? '(unknown command)';
 
     try {

@@ -3,9 +3,6 @@ import type {
   AiSettings,
   AnalyzerResult,
   AppPrefs,
-  ArgusLogResult,
-  ArgusSessions,
-  ArgusStatus,
   Armory,
   DirListing,
   EmbeddedGodAction,
@@ -53,7 +50,12 @@ const SAME_ORIGIN = injected ? window.location.origin : null;
 const API_BASE = SAME_ORIGIN ?? 'http://127.0.0.1:4000';
 const WS_BASE = SAME_ORIGIN ? SAME_ORIGIN.replace(/^http/, 'ws') : 'ws://127.0.0.1:4000';
 
-const TOKEN = injected?.token ?? (import.meta.env.VITE_RUNNER_TOKEN as string | undefined);
+// The env fallback is DEV-ONLY on purpose. Unguarded, Vite inlines the real
+// .runner-token into the built bundle as a string literal, and that bundle ships
+// in the installer AND is what the LAN stats listener hands the phone.
+const TOKEN =
+  injected?.token ??
+  (import.meta.env.DEV ? (import.meta.env.VITE_RUNNER_TOKEN as string | undefined) : undefined);
 
 export function hasToken(): boolean {
   return Boolean(TOKEN && TOKEN.length > 0 && TOKEN !== 'paste-the-token-here');
@@ -153,14 +155,19 @@ export const api = {
     }),
 
   // Run details + liveness (used to poll a pending elevated shell until it's live).
-  getRun: (runId: string) =>
+  // Pass `{ logs: false }` when only the Run row is wanted (a claudeSessionId or a
+  // liveness flag): the backend then skips the log query entirely instead of
+  // serializing the whole terminal transcript. Default stays ON — the reconnect
+  // path replays `logs` into the terminal.
+  getRun: (runId: string, opts?: { logs?: boolean }) =>
     request<{
       id: string;
       status: string;
       exitCode: number | null;
       live: boolean;
       logs?: { chunk: string }[];
-    }>(`/api/runs/${runId}`),
+      logsOmitted?: boolean;
+    }>(`/api/runs/${runId}${opts?.logs === false ? '?logs=0' : ''}`),
 
   // resume: reopen the most recent conversation in the project dir (claude --continue).
   // Omitting `effort` lets the backend apply the level configured in Settings →
@@ -309,6 +316,12 @@ export const api = {
       ...(resume ? { body: JSON.stringify({ continue: true }) } : {}),
     }),
 
+  // Ask the model why a run failed: the backend tails this run's output and
+  // prompts with it. A 502 means the model/CLI call itself failed — a normal,
+  // recoverable condition whose message is what the UI shows the user.
+  diagnoseRun: (runId: string) =>
+    request<{ explanation: string }>(`/api/runs/${runId}/diagnose`, { method: 'POST' }),
+
   // --- mobile LAN share (desktop side — master-token-gated) ---
   // Create a QR share for one live terminal → { url, relay, expiresAt, ... }.
   shareRun: (runId: string, opts: { canInput?: boolean; ttlMs?: number } = {}) =>
@@ -412,20 +425,14 @@ export const api = {
   getAbout: () => request<AboutInfo>('/api/settings/about'),
 
   // --- Argus Panoptes (read-only god-monitor over ~/.claude) ---
-  getArgusStatus: () => request<ArgusStatus>('/api/argus/status'),
-
-  getArgusSessions: () => request<ArgusSessions>('/api/argus/sessions'),
-
+  // The native status/sessions clients are gone with their endpoints: the tab
+  // polls the EMBEDDED god (`getGodStatus`) and deliberately does not show the
+  // native ~/.claude layer.
   getArgusMemoryGraph: () => request<MemoryGraph>('/api/argus/memory-graph'),
 
   getArgusNote: (project: string, slug: string) =>
     request<MemoryNoteDetail>(
       `/api/argus/memory/note?project=${encodeURIComponent(project)}&slug=${encodeURIComponent(slug)}`,
-    ),
-
-  getArgusLogs: (source: 'monitor' | 'perf' | 'audit', limit = 200) =>
-    request<ArgusLogResult>(
-      `/api/argus/logs?source=${encodeURIComponent(source)}&limit=${limit}`,
     ),
 
   // --- Embedded godclaude (NARUKAMI's OWN instance — writable control plane) ---

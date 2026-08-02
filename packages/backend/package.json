@@ -13,6 +13,9 @@
     "prisma:generate": "prisma generate",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:unit": "vitest run --exclude \"**/node_modules/**\" --exclude \"**/dist/**\" --exclude \"src/generated/**\" --exclude \"**/*.integration.test.ts\"",
+    "test:integration": "vitest run .integration.test.",
+    "test:coverage": "npm run test:unit -- --coverage",
     "postinstall": "prisma generate"
   },
   "dependencies": {
@@ -27,6 +30,7 @@
   "devDependencies": {
     "@types/node": "^22.13.1",
     "@types/ws": "^8.5.14",
+    "@vitest/coverage-v8": "^2.1.9",
     "prisma": "^6.3.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",

@@ -2187,6 +2187,45 @@ expect('118d. godsite: `docker build .` → ALLOW (building is fine; only publis
     asstText('Not only does the parser handle it, the whole thing works now and is done.'),
   ]);
   expect('301c. "not only ... works ... done" — negator attaches elsewhere → still a claim → BLOCK', runGate(f301c).blocked, true);
+
+  // 302. THE HONEST-NEGATIVE THE BLOCK MESSAGE ITSELF DEMANDS. The gate's own bounce text tells the agent
+  // to "REWRITE your closing message to drop the completion claim and state explicitly what is unverified
+  // and why" — and then the claim list (bare `works`/`working`/`ready`/`passes`) bounced exactly that
+  // rewrite, because 301's negation guard only reaches a claim word sitting IMMEDIATELY after the negator.
+  // Punishing accurate self-reporting is the worst failure mode a determinism layer can have, so each of
+  // these five real closings must ALLOW. They all share one shape: the negator attaches to a VERIFICATION
+  // verb (verify/test/check/confirm/know) and the claim word is the object of that same clause.
+  const negOk = (name, text) => runGate(writeFixture(name, [
+    userPrompt('fix the bug'),
+    asstTool('Edit', { file_path: WP, old_string: 'a', new_string: 'b' }), toolResult(),
+    asstText(text),
+  ])).blocked;
+  expect('302a. "I could not verify that this works — I have no test runner here." → ALLOW (honest negative)',
+    negOk('neg_verify_works', 'I could not verify that this works — I have no test runner here. The edit is in place but unverified.'), false);
+  expect('302b. "I have not tested whether it is working" → ALLOW (honest negative)',
+    negOk('neg_verify_working', 'I have not tested whether it is working, so treat this as unverified.'), false);
+  expect('302c. "I cannot confirm the suite passes" → ALLOW (honest negative)',
+    negOk('neg_verify_passes', 'I cannot confirm the suite passes — there is no runner in this environment.'), false);
+  expect('302d. "I did not check that the change is ready" → ALLOW (honest negative)',
+    negOk('neg_verify_ready', 'I did not check that the change is ready; please review it yourself.'), false);
+  expect('302e. "I do not know whether the build passes" → ALLOW (honest negative)',
+    negOk('neg_verify_build', 'I was unable to run the tests, so I do not know whether the build passes.'), false);
+  // 302f/g. NEGATIVE CONTROLS for the widened guard: the negated verification must be in the SAME clause as
+  // the claim word. A clause boundary (comma, "but") means the negator attaches elsewhere → still a BLOCK.
+  expect('302f. "could not verify the old behavior, but the new code works" → BLOCK (clause boundary)',
+    negOk('neg_verify_clause_comma', 'I could not verify the old behavior, but the new code works now.'), true);
+  expect('302g. "could not verify it but the tests pass" → BLOCK (conjunction, not the same clause)',
+    negOk('neg_verify_clause_but', 'I could not verify it but the tests pass.'), true);
+  // 302h/i. The per-word qualifiers, as their own controls: progressive "working on" and "ready to/for" are
+  // NOT completion claims (they are the opposite — work in flight / a hand-off), so a turn whose ONLY
+  // claim-ish word is one of those must ALLOW.
+  expect('302h. "still working on the remaining case" is progress, not a completion claim → ALLOW',
+    negOk('claim_working_on', 'I am still working on the remaining case; the parser branch is untouched so far.'), false);
+  expect('302i. "ready for your review" is a hand-off, not a completion claim → ALLOW',
+    negOk('claim_ready_for', 'The draft edit is ready for your review whenever you want to look at it.'), false);
+  // 302j. And the qualifiers must not open a hole: a real predicative claim still BLOCKS.
+  expect('302j. "everything is working now" (predicative) → still a claim → BLOCK',
+    negOk('claim_working_pred', 'I touched the parser and everything is working now.'), true);
 }
 
 // ====================================================================================
@@ -2453,6 +2492,64 @@ expect('118d. godsite: `docker build .` → ALLOW (building is fine; only publis
   try { execFileSync('node', [GATE], { input: payload, encoding: 'utf8', env: { ...process.env, GODMODE_MODE: 'general', GODMODE_MODES_DIR: MODES_DIR, DET_HOOKS_HOME: FIX } }); } catch (_) {}
   const ms = Date.now() - t0;
   expect(`340. flush-race: no-mutation/no-closing-text turn returns FAST (no full ~1.2s flush wait) — measured ${ms}ms (<600)`, ms < 600, true);
+}
+
+// ---- flush-loop I/O (the fast path already read the file; the loop must not re-read the same bytes) ----
+// The fast path at the top of decide() reads and parses the WHOLE transcript, then hands it to the flush
+// loop — but it used to leave lastSize at -1, so the loop's "did the file grow?" guard was always true on
+// attempt 0 and it read every byte a second time. On a settled turn that second read is pure waste (the
+// closing text was already there). Proof: count readFileSync calls against the transcript around a real
+// in-process decide() — 2 before the fix, 1 after.
+{
+  const settledMut = writeFixture('io_settled_mut', [
+    userPrompt('fix the bug'),
+    asstTool('Edit', { file_path: WP, old_string: 'a', new_string: 'b' }), toolResult(),
+    asstText('Done — fixed it, it works now.'),
+  ]);
+  // Run decide() in-process with fs instrumented. `node -e` leaves require.main !== the gate module, so the
+  // CLI shim at the bottom of the hook does NOT self-run — we get the exported decide() and nothing else.
+  const instrumented = (tp, { throwStat = false } = {}) => {
+    const probe = `
+      const fs = require('node:fs');
+      const realRead = fs.readFileSync, realStat = fs.statSync;
+      const TP = ${JSON.stringify(tp)};
+      let reads = 0;
+      fs.readFileSync = function (p, ...a) { if (String(p) === TP) reads++; return realRead.call(fs, p, ...a); };
+      ${throwStat ? `fs.statSync = function (p, ...a) { if (String(p) === TP) throw new Error('EPERM (simulated)'); return realStat.call(fs, p, ...a); };` : ''}
+      const decide = require(${JSON.stringify(GATE)});
+      const t0 = Date.now();
+      const out = decide(JSON.stringify({ hook_event_name: 'Stop', transcript_path: TP, stop_hook_active: false }));
+      process.stdout.write(JSON.stringify({ reads, ms: Date.now() - t0, blocked: /"decision"\\s*:\\s*"block"/.test(out) }));
+    `;
+    try {
+      return JSON.parse(execFileSync('node', ['-e', probe], { encoding: 'utf8', env: { ...process.env, GODMODE_MODE: 'general', GODMODE_MODES_DIR: MODES_DIR, DET_HOOKS_HOME: FIX } }));
+    } catch (e) { return { reads: -1, ms: -1, blocked: false, err: String(e && e.message) }; }
+  };
+  const r341 = instrumented(settledMut);
+  expect(`341a. settled mutation turn reads the transcript ONCE, not twice — measured ${r341.reads} full read(s)`, r341.reads, 1);
+  expect('341b. …and still decides the same (mutation + unverified claim → BLOCK)', r341.blocked, true);
+  // Degenerate path: if statSync throws, size stays -1 and equals the (unseeded) lastSize forever, so the
+  // loop skipped the re-read on EVERY attempt and burned all 8×150ms sleeps without ever looking at the file
+  // again — on a turn whose closing text was already present. Checking endsOnAsstText on the fast-path parse
+  // BEFORE entering the loop (plus forcing a re-read whenever the size is unknown) removes the burn.
+  const r341c = instrumented(settledMut, { throwStat: true });
+  expect(`341c. statSync failing does NOT burn the 8×150ms budget on an already-settled turn — measured ${r341c.ms}ms (<600)`, r341c.ms < 600, true);
+  expect('341d. …and the decision is unchanged with statSync broken (still BLOCK)', r341c.blocked, true);
+}
+
+// ---- the persistence gate never got the proof-gate's fast path (audit item 15c) ----
+// 'no tool use this turn (pure chat/Q&A — exempt)' is the persist gate's DOMINANT allow, and it is decidable
+// from the first read — but the exit sits AFTER the flush loop, so a pure-chat turn whose transcript does not
+// end on assistant text waits the full 8×150ms to reach a verdict it already had.
+{
+  const PERSIST2 = `${HOOKS}/block-premature-stop.js`;
+  const chat = writeFixture('persist_fastpath_nochat', [userPrompt('what does this module do?')]); // no tools, no closing text
+  const payload = JSON.stringify({ hook_event_name: 'Stop', transcript_path: chat, stop_hook_active: false });
+  const t0 = Date.now();
+  let out = ''; try { out = execFileSync('node', [PERSIST2], { input: payload, encoding: 'utf8', env: { ...process.env, DET_HOOKS_HOME: FIX } }); } catch (e) { out = e.stdout || ''; }
+  const ms2 = Date.now() - t0;
+  expect(`342a. persist: no-tool-use turn exits on the FIRST read (no 8×150ms flush burn) — measured ${ms2}ms (<600)`, ms2 < 600, true);
+  expect('342b. …and still ALLOWs (pure chat is exempt)', /"decision"\s*:\s*"block"/.test(out), false);
 }
 
 // ---- report ----

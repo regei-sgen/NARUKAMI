@@ -16,6 +16,13 @@ function statsFrontendDir(): string | undefined {
   return candidates.find((p) => fs.existsSync(path.join(p, 'index.html')));
 }
 
+const DEFAULT_STATS_PORT = 4311;
+
+/** Below 1024 needs privilege; 65535 is the ceiling. */
+function isUsablePort(p: unknown): p is number {
+  return typeof p === 'number' && Number.isInteger(p) && p >= 1024 && p <= 65535;
+}
+
 /**
  * Control surface for the phone's Wi-Fi path. These routes live on the normal
  * loopback-only backend (so they're already token-gated); they just turn the
@@ -28,9 +35,15 @@ export async function statsLanRoutes(app: FastifyInstance): Promise<void> {
     info: statsLanInfo(),
   }));
 
-  app.post('/api/pcstats/lan/start', async (req) => {
-    const body = (req.body ?? {}) as { port?: number; frontendDir?: string };
-    const h = await startStatsLan(body.port ?? 4311, body.frontendDir ?? statsFrontendDir());
+  app.post('/api/pcstats/lan/start', async (req, reply) => {
+    // The directory is NOT caller-supplied: honouring one would turn this into
+    // a general file server for any directory containing an index.html.
+    const body = (req.body ?? {}) as { port?: unknown };
+    const port = body.port ?? DEFAULT_STATS_PORT;
+    if (!isUsablePort(port)) {
+      return reply.code(400).send({ error: 'port must be an integer in [1024,65535]' });
+    }
+    const h = await startStatsLan(port, statsFrontendDir());
     return {
       running: true,
       info: {

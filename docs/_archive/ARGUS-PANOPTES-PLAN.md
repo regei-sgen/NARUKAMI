@@ -1,5 +1,7 @@
 # Argus Panoptes — Native Godmonitor Tab for NARUKAMI (Plan)
 
+> **ARCHIVED 2026-08-01 — superseded by the embedded-god tab.** Everything below is historical: the tab now polls the EMBEDDED layer (`/api/godclaude/status`) and deliberately does not show the native `~/.claude` layer, so `/api/argus/status`, `/api/argus/sessions` and the native `--json` CLI shell-out (`collectStatus`/`readSnapshot`/`readStats`) have been deleted, and the UsageMeters / LogFeed panels described here never shipped.
+
 **Status:** v1 IMPLEMENTED (phases 0–3). Phase 4 (WS live-tail / OBSERVE / signature hero) deferred.
 **Date:** 2026-07-06
 **Branch:** `opus-audit-fixes` (all NARUKAMI work stays here per standing rule).

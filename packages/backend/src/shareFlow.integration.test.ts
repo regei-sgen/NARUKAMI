@@ -62,14 +62,27 @@ function fakeTransport(): { transport: RunTransport; resizes: Array<[number, num
   };
 }
 
-/** WS client wrapper: queues parsed messages; await them one by one. */
-function wsClient(url: string): {
+/**
+ * WS client wrapper: queues parsed messages; await them one by one.
+ *
+ * `opts.origin` defaults to loopback (what the desktop app really sends) but is
+ * overridable so the upgrade-time Origin/Host gate can be exercised for real —
+ * pass `null` to send no Origin header at all. `opts.headers` goes straight into
+ * the handshake request, which is how a non-loopback `Host` is forged while
+ * still connecting to 127.0.0.1.
+ */
+function wsClient(
+  url: string,
+  opts: { origin?: string | null; headers?: Record<string, string> } = {},
+): {
   ws: WebSocket;
   next: (timeoutMs?: number) => Promise<Record<string, unknown>>;
   opened: Promise<void>;
   closed: Promise<{ code: number }>;
 } {
-  const ws = new WebSocket(url, { origin: 'http://127.0.0.1' });
+  const origin = opts.origin === undefined ? 'http://127.0.0.1' : opts.origin;
+  // `origin: undefined` makes ws omit the header (it only sets it when truthy).
+  const ws = new WebSocket(url, { origin: origin ?? undefined, headers: opts.headers });
   const queue: Record<string, unknown>[] = [];
   const waiters: Array<(m: Record<string, unknown>) => void> = [];
   ws.on('message', (raw) => {
@@ -269,5 +282,49 @@ describe('mobile share device gate + one-true-grid (end to end over real HTTP/WS
     expect((await phone.closed).code).toBe(4410);
     const again = wsClient(`${wsBase}/ws/runs/${runId}?token=${share.token}&device=p3`);
     await expect(again.opened).rejects.toThrow(/401/);
+  });
+});
+
+// ws.ts rejects cross-site upgrades before it even looks at the token, but the
+// predicate (isAllowedOrigin / isAllowedHost) was only ever exercised as a pure
+// function — every real socket in this file hardcoded a loopback Origin, so
+// deleting the `if` from the upgrade handler would not have turned one test red.
+// Each case below changes exactly ONE header against a control that opens, and
+// carries the MASTER token — so a 403 can only have come from the header gate
+// (a bad credential would be 401, and the gate runs first anyway).
+describe('ws upgrade Origin/Host gate (the wiring, not just the predicate)', () => {
+  const gateRunId = `${RUN_ID}-gate`;
+  let gateUrl = '';
+
+  beforeAll(() => {
+    registerRun(gateRunId, fakeTransport().transport);
+    gateUrl = `${wsBase}/ws/runs/${gateRunId}?token=${getToken()}`;
+  });
+
+  it('control: the identical URL with a loopback Origin upgrades', async () => {
+    const ok = wsClient(gateUrl);
+    await ok.opened;
+    expect(await ok.next()).toMatchObject({ type: 'ready' });
+    ok.ws.close();
+    await ok.closed;
+  });
+
+  it('rejects a cross-site Origin at the upgrade (403, socket destroyed)', async () => {
+    const evil = wsClient(gateUrl, { origin: 'http://evil.com' });
+    await expect(evil.opened).rejects.toThrow(/403/);
+    // Rejection is a written status line + destroy, so the socket never opens.
+    expect(evil.ws.readyState).not.toBe(WebSocket.OPEN);
+  });
+
+  it('rejects a non-loopback Host even when the Origin looks local (DNS rebinding)', async () => {
+    // Connects to 127.0.0.1 but claims to be evil.com — exactly what a rebound
+    // DNS name produces, and the reason Host is checked as well as Origin.
+    const rebound = wsClient(gateUrl, { headers: { host: 'evil.com:1234' } });
+    await expect(rebound.opened).rejects.toThrow(/403/);
+  });
+
+  it('rejects an upgrade with no Origin header at all (fail closed)', async () => {
+    const bare = wsClient(gateUrl, { origin: null });
+    await expect(bare.opened).rejects.toThrow(/403/);
   });
 });

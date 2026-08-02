@@ -28,6 +28,23 @@ const REMOVED_COLUMNS: ReadonlyArray<{ table: string; column: string }> = [
 ];
 
 /**
+ * Whole tables left behind by a REMOVED model. The table-level analogue of
+ * {@link REMOVED_COLUMNS}: deleting a `model` from schema.prisma only reaches a
+ * database that gets migrated, and the packaged app never migrates (see
+ * {@link ensureSchema}) — so the table would linger forever in every install
+ * seeded before the removal. Dropped idempotently via `DROP TABLE IF EXISTS`,
+ * which takes the table's indexes with it.
+ *
+ * Like {@link REMOVED_COLUMNS} this DESTROYS data — list a table here only once
+ * the feature that owned it is gone and its rows are meaningless.
+ */
+const REMOVED_TABLES: ReadonlyArray<string> = [
+  // Per-project End-of-Day snapshot — superseded by the cross-project EodReport.
+  // Never had a route or a call site outside the generated client.
+  'EodEntry',
+];
+
+/**
  * Whole tables a newer app version adds that an OLDER-seeded database won't have.
  * Each statement is `CREATE TABLE/INDEX IF NOT EXISTS`, so it is idempotent. Keep
  * in lockstep with any new `model` in schema.prisma.
@@ -59,6 +76,19 @@ const ADDITIVE_TABLES: ReadonlyArray<string> = [
   `CREATE INDEX IF NOT EXISTS "Release_projectId_createdAt_idx" ON "Release"("projectId", "createdAt")`,
 ];
 
+/**
+ * Indexes added to an EXISTING table by a newer app version. A schema.prisma
+ * `@@index` only reaches a database that gets migrated, and the packaged app
+ * never migrates (see {@link ensureSchema}) — so every already-seeded install
+ * needs the index created here. Applied AFTER {@link ADDITIVE_COLUMNS} because an
+ * index can cover a column that same pass just added (Run.claudeSessionId).
+ * Keep in lockstep with any new `@@index` in schema.prisma.
+ */
+const ADDITIVE_INDEXES: ReadonlyArray<string> = [
+  `CREATE INDEX IF NOT EXISTS "Run_projectId_startedAt_idx" ON "Run"("projectId", "startedAt")`,
+  `CREATE INDEX IF NOT EXISTS "Run_claudeSessionId_idx" ON "Run"("claudeSessionId")`,
+];
+
 type RawClient = Pick<PrismaClient, '$queryRawUnsafe' | '$executeRawUnsafe'>;
 
 /**
@@ -70,8 +100,9 @@ type RawClient = Pick<PrismaClient, '$queryRawUnsafe' | '$executeRawUnsafe'>;
  * table_info` and apply the `ADD COLUMN` only when it's absent. Idempotent and
  * safe to run on every boot.
  *
- * It then drops any {@link REMOVED_COLUMNS} still present — the one case where
- * this routine discards data, and only for columns whose owning feature is gone.
+ * It then drops any {@link REMOVED_COLUMNS} and {@link REMOVED_TABLES} still
+ * present — the one case where this routine discards data, and only for columns
+ * and tables whose owning feature is gone.
  */
 export async function ensureSchema(client: RawClient = prisma): Promise<void> {
   // WAL journal mode: with several live shells each flushing RunLog rows every
@@ -107,6 +138,14 @@ export async function ensureSchema(client: RawClient = prisma): Promise<void> {
       process.stderr.write(`[narukami] ensureSchema(${table}.${column}) failed: ${String(err)}\n`);
     }
   }
+  // Then indexes, which may cover a column the pass above just added.
+  for (const ddl of ADDITIVE_INDEXES) {
+    try {
+      await client.$executeRawUnsafe(ddl);
+    } catch (err) {
+      process.stderr.write(`[narukami] ensureSchema(index) failed: ${String(err)}\n`);
+    }
+  }
   // Finally, drop columns whose feature has been removed. Runs AFTER the additive
   // pass so the two can never fight over the same column name.
   for (const { table, column } of REMOVED_COLUMNS) {
@@ -120,6 +159,15 @@ export async function ensureSchema(client: RawClient = prisma): Promise<void> {
       process.stderr.write(
         `[narukami] ensureSchema(drop ${table}.${column}) failed: ${String(err)}\n`,
       );
+    }
+  }
+  // And tables whose whole model has been removed. Last, so the additive pass
+  // above can never re-create something this pass is about to drop.
+  for (const table of REMOVED_TABLES) {
+    try {
+      await client.$executeRawUnsafe(`DROP TABLE IF EXISTS "${table}"`);
+    } catch (err) {
+      process.stderr.write(`[narukami] ensureSchema(drop table ${table}) failed: ${String(err)}\n`);
     }
   }
 }

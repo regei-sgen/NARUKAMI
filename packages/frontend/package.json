@@ -9,7 +9,9 @@
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:unit": "vitest run --exclude \"**/node_modules/**\" --exclude \"**/dist/**\" --exclude \"**/*.integration.test.*\"",
+    "test:coverage": "npm run test:unit -- --coverage"
   },
   "dependencies": {
     "@fontsource/jetbrains-mono": "^5.2.8",
@@ -22,8 +24,7 @@
     "monaco-editor": "^0.52.2",
     "qrcode": "^1.5.4",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "three": "^0.171.0"
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "@testing-library/dom": "^10.4.1",
@@ -33,8 +34,8 @@
     "@types/qrcode": "^1.5.6",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
-    "@types/three": "^0.171.0",
     "@vitejs/plugin-react": "^4.3.4",
+    "@vitest/coverage-v8": "^2.1.9",
     "jsdom": "^29.1.1",
     "typescript": "^5.7.3",
     "vite": "^6.0.11",

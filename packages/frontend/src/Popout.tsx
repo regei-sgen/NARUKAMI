@@ -50,26 +50,30 @@ export function Popout({ runId }: { runId: string }) {
   // Restart/continue re-key the run server-side; follow the new runId locally so
   // the detached window keeps driving the same tab.
   const onRestart = useCallback(
-    async (oldRunId: string, resume = false) => {
-      try {
-        const r = await api.restartRun(oldRunId, resume);
-        desktop()?.signalRunChanged(oldRunId, r.runId); // keep the shell's mapping current
-        setRun((cur) =>
-          cur
-            ? {
-                ...cur,
-                runId: r.runId,
-                label: r.label,
-                customLabel: r.name ?? undefined,
-                kind: r.kind,
-                status: 'connecting',
-                exitCode: null,
-              }
-            : cur,
-        );
-      } catch (e) {
-        setError((e as Error).message);
-      }
+    (oldRunId: string, resume = false) => {
+      // Fire-and-forget: TerminalTab's onRestart/onContinue are declared void and
+      // nothing awaits this. Failures surface through setError below.
+      void (async () => {
+        try {
+          const r = await api.restartRun(oldRunId, resume);
+          desktop()?.signalRunChanged(oldRunId, r.runId); // keep the shell's mapping current
+          setRun((cur) =>
+            cur
+              ? {
+                  ...cur,
+                  runId: r.runId,
+                  label: r.label,
+                  customLabel: r.name ?? undefined,
+                  kind: r.kind,
+                  status: 'connecting',
+                  exitCode: null,
+                }
+              : cur,
+          );
+        } catch (e) {
+          setError((e as Error).message);
+        }
+      })();
     },
     [],
   );

@@ -1,15 +1,28 @@
 # NARUKAMI — Windows Desktop App Spec
 
-Status: **DRAFT for approval** · Target: package NARUKAMI as a standalone Windows
-app with an embedded database, launched by double-clicking an `.exe` — **no
-`npm run dev`, no Docker**.
+> **Status: HISTORICAL — this plan shipped.** Kept as the record of the decision,
+> not as a description of the code. It was written *before* the Electron port,
+> when the backend still ran against Postgres in Docker, so its "current state"
+> paragraphs describe a stack that no longer exists.
+>
+> **What was actually built:** §3 **Option A (Prisma + SQLite)** and §7 the
+> **NSIS installer** (`packages/desktop/release/NARUKAMI-Setup-*.exe`). Docker and
+> Postgres are gone entirely — `prisma/schema.prisma` has `provider = "sqlite"`
+> and the DB is a file under `app.getPath('userData')`. One deviation from §3:
+> the packaged app does **not** run `prisma migrate deploy` at runtime; it copies
+> a template DB on first launch and self-heals the schema at boot
+> (`ensureSchema` in `packages/backend/src/db.ts`).
+>
+> For what the app does **today**, read [`FEATURES.md`](../FEATURES.md); for
+> packaging specifics, FEATURES.md §8.
 
 ---
 
 ## 1. Goal
 
-Turn the current web app (Fastify backend + Vite/React frontend + Postgres in
-Docker) into a single installable Windows desktop application:
+Turn the then-current web app (Fastify backend + Vite/React frontend + Postgres
+in Docker — both since removed) into a single installable Windows desktop
+application:
 
 - One `.exe` to install/run. No terminal, no `npm`, no Docker.
 - Database lives **inside the app's data folder** (created on first launch).
@@ -44,7 +57,11 @@ change below).
 
 ## 3. Embedded database — replace Postgres/Docker
 
-Docker exists **only** to run Postgres. Dropping Docker means swapping the
+> **Outcome: Option A (Prisma + SQLite) was chosen and shipped.** Docker and
+> Postgres were removed from the repo. The runtime-migration plan at the end of
+> this section was *not* kept — see the banner at the top.
+
+At the time of writing, Docker existed **only** to run Postgres. Dropping Docker means swapping the
 datasource to a file-based DB stored under
 `app.getPath('userData')` (e.g. `%APPDATA%\NARUKAMI\narukami.db`).
 
@@ -180,8 +197,6 @@ packaging (Phase 3) and Prisma engine bundling (if A).**
 
 ---
 
-### Decision needed to start
-1. **DB engine:** A = Prisma + SQLite (recommended, least work) · B = better-sqlite3 (clean packaging, full rewrite).
-2. **Installer:** NSIS `Setup.exe` (recommended) · portable `.exe`.
-
-Say the choices (or "use your defaults") and I'll build Phase 1 → 3.
+### Decisions taken (both shipped)
+1. **DB engine:** **A — Prisma + SQLite.** `schema.prisma` is `provider = "sqlite"`; the DB file lives in `userData`.
+2. **Installer:** **NSIS `Setup.exe`**, unsigned (SmartScreen "unknown publisher" as anticipated in §7).

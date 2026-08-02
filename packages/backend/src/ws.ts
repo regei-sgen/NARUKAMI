@@ -2,7 +2,7 @@ import type { Server } from 'node:http';
 import { URL } from 'node:url';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { prisma } from './db';
-import { isAllowedHost, isAllowedOrigin, isValidToken } from './auth';
+import { isAllowedHost, isAllowedOrigin, isTrustedLocalRequest, isValidToken } from './auth';
 import { onShareRevoked, validateShare } from './services/shareTokens';
 import { relayPeerAddress } from './services/lanRelay';
 import {
@@ -18,7 +18,9 @@ import {
   attach,
   getFinalState,
   getFinalTranscript,
+  getLiveTranscriptTail,
   getRunSize,
+  LOG_RETENTION_DAYS,
   resizeRun,
   writeToRun,
 } from './services/runner';
@@ -31,6 +33,43 @@ interface ClientMessage {
 }
 
 const RUN_WS_RE = /^\/ws\/runs\/([^/?]+)$/;
+
+// Largest frame we will accept from a client. Everything a client sends is a
+// keystroke or a grid; the only large case is a paste, which xterm delivers as
+// ONE onData — so this is set well above any realistic paste while still
+// stopping an authenticated socket from handing handleClientMessage a 100MB
+// JSON.parse. ws answers an over-size frame with close 1009.
+const MAX_CLIENT_PAYLOAD_BYTES = 4 * 1024 * 1024;
+
+// Liveness. TCP alone will not tell us a phone locked its screen: the half-open
+// socket stays "open" for hours while the runner streams into it.
+const PING_INTERVAL_MS = 30_000;
+
+// Backpressure. ws queues everything the kernel hasn't taken in THIS process's
+// memory (the Electron main process in packaged mode), and the producer has no
+// flow control — runner.ts fans out synchronously and force-flushes at 256KB.
+// Past this mark we stop feeding the socket droppable output.
+const WS_HIGH_WATER_BYTES = 2 * 1024 * 1024;
+// How much of the transcript to re-send once a dropped socket drains. Same
+// order as the read endpoint's floor (terminals.ts: Math.max(64 * 1024, …)).
+const RESYNC_TAIL_CHARS = 64 * 1024;
+const RESYNC_MARKER = '\r\n[output dropped while this device fell behind]\r\n';
+
+// Bounded DB replay for a dead run. Mirrors MAX_TRANSCRIPT_CHARS in runner.ts
+// (2_000_000, not exported) so a restored tab sees the same ceiling a live one
+// does, instead of the whole table joined into one frame.
+const REPLAY_MAX_CHARS = 2_000_000;
+const REPLAY_MAX_ROWS = 5000;
+const REPLAY_CHUNK_CHARS = 256 * 1024;
+const TRUNCATION_MARKER = '[earlier output truncated]\r\n';
+// A replay with ZERO rows must still say something. The join produced '' and the
+// chunking loop then sent no data frame at all, so a restored tab came back
+// completely blank and read as broken — seven of the nine pinned runs in the
+// live desktop DB are in exactly that state, emptied by an older retention
+// sweep that did not exempt dockOpen runs. Which of the two markers applies is
+// decided by age, because only one of the causes is retention.
+const PRUNED_MARKER = '[history older than the retention window was pruned]\r\n';
+const NO_OUTPUT_MARKER = '[this run recorded no output]\r\n';
 
 // ── connection registries ─────────────────────────────────────────────────────
 // Master (desktop) sockets per runId: device approval/monitor events for a run
@@ -82,9 +121,60 @@ export function publicDevice(d: MobileDevice): {
   };
 }
 
-/** Attach a raw `ws` server to Fastify's HTTP server for live terminal streams. */
-export function setupWebSocket(server: Server): void {
-  const wss = new WebSocketServer({ noServer: true });
+/** A socket carrying its liveness flag (the standard `ws` heartbeat idiom). */
+interface LiveSocket extends WebSocket {
+  isAlive?: boolean;
+}
+
+/** Record that a socket answered (upgrade or 'pong'). */
+export function markAlive(ws: WebSocket): void {
+  (ws as LiveSocket).isAlive = true;
+}
+
+/**
+ * One heartbeat pass: terminate every socket that did not answer the PREVIOUS
+ * ping, then ping the rest. terminate() still emits 'close', so a half-open
+ * socket runs the same cleanup an honest disconnect does — the runner
+ * subscription, the shareSockets registry and deviceDisconnected.
+ */
+export function heartbeatSweep(clients: Iterable<WebSocket>): void {
+  for (const ws of clients) {
+    const s = ws as LiveSocket;
+    if (s.isAlive === false) {
+      try {
+        s.terminate();
+      } catch {
+        /* noop */
+      }
+      continue;
+    }
+    s.isAlive = false;
+    try {
+      s.ping();
+    } catch {
+      /* noop */
+    }
+  }
+}
+
+/**
+ * Attach a raw `ws` server to Fastify's HTTP server for live terminal streams.
+ * `pingIntervalMs` exists so a test can watch the heartbeat without waiting the
+ * production 30s; callers pass nothing.
+ */
+export function setupWebSocket(server: Server, opts: { pingIntervalMs?: number } = {}): void {
+  const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_CLIENT_PAYLOAD_BYTES });
+
+  // Socket 'close' is the ONLY cleanup path in here, so a half-open connection
+  // (screen-locked phone, dropped Wi-Fi) would otherwise keep its subscription,
+  // its shareSockets entry and its phantom "connected" indicator forever.
+  const heartbeat = setInterval(
+    () => heartbeatSweep(wss.clients),
+    opts.pingIntervalMs ?? PING_INTERVAL_MS,
+  );
+  // Never keep the process (or Electron's main loop) alive just for this timer.
+  heartbeat.unref();
+  wss.on('close', () => clearInterval(heartbeat));
 
   // Device lifecycle → desktop push + deny enforcement. One global listener; it
   // routes by runId to the desktop sockets watching that terminal.
@@ -154,6 +244,12 @@ export function setupWebSocket(server: Server): void {
     }
 
     const runId = match[1];
+    // Master rights come from the SOCKET, never from a header. The relay is a
+    // raw byte pipe that forwards Host and Origin untouched, so a phone can
+    // forge `Origin: http://127.0.0.1` — and a master token lifted off that
+    // pipe would otherwise open a full-rights terminal. Same gate the HTTP
+    // surface uses for token injection, so the two can't drift apart.
+    const trustedLocal = isTrustedLocalRequest(req.headers.host, req.socket.remotePort);
     // Two credentials are accepted: the master token (desktop/loopback — full
     // access), OR a per-terminal share token that is SCOPED to exactly this runId
     // (a phone over the LAN relay). A share token for run A can never open run B.
@@ -162,7 +258,7 @@ export function setupWebSocket(server: Server): void {
     let canResize = true;
     let isMaster = true;
     let deviceId: string | null = null;
-    if (isValidToken(token)) {
+    if (trustedLocal && isValidToken(token)) {
       canInput = true;
     } else {
       isMaster = false;
@@ -199,6 +295,15 @@ export function setupWebSocket(server: Server): void {
     }
 
     wss.handleUpgrade(req, socket, head, (ws) => {
+      markAlive(ws);
+      ws.on('pong', () => markAlive(ws));
+      // ws emits 'error' on the socket for protocol violations (an over-size
+      // frame past maxPayload) and transport resets. With no listener that is
+      // an UNCAUGHT exception in the backend process; 'close' always follows,
+      // so the real cleanup still runs and there is nothing to do here.
+      ws.on('error', () => {
+        /* noop — 'close' does the cleanup */
+      });
       handleConnection(ws, runId, { canInput, canResize, isMaster, deviceId }).catch(() => {
         try {
           ws.close();
@@ -219,14 +324,33 @@ function send(ws: WebSocket, payload: unknown): void {
 // phone mirror (plus a pop-out) would otherwise re-stringify byte-identical
 // payloads — up to one 256KB chunk per 8ms during output storms.
 const wireCache = new WeakMap<object, string>();
-function sendShared(ws: WebSocket, event: object, payload: () => unknown): void {
-  if (ws.readyState !== ws.OPEN) return;
+/**
+ * Send a runner event. `droppable` marks output that may be sacrificed when the
+ * socket is backed up — the client is re-synced from the transcript tail once
+ * it drains. Control frames (resize, exit) are NEVER droppable: losing an exit
+ * leaves the tab spinning on a run that already ended. Returns false when the
+ * frame was not written.
+ */
+function sendShared(
+  ws: WebSocket,
+  event: object,
+  payload: () => unknown,
+  droppable = false,
+): boolean {
+  if (ws.readyState !== ws.OPEN) return false;
+  if (droppable && overHighWater(ws)) return false;
   let wire = wireCache.get(event);
   if (wire === undefined) {
     wire = JSON.stringify(payload());
     wireCache.set(event, wire);
   }
   ws.send(wire);
+  return true;
+}
+
+/** Is this socket's unflushed send queue past the point we keep feeding it? */
+function overHighWater(ws: WebSocket): boolean {
+  return (ws.bufferedAmount ?? 0) > WS_HIGH_WATER_BYTES;
 }
 
 interface ConnectionAuth {
@@ -236,7 +360,7 @@ interface ConnectionAuth {
   deviceId: string | null;
 }
 
-async function handleConnection(
+export async function handleConnection(
   ws: WebSocket,
   runId: string,
   auth: ConnectionAuth,
@@ -244,9 +368,24 @@ async function handleConnection(
   // Fast path: the run is live. attach() atomically hands us the full in-memory
   // transcript AND subscribes us to future output, so there is no gap between
   // "history" and "live" — every byte arrives exactly once.
+  // Backpressure state for THIS socket: once we start dropping batches the
+  // client is missing bytes, so we can't just resume mid-stream — the next
+  // batch that fits triggers a transcript-tail re-sync instead.
+  let behind = false;
   const attachment = attach(runId, (event) => {
     if (event.type === 'data') {
-      sendShared(ws, event, () => ({ type: 'data', chunk: event.chunk }));
+      if (behind) {
+        if (overHighWater(ws)) return; // still draining — keep dropping
+        behind = false;
+        // getFinalTranscript would return null here (the run is LIVE); the tail
+        // is the bounded read that exists for exactly this.
+        const tail = getLiveTranscriptTail(runId, RESYNC_TAIL_CHARS);
+        if (tail !== null) send(ws, { type: 'data', chunk: RESYNC_MARKER + tail });
+        return;
+      }
+      if (!sendShared(ws, event, () => ({ type: 'data', chunk: event.chunk }), true)) {
+        behind = ws.readyState === ws.OPEN;
+      }
     } else if (event.type === 'resize') {
       // Another client resized the pty — tell this one so every attached view
       // adopts the one true grid instead of rendering mis-wrapped output.
@@ -266,7 +405,12 @@ async function handleConnection(
       const size = getRunSize(runId);
       if (size) send(ws, { type: 'resize', cols: size.cols, rows: size.rows });
     }
-    if (attachment.backlog) send(ws, { type: 'data', chunk: attachment.backlog });
+    // The backlog is the one pre-stream send that can be megabytes, so it obeys
+    // the same mark; a socket already backed up gets the tail re-sync instead.
+    if (attachment.backlog) {
+      if (overHighWater(ws)) behind = true;
+      else send(ws, { type: 'data', chunk: attachment.backlog });
+    }
     // Explicit "the run is live" signal so the client can show 'running' only for
     // an actually-live run — a dead/restored run reaches the slow path below and
     // gets an 'exit' instead, so it never flashes 'running'.
@@ -317,10 +461,14 @@ async function handleConnection(
   }
 
   // Otherwise the record is gone — replay the persisted history from the DB and
-  // report the final status.
+  // report the final status. Bounded on BOTH rows and bytes: a pinned run in a
+  // real desktop DB reached 3,155 rows / 1.39MB, and loading every row just to
+  // join it into ONE frame materialises all of it twice (Prisma objects, then
+  // the string) before the socket sees a byte. Newest-first + take, then
+  // reverse — the tail is what a restored tab actually wants.
   const run = await prisma.run.findUnique({
     where: { id: runId },
-    include: { logs: { orderBy: { ts: 'asc' } } },
+    include: { logs: { orderBy: { ts: 'desc' }, take: REPLAY_MAX_ROWS } },
   });
 
   if (!run) {
@@ -329,8 +477,38 @@ async function handleConnection(
     return;
   }
 
-  const history = run.logs.map((l) => l.chunk).join('');
-  if (history) send(ws, { type: 'data', chunk: history });
+  const newestFirst = run.logs;
+  let kept = 0;
+  let chars = 0;
+  for (const log of newestFirst) {
+    // Always keep at least one row, so a single oversized chunk isn't dropped
+    // into a replay that shows nothing but the marker.
+    if (kept > 0 && chars + log.chunk.length > REPLAY_MAX_CHARS) break;
+    chars += log.chunk.length;
+    kept += 1;
+  }
+  const truncated = kept < newestFirst.length || newestFirst.length >= REPLAY_MAX_ROWS;
+  const history = newestFirst
+    .slice(0, kept)
+    .reverse()
+    .map((l) => l.chunk)
+    .join('');
+
+  // Neither truncation nor an absent history is ever silent, and the replay goes
+  // out in a few frames rather than one multi-megabyte send.
+  let body: string;
+  if (newestFirst.length === 0) {
+    // endedAt null (a row still marked running, its pty gone with a previous
+    // process) counts as "just now": nothing could have pruned it yet.
+    const endedMs = run.endedAt ? run.endedAt.getTime() : Date.now();
+    const pruned = Date.now() - endedMs > LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+    body = pruned ? PRUNED_MARKER : NO_OUTPUT_MARKER;
+  } else {
+    body = truncated ? TRUNCATION_MARKER + history : history;
+  }
+  for (let i = 0; i < body.length; i += REPLAY_CHUNK_CHARS) {
+    send(ws, { type: 'data', chunk: body.slice(i, i + REPLAY_CHUNK_CHARS) });
+  }
 
   // Prefer the in-memory final status if the pty just exited and its DB write
   // may still be in flight; otherwise the persisted row is authoritative.

@@ -105,7 +105,16 @@ function analyze(h, opts = {}) {
       add('high', `${dispatchMix.spawn} event(s) used the spawn FALLBACK (dispatch="spawn") — a hook didn't export an in-process runner (stale/partial install). Re-run the installer so every hook dispatches in-process (no 2nd node per event).`);
     }
     if (gate && gate.p95 > 800) {
-      add('medium', `Gate p95 latency is ${gate.p95}ms (max ${gate.max}ms) — that points at the flush-race retry budget (up to 8×150ms). ${unsettled ? `${unsettled} run(s) hit UNSETTLED (budget expired).` : 'No UNSETTLED runs, so the budget is rarely exhausted — you may be able to shorten it.'} Consider tuning the retry count/interval.`);
+      // Was: a hardcoded single cause ("that points at the flush-race retry budget"). It printed that next to
+      // a max the budget arithmetically CANNOT produce, so the report contradicted itself. Attribute from the
+      // measurement instead: FLUSH_CEIL is the most the retry loop can add (maxAttempts × sleep), so a max
+      // above it proves a second cause is in play.
+      const FLUSH_CEIL = 8 * 150;
+      add('medium', `Gate p95 latency is ${gate.p95}ms (max ${gate.max}ms). ` +
+        (gate.max > FLUSH_CEIL
+          ? `The slowest run EXCEEDS the flush-race retry ceiling (${FLUSH_CEIL}ms = 8×150ms), so the wait alone cannot account for it — look for a SECOND cause (transcript size / full-file re-reads / a spawn-dispatch node startup) before tuning the retry count. `
+          : `That is inside the flush-race retry ceiling (${FLUSH_CEIL}ms = 8×150ms), so the retry budget is a plausible cause. `) +
+        (unsettled ? `${unsettled} run(s) hit UNSETTLED (budget expired).` : 'No UNSETTLED runs, so the budget is rarely exhausted — you may be able to shorten it.'));
     }
     if (unsettled > 0) {
       add('medium', `Flush race: ${unsettled} of ${settled + unsettled} gate reads ended UNSETTLED (final message not flushed within ~1.2s) → those turns were under-enforced (fail-open). If this is frequent, raise the flush budget or investigate transcript flush timing.`);
@@ -119,6 +128,16 @@ function analyze(h, opts = {}) {
     const drift = hookStats.find(x => x.hook === 'inject-anti-drift');
     if (drift && drift.count >= 10) {
       add('low', `anti-drift fired ${drift.count}× (it injects on every prompt). That's a recurring per-turn token tax; if drift isn't a problem in practice, consider injecting it less often (e.g., only after compaction).`);
+    }
+    // FAIL-OPENs are the layer's blind spot and had NO rule at all: normAllow buckets every "allowed without
+    // judging" reason under a 'fail-open: …' key (no transcript / unreadable / empty / subagent transcript not
+    // found), and on a real 14-day log those were 26% of all decisions. A turn that fail-opens is enforced by
+    // nothing, so it must be surfaced rather than blending into the ALLOW count.
+    const failOpen = Object.keys(allowReasons).filter(r => /^fail-open/.test(r)).reduce((n, r) => n + allowReasons[r], 0);
+    if (decisions >= 10 && failOpen / decisions > 0.15) {
+      const top = Object.keys(allowReasons).filter(r => /^fail-open/.test(r)).sort((a, b) => allowReasons[b] - allowReasons[a]).slice(0, 3)
+        .map(r => `${r} ×${allowReasons[r]}`).join('; ');
+      add('high', `${failOpen} of ${decisions} decisions (${(failOpen / decisions * 100).toFixed(0)}%) FAILED OPEN — the gate allowed without ever judging the turn, so those turns were enforced by NOTHING. Top reasons: ${top}. Check the DIAG lines in hook-audit.log (they now log the probed transcript paths + existsSync) to find why the transcript wasn't readable.`);
     }
     const verifiedReadOnly = allowReasons['verified: re-read of written path'] || 0;
     const verifiedTest = (allowReasons['verified: test/verify command ran'] || 0);

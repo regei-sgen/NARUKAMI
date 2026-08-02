@@ -10,9 +10,8 @@ import {
   normalizeSlug,
   parseMemoryNote,
   readNote,
+  readUsage,
   sessionState,
-  splitTail,
-  tailLog,
   type MemoryNodeRaw,
 } from './argus';
 
@@ -101,14 +100,6 @@ describe('buildMemoryGraph', () => {
     expect(g.counts.projects).toBe(1);
     expect(g.counts.sessions).toBe(1);
     expect(g.counts.ghosts).toBe(1);
-  });
-});
-
-describe('splitTail', () => {
-  it('returns the last n non-empty lines and drops a partial first line', () => {
-    const text = 'partial-half\nfull-1\nfull-2\nfull-3\n';
-    expect(splitTail(text, 2, true)).toEqual(['full-2', 'full-3']);
-    expect(splitTail(text, 10, false)).toEqual(['partial-half', 'full-1', 'full-2', 'full-3']);
   });
 });
 
@@ -202,22 +193,85 @@ describe('collectors over a fixture ~/.claude', () => {
 
     expect(await readNote('proj', '../../secret')).toBeNull(); // path-traversal rejected
   });
+});
 
-  it('tailLog rejects an unknown source and tails an allowlisted one', async () => {
-    const bad = await tailLog('../../secret', 10);
-    expect('error' in bad).toBe(true);
+// ── readUsage across BOTH godclaude homes ────────────────────────────────────
+// Regression cover for the split-home bug: the statusline hook writes
+// usage-live.json into `${DET_HOOKS_HOME}/.claude`, and NARUKAMI sets
+// DET_HOOKS_HOME to its EMBEDDED god home on every process it spawns — so
+// NARUKAMI-launched sessions write ~/.narukami/godclaude/.claude while native
+// `claude` sessions write ~/.claude. Reading only the native side froze the
+// always-visible header meter at whatever the last NATIVE session left.
 
-    // Write a perf log with a couple of JSONL lines + one torn line.
-    fs.writeFileSync(
-      path.join(dir, 'godmode-perf.log'),
-      '{"ts":"t1","hook":"a","ms":1}\n{"ts":"t2","hook":"b","ms":2}\n{torn line\n',
-    );
-    const res = await tailLog('perf', 2);
-    expect('error' in res).toBe(false);
-    if (!('error' in res)) {
-      expect(res.count).toBe(2);
-      // last two complete records; torn line parsed tolerantly to {raw}
-      expect(res.lines[res.lines.length - 1]).toHaveProperty('raw');
-    }
+describe('readUsage merges the native and embedded homes (newest ts wins)', () => {
+  let nativeDir: string;
+  let godRoot: string;
+  let godDir: string;
+  const prevClaude = process.env.ARGUS_CLAUDE_DIR;
+  const prevGod = process.env.NARUKAMI_GOD_HOME;
+
+  const usage = (ts: number, pct: number): string =>
+    JSON.stringify({ ts, rate_limits: { five_hour: { used_percentage: pct } } });
+
+  beforeEach(() => {
+    nativeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'argus-native-'));
+    godRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'argus-god-'));
+    godDir = path.join(godRoot, '.claude'); // godClaudeDir() = godHome() + '/.claude'
+    fs.mkdirSync(godDir, { recursive: true });
+    process.env.ARGUS_CLAUDE_DIR = nativeDir;
+    process.env.NARUKAMI_GOD_HOME = godRoot;
+  });
+  afterEach(() => {
+    if (prevClaude === undefined) delete process.env.ARGUS_CLAUDE_DIR;
+    else process.env.ARGUS_CLAUDE_DIR = prevClaude;
+    if (prevGod === undefined) delete process.env.NARUKAMI_GOD_HOME;
+    else process.env.NARUKAMI_GOD_HOME = prevGod;
+    fs.rmSync(nativeDir, { recursive: true, force: true });
+    fs.rmSync(godRoot, { recursive: true, force: true });
+  });
+
+  it('prefers the EMBEDDED file when it is newer (the live NARUKAMI bug)', async () => {
+    fs.writeFileSync(path.join(nativeDir, 'usage-live.json'), usage(1_000, 2));
+    fs.writeFileSync(path.join(godDir, 'usage-live.json'), usage(2_000, 22));
+    const u = await readUsage();
+    expect(u?.ts).toBe(2_000);
+    expect(u?.rate_limits?.five_hour?.used_percentage).toBe(22);
+  });
+
+  it('prefers the NATIVE file when it is newer', async () => {
+    fs.writeFileSync(path.join(nativeDir, 'usage-live.json'), usage(9_000, 7));
+    fs.writeFileSync(path.join(godDir, 'usage-live.json'), usage(2_000, 22));
+    const u = await readUsage();
+    expect(u?.ts).toBe(9_000);
+    expect(u?.rate_limits?.five_hour?.used_percentage).toBe(7);
+  });
+
+  it('falls back to the embedded file when the native one is missing', async () => {
+    fs.writeFileSync(path.join(godDir, 'usage-live.json'), usage(2_000, 22));
+    expect((await readUsage())?.ts).toBe(2_000);
+  });
+
+  it('falls back to the native file when the embedded one is missing', async () => {
+    fs.writeFileSync(path.join(nativeDir, 'usage-live.json'), usage(1_000, 2));
+    expect((await readUsage())?.ts).toBe(1_000);
+  });
+
+  it('never returns null just because ONE side is corrupt', async () => {
+    fs.writeFileSync(path.join(nativeDir, 'usage-live.json'), '{ torn half-write');
+    fs.writeFileSync(path.join(godDir, 'usage-live.json'), usage(2_000, 22));
+    expect((await readUsage())?.ts).toBe(2_000);
+
+    fs.writeFileSync(path.join(nativeDir, 'usage-live.json'), usage(1_000, 2));
+    fs.writeFileSync(path.join(godDir, 'usage-live.json'), 'null'); // parses, but not an object
+    expect((await readUsage())?.ts).toBe(1_000);
+  });
+
+  it('returns null only when neither side has a readable file', async () => {
+    expect(await readUsage()).toBeNull();
+  });
+
+  it('still returns a file with no ts when it is the only readable one', async () => {
+    fs.writeFileSync(path.join(godDir, 'usage-live.json'), JSON.stringify({ model: 'opus' }));
+    expect((await readUsage())?.model).toBe('opus');
   });
 });

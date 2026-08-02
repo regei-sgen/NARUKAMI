@@ -89,7 +89,6 @@ async function startBackend(): Promise<string> {
 
   const port = await freePort();
   // Require the compiled backend AFTER env is set so Prisma + config pick it up.
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const backend = require(backendIndex) as BackendStart;
   const res = await backend.start({ port, host: '127.0.0.1', frontendDir });
   return `http://127.0.0.1:${res.port}`;
@@ -470,7 +469,6 @@ interface StatsLanModule {
 function statsLan(): StatsLanModule | null {
   try {
     const { backendIndex } = resolvePaths();
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     return require(path.join(path.dirname(backendIndex), 'services', 'statsLan.js')) as StatsLanModule;
   } catch (err) {
     process.stderr.write(`[narukami] phone server module unavailable: ${String(err)}\n`);
@@ -904,6 +902,10 @@ interface PreviewCaptureState {
   // Pending disable after an unwatch. Cancelled if a new watch arrives first,
   // preserving the unwatch→watch replay race window documented below.
   idleTimer: NodeJS.Timeout | null;
+  // Which project this preview belongs to, resolved once per watch (null until
+  // it lands, and for a preview nothing can be attributed to). Only events with
+  // a projectId are mirrored into the backend ring for agents to read.
+  projectId: string | null;
 }
 const previewCapture = new Map<number, PreviewCaptureState>(); // webContents.id → state
 const PREVIEW_BUFFER_MAX = 300;
@@ -917,6 +919,56 @@ function originOf(url: string): string | null {
     return new URL(url).origin;
   } catch {
     return null;
+  }
+}
+
+interface BrowserLogsModule {
+  recordBrowserEvents: (projectId: string, events: Array<{ method: string; params: unknown }>) => number;
+  previewProjectId: (url: string) => Promise<string | null>;
+}
+
+// undefined = not attempted yet; null = unavailable (logged once, not per event).
+let browserLogsMod: BrowserLogsModule | null | undefined;
+
+/**
+ * The backend's in-memory preview-log ring, loaded straight out of the compiled
+ * backend — the SAME instance /api/projects/:id/browser-logs serves, because the
+ * backend runs IN THIS PROCESS (same idiom as statsLan above). Pushing events in
+ * here rather than back through the renderer means no HTTP hop and no bearer
+ * token anywhere near the preview path; in a dev run where this shell isn't the
+ * one serving the SPA the require simply fails and capture stays renderer-only.
+ */
+function browserLogs(): BrowserLogsModule | null {
+  if (browserLogsMod !== undefined) return browserLogsMod;
+  try {
+    const { backendIndex } = resolvePaths();
+    browserLogsMod = require(
+      path.join(path.dirname(backendIndex), 'services', 'browserLogs.js'),
+    ) as BrowserLogsModule;
+  } catch (err) {
+    process.stderr.write(`[narukami] browser-log module unavailable: ${String(err)}\n`);
+    browserLogsMod = null;
+  }
+  return browserLogsMod;
+}
+
+/**
+ * Mirror one event that already passed the origin filter into the backend ring.
+ * Raw CDP on purpose: normalization lives in the service, so this stays a
+ * forwarder. Never lets a capture failure break the renderer's own log stream.
+ */
+function recordPreviewEvent(state: PreviewCaptureState, method: string, params: unknown): void {
+  if (!state.projectId) return;
+  const mod = browserLogs();
+  if (!mod) return;
+  try {
+    mod.recordBrowserEvents(state.projectId, [{ method, params }]);
+  } catch (err) {
+    // Disable capture on the first failure rather than logging per event — a
+    // broken sink would otherwise write a stderr line for every console call
+    // the previewed app makes.
+    browserLogsMod = null;
+    process.stderr.write(`[narukami] browser-log capture disabled after: ${String(err)}\n`);
   }
 }
 
@@ -944,6 +996,7 @@ function ensurePreviewDebugger(wc: Electron.WebContents): boolean {
     recent: [],
     domainsEnabled: false,
     idleTimer: null,
+    projectId: null,
   };
   previewCapture.set(wc.id, state);
   const emit = (evt: PreviewEvent): void => {
@@ -1018,11 +1071,18 @@ function processPreviewEvent(
   method: string,
   params: any,
 ): void {
+  // Every event that survives the origin guards below is ALSO mirrored into the
+  // backend ring, so a Claude tab can read the preview's errors instead of a
+  // human copy-pasting them out of the panel. Called after the guards on
+  // purpose: this webContents also runs NARUKAMI's own SPA, whose console and
+  // terminal traffic must never be filed as the previewed app's.
+  const record = (): void => recordPreviewEvent(state, method, params);
   {
     switch (method) {
       case 'Runtime.consoleAPICalled': {
         if (state.contexts.get(params.executionContextId) !== state.origin) return;
         const text = (params.args ?? []).map(remoteObjectText).join(' ');
+        record();
         emit({ kind: 'console', level: String(params.type ?? 'log'), text });
         break;
       }
@@ -1030,6 +1090,7 @@ function processPreviewEvent(
         const d = params.exceptionDetails ?? {};
         if (d.executionContextId && state.contexts.get(d.executionContextId) !== state.origin) return;
         const text = d.exception?.description ?? d.text ?? 'Uncaught exception';
+        record();
         emit({ kind: 'console', level: 'error', text });
         break;
       }
@@ -1044,6 +1105,8 @@ function processPreviewEvent(
           params.type === 'Document' && originOf(String(params.request?.url ?? '')) === state.origin;
         if (!fromPreviewDoc && !isPreviewNav) return;
         state.requests.add(params.requestId);
+        // Bookkeeping for the service (requestId → url), not a stored event.
+        record();
         emit({
           kind: 'net',
           id: params.requestId,
@@ -1055,6 +1118,7 @@ function processPreviewEvent(
       }
       case 'Network.responseReceived': {
         if (!state.requests.has(params.requestId)) return;
+        record();
         emit({
           kind: 'netdone',
           id: params.requestId,
@@ -1066,6 +1130,7 @@ function processPreviewEvent(
       case 'Network.loadingFailed': {
         if (!state.requests.has(params.requestId)) return;
         state.requests.delete(params.requestId);
+        record();
         emit({ kind: 'netfail', id: params.requestId, error: String(params.errorText ?? 'failed') });
         break;
       }
@@ -1094,8 +1159,34 @@ ipcMain.on('narukami:preview-watch', (e, url: unknown) => {
   const state = previewCapture.get(wc.id)!;
   state.origin = origin;
   state.requests.clear();
+  // Attribution is re-derived per watch and dropped on unwatch, so an unwatched
+  // (or re-pointed) preview can never keep filing events under the old project.
+  state.projectId = null;
   setPreviewDomains(wc, state, origin !== null);
   if (origin) {
+    // The renderer's watch IPC carries only the URL, so the backend answers
+    // "whose preview is this?" from the workspace UI state it already persists.
+    // Resolved ONCE per watch, never per event. The replay below runs before
+    // this lands, so pre-watch events reach the renderer only — an acceptable
+    // gap, since the errors an agent cares about arrive after the page loads.
+    const mod = browserLogs();
+    if (mod) {
+      const watched = origin;
+      // try/catch, not just .catch: an older backend build would resolve the
+      // module but not this export, and calling undefined throws SYNCHRONOUSLY —
+      // an uncaught throw here would take the whole main process down.
+      try {
+        void mod
+          .previewProjectId(typeof url === 'string' ? url : '')
+          .then((id) => {
+            // A later unwatch/re-watch may have moved on while the DB read ran.
+            if (state.origin === watched) state.projectId = id;
+          })
+          .catch(() => undefined);
+      } catch (err) {
+        process.stderr.write(`[narukami] browser-log attribution unavailable: ${String(err)}\n`);
+      }
+    }
     // Recover events that raced this watch (iframe document navigations fire
     // before the IPC lands). Replay runs the same origin filter; the
     // freshness cutoff keeps pre-navigation state from resurfacing.
@@ -1189,6 +1280,12 @@ app.whenReady().then(async () => {
       });
     }
   });
+  // A rejection escaping the startup chain (whenReady itself, or the error
+  // handler above) would otherwise surface as an unhandled rejection, which
+  // Node can treat as fatal — log it through the same stderr channel the rest
+  // of this process uses instead of losing it.
+}).catch((err: unknown) => {
+  process.stderr.write(`[narukami] startup failed: ${String((err as Error)?.stack ?? err)}\n`);
 });
 
 // Any OTHER exit route (Alt+F4 on the last window with the pref off, the

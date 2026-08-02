@@ -891,7 +891,7 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
       setSaving(false);
     }
   }, [project.id, currentPath, content, original, saving, originalMtime, conflict, refreshGit, refreshOpenDiff]);
-  saveRef.current = save;
+  saveRef.current = () => void save();
 
   const isMd = currentPath !== null && isMarkdownPath(currentPath);
 
@@ -932,7 +932,11 @@ export function CodeEditor({ project, initialFile, onOpenFile, onDirtyChange }: 
           </button>
         </div>
         {leftTab === 'changes' ? (
-          <ChangesPanel projectId={project.id} currentPath={currentPath} onOpenDiff={openDiff} />
+          <ChangesPanel
+            projectId={project.id}
+            currentPath={currentPath}
+            onOpenDiff={(path, deleted) => void openDiff(path, deleted)}
+          />
         ) : loadingTree ? (
           <div className="ft-note">Loading tree…</div>
         ) : treeErr ? (

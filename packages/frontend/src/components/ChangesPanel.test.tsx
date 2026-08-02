@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { ChangesPanel } from './ChangesPanel';
 import { api } from '../api';
 import type { GitChanges } from '../types';
@@ -29,6 +29,13 @@ beforeEach(() => {
   vi.clearAllMocks();
   (api.getGitChanges as ReturnType<typeof vi.fn>).mockResolvedValue(SAMPLE);
 });
+
+// Drive the real lib/visibility singleton down its browser-tab path (document.hidden
+// + visibilitychange), so the poll gate is exercised rather than mocked away.
+function setWindowHidden(hidden: boolean): void {
+  Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
+  document.dispatchEvent(new Event('visibilitychange'));
+}
 
 describe('ChangesPanel', () => {
   it('renders the branch name and all three buckets', async () => {
@@ -75,5 +82,42 @@ describe('ChangesPanel', () => {
     expect(commit).toBeEnabled();
     fireEvent.click(commit);
     await waitFor(() => expect(api.commitChanges).toHaveBeenCalledWith('p1', 'my message'));
+  });
+
+  describe('polling', () => {
+    afterEach(() => {
+      setWindowHidden(false);
+      vi.useRealTimers();
+    });
+
+    it('stops polling while the window is hidden and catches up on restore', async () => {
+      vi.useFakeTimers();
+      const calls = api.getGitChanges as ReturnType<typeof vi.fn>;
+      render(<ChangesPanel projectId="p1" currentPath={null} onOpenDiff={vi.fn()} />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(calls).toHaveBeenCalledTimes(1); // mount
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3500);
+      });
+      expect(calls).toHaveBeenCalledTimes(2); // visible tick
+
+      // Minimized: every tick here would be three git child processes for a panel
+      // nobody can see, so none of them may fire.
+      await act(async () => {
+        setWindowHidden(true);
+        await vi.advanceTimersByTimeAsync(3500 * 4);
+      });
+      expect(calls).toHaveBeenCalledTimes(2);
+
+      // Restored: one immediate catch-up so the view isn't stale for 3.5s.
+      await act(async () => {
+        setWindowHidden(false);
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(calls).toHaveBeenCalledTimes(3);
+    });
   });
 });

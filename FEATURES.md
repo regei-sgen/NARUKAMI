@@ -1,6 +1,6 @@
 # NARUKAMI — Feature Reference
 
-A local, single-user web app for **registering software projects and running each one in its own live, in-browser terminal** — with a built-in code editor, AI-assisted run-command detection, per-project end-of-day logs, and (new) Claude-to-Claude terminal orchestration.
+A local, single-user web app for **registering software projects and running each one in its own live, in-browser terminal** — with a built-in code editor, AI-assisted run-command detection, git tooling, a device-preview browser, AI end-of-day reports, release builds, a control plane for the embedded GODCLAUDE layer, and Claude-to-Claude terminal orchestration.
 
 It is an intentional local RCE tool: it spawns real processes on your machine. It is therefore bound to loopback only and gated by a bearer token by design.
 
@@ -11,9 +11,14 @@ It is an intentional local RCE tool: it spawns real processes on your machine. I
 - **Register** any project by absolute path.
 - **Analyze** it with `claude -p` to auto-detect how to install/run it (dev/build/test commands).
 - **Run** those commands — or an interactive shell, or an interactive Claude Code session — each in its own live terminal tab (real PTY streamed to the browser).
-- **Edit** files in a built-in Monaco editor with a bounded, safe file tree.
-- **Review** what happened per project per day (End-of-Day view, optional AI narrative).
+- **Edit** files in a built-in Monaco editor with a bounded, safe file tree, plus stage/unstage/discard/commit git tooling.
+- **Preview** a running dev server side-by-side at several device sizes (Browser view).
+- **Review** what happened across projects on a day — an AI-generated End-of-Day report built from Claude transcripts, NARUKAMI runs and git commits.
+- **Ship**: cut a versioned release zip of the SGA repo with AI patch notes (Release view).
 - **Orchestrate**: a Claude session running inside NARUKAMI can read and drive the *other* terminals via MCP tools.
+- **Command the god layer**: arm/mode/autopilot for NARUKAMI's own embedded GODCLAUDE home, and a read-only inventory of the whole Claude Code arsenal (Arsenal view).
+
+**The eight main views** (`App.tsx` tab bar): **Runner · Editor · Browser · EOD · Release · GODCLAUDE · Arsenal · Settings**. Runner/Editor/Browser/EOD/Release are scoped to the selected project; GODCLAUDE, Arsenal and Settings are global.
 - **Watch the machine**: a live PC Stats readout (CPU/GPU/temps/disk/battery) in the header, in a pinnable detached window, from the tray — or on your phone via the companion Android app (§4.16).
 
 ---
@@ -25,7 +30,7 @@ npm-workspaces monorepo, three packages plus a standalone Android app:
 | Package | Stack | Role |
 |---|---|---|
 | `packages/backend` | Fastify + node-pty + `ws` + Prisma (**SQLite**) | HTTP API, WebSocket terminal streams, process manager, `claude -p` calls |
-| `packages/frontend` | React + Vite + xterm.js + Monaco | SPA: sidebar, project panel, terminal tabs, editor, EOD view, toasts, PC Stats |
+| `packages/frontend` | React + Vite + xterm.js + Monaco | SPA: sidebar, project panel, terminal tabs, and the eight views (Runner/Editor/Browser/EOD/Release/GODCLAUDE/Arsenal/Settings), toasts, PC Stats |
 | `packages/desktop` | Electron | Native shell; serves the SPA same-origin from the backend with the token injected; tray + PC Stats window |
 | `packages/mobile` | Android (Java, plain views + Canvas) | Phone readout of the PC's vitals. **Not** an npm workspace — built with Gradle (see §4.16) |
 
@@ -56,7 +61,7 @@ npm-workspaces monorepo, three packages plus a standalone Android app:
 - `POST /api/projects` with a path. Validates existence + directory-ness.
 - **Path canonicalization**: the path is resolved with `fs.realpathSync.native` before the uniqueness check, so 8.3 short names (`STEPHA~1`), symlinks, and case differences that point at the **same physical directory** can't register twice.
 - Duplicate → `409`. Project name defaults to the directory basename.
-- `DELETE /api/projects/:id` cascades to its commands, runs, logs, analyses, and EOD entries.
+- `DELETE /api/projects/:id` cascades to its commands, runs, logs, analyses, and releases (every `onDelete: Cascade` relation in §6).
 
 ### 4.2 AI project analysis (`claude -p`)
 - `POST /api/projects/:id/analyze` runs `claude -p <prompt> --output-format json` in the project dir and persists the detected project type, package manager, and run commands.
@@ -118,15 +123,21 @@ PTY details:
 ### 4.10 Diagnose a failed run
 - `POST /api/runs/:runId/diagnose` — feed a failed run's captured output (tail) to `claude -p`, get a plain-text explanation + fix steps.
 
-### 4.11 End-of-Day (EOD) view
-- Third main view alongside Runner and Editor.
-- **Features added (git commits)** — each EOD entry leads with a detailed list of the day's git commits for the project: subject, full body/details, short hash, and files-changed count. Recomputed from git **on read** (`services/gitLog.ts`; `gitCommitsForDay` filters `git log` by the local day) so nothing extra is stored and history stays accurate — no schema change (safe for already-installed DBs). Bounded (≤200 commits, ≤4 KB body, 10 s git timeout); returns `[]` if the project isn't a git repo. The AI day summary now leads with these commits too.
-- `POST /api/projects/:id/eod/compile` — snapshot every run that **finished today** (status exited/killed/error) into one `EodEntry` per project per day (`@@unique([projectId, day])`), with an optional free-text note.
-- `POST /api/eod/:eodId/note` — edit an entry's note without recompiling.
-- `POST /api/eod/:eodId/summarize` — generate an AI narrative (`claude -p`) of the day from the run items + note.
-- `GET /api/projects/:id/eod` — list entries, newest day first.
-- `DELETE /api/eod/:eodId`.
-- **Retention**: keep the newest 10 days **per project**; older entries pruned on each compile.
+### 4.11 End-of-Day (EOD) report
+One **cross-project** markdown report per day (or per date range), generated by AI from what actually happened. There is no per-project EOD entry — the earlier `EodEntry` model was dropped (see §6); the report is the whole feature.
+
+- `GET /api/eod/active?from&to` (or `?day=`) — which projects were active in the range. The union of three signals: Claude sessions (native `~/.claude` **and** NARUKAMI-launched), NARUKAMI runs that started or ended in range, and git commits. Feeds the tab's include-checkbox list.
+- `POST /api/eod/report` `{from?, to?, day?, paths[], note?}` — generate and save the report for the selected project paths. `paths` must be non-empty (400 otherwise). Upserted on the range key, so regenerating a day replaces it. `201` with the saved report.
+- `GET /api/eod/reports` — saved reports, newest day first.
+- `GET /api/eod/reports/:id` · `DELETE /api/eod/reports/:id`.
+
+**What goes into a report**, per included project:
+- **Git commits for the day** — subject, full body, short hash, files-changed count, recomputed from git **on read** (`services/gitLog.ts`, `gitCommitsForDay`) so nothing extra is stored and history stays accurate. Bounded (≤200 commits, ≤4 KB body, 10 s git timeout); `[]` if the project isn't a git repo.
+- **NARUKAMI runs** in range, with their commands.
+- **Claude session digests** — `services/eodSessions.ts` reads every in-range transcript end to end (readline-streamed, not slurped), drops headless one-shot stubs (`isSubstantiveSession`), then spends the budget on the **most substantial** sessions rather than the most recent (`sessionSubstance`), restoring chronological order for the write-up. Each selected session is digested individually before the day is composed, and the digests are cached.
+- **Coverage is reported, not hidden**: the backend logs `N transcript(s) in range, M substantive, K selected, … over budget` so a partial report is never mistaken for a complete one, and `sessionsOmitted` rides along into the prompt.
+
+Errors are distinguished: a Claude failure returns `502` with the analyzer's message; anything else `500`.
 
 ### 4.12 Finish notifications
 - **Finish toast** — when a session-started shell/claude run ends, an in-app toast (bottom-right; click routes to that run's project+tab) plus a best-effort **native OS notification** when the window is backgrounded. Gating (`lib/notify.ts`): session-scoped, deduped, terminal-only, shell/claude-only.
@@ -258,12 +269,81 @@ A **"⚌ Share"** button on any live terminal turns it into a QR code your phone
 
 **Limitation:** `detectLanIp()` picks the first private IPv4; on a machine with VPN / VirtualBox / WSL adapters it may choose a non-reachable interface. Plain HTTP on the LAN (no TLS) — the scoped, short-TTL, revocable token bounds the exposure.
 
-### 4.18 Idle/hidden efficiency
+### 4.18 Git tooling (Editor + source-control panel)
+Git is read in the Editor's decorations and driven from the source-control panel. All of it shells out to real `git` with a 10 s timeout, `GIT_LITERAL_PATHSPECS=1` (a caller-supplied path can never use git magic), and every path re-validated through the same `resolveInProject` escape guard as the file routes (§3). Fail-soft: a non-git project answers `isRepo:false` rather than erroring.
+
+**Read**
+- `GET /api/projects/:id/git/changes` — full source-control snapshot (staged / unstaged / untracked), bounded at 5000 files so a huge working tree can't blow up the payload.
+- `GET /api/projects/:id/git/status` — per-file add/modify/delete buckets that paint the file tree.
+- `GET /api/projects/:id/git/branch` — current branch (TTL-cached, see §4.24).
+- `GET /api/projects/:id/git/diff?path=` — changed line ranges keyed to the **new** side of the diff, so they map straight onto Monaco line numbers (the gutter marks).
+- `GET /api/projects/:id/git/file-head?path=` — the file's content at HEAD, for side-by-side compare.
+
+**Write**
+- `POST …/git/stage` · `…/git/unstage` · `…/git/discard` — one path each (`discard` takes `untracked` to delete an untracked file rather than checkout).
+- `POST …/git/stage-all` · `…/git/unstage-all`.
+- `POST …/git/commit` `{message}` — commits what is staged.
+
+### 4.19 Browser view — device preview
+A per-project preview strip that points an iframe at the project's dev server, at several device sizes at once.
+
+- The URL is remembered per project (persisted through `/api/settings`) and the **detected** dev-server URL sniffed from that project's terminal output is offered as a one-click fill.
+- Only loopback URLs are accepted (`isLoopbackUrl` / `normalizeUrl` / `alignLoopbackHost` in `lib/browserView.ts`) — the host is aligned to the one the app is served from so the preview never trips a cross-origin guard.
+- Device presets (`DEVICE_PRESETS`) render side by side, each scaled to fit its frame (`fitScale`); the enabled set is a global setting so it survives switching projects.
+- **Console/network capture** is lifecycle-scoped: the Electron debugger enables Runtime/Network only while a preview is actually watched (§4.24).
+- `POST /api/open-url` opens a detected dev-server URL in the **system** browser instead; `validateDevUrl` rejects anything that isn't a local http(s) URL.
+
+### 4.20 Release view — SGA release builds
+Cuts a versioned release zip of the SG Claude Assistant repo with AI-written patch notes. Scoped to that repo shape: the version lives in three files (`VERSION.md`, `bridge/package.json`, `extension/manifest.json`) and the zip is produced by `git archive`, so only **tracked** content ships unless dirt is knowingly included.
+
+- `GET /api/projects/:id/release/preflight` — everything the tab needs up front: is this the SGA repo, the three version numbers, working-tree dirt beyond the version files, and the saved release history.
+- `POST /api/projects/:id/release` `{version, includeDirty?}` — bump the three files → `git archive` → write the zip. **One build at a time per project** (an in-process `releasing` set; a double-click can't race two bumps in one working tree). `git archive` gets a 60 s budget and a 64 MB buffer.
+- `POST /api/projects/:id/release/commit` — commit the version bump · `POST …/release/push` — push the current branch.
+- `POST /api/releases/:id/notes` — generate the patch-note **Summary** + **Description** (`claude -p`) from the commit range since the previous release's `headCommit`. Re-runnable; the text stays copyable from the history.
+- `GET /api/projects/:id/releases` — history (each row reports `zipExists`, checked on read, so a zip you deleted on disk shows as gone).
+- `GET /api/releases/:id/zip` — download · `DELETE /api/releases/:id` — remove the row.
+- `POST /api/release/zip-dir` — set the permanent output folder (an `AppSetting`; defaults to the home dir).
+
+### 4.21 GODCLAUDE tab — the embedded god layer
+Control plane over NARUKAMI's **own** god home (`~/.narukami/godclaude`), provisioned from assets vendored in the repo. Writable by design and completely separate from the native `~/.claude` install, which the app only ever reads.
+
+- `GET /api/godclaude/status` — one snapshot: installed / armed / mode / autopilot, native hook-wiring, health + stats, the NARUKAMI-launched session fleet, and account usage.
+- `POST /api/godclaude/install` — provision, repair or upgrade the embedded home from the vendored assets.
+- `POST /api/godclaude/arm` `{on, sessionId?}` — arm globally or for one session · `POST /api/godclaude/mode` `{mode, sessionId?}` · `POST /api/godclaude/autopilot` `{on}`.
+- `GET /api/godclaude/sessions/:sessionId/state` — that session's armed/mode state.
+- `GET /api/godclaude/logs?source&limit` — tail of the god logs.
+
+Alongside it, the **read-only Argus projection** over the native `~/.claude` tree feeds the tab's memory view:
+- `GET /api/argus/memory-graph` — the memory notes as a graph (rendered by `GraphFlat`).
+- `GET /api/argus/memory/note?project&slug` — one note's contents.
+- `GET /api/argus/logs?source&limit` — tail of a native log source.
+
+That is the whole remaining Argus surface. The tab deliberately does **not** show
+the native `~/.claude` layer's status/session fleet — it polls
+`/api/godclaude/status` for that — so the native `/api/argus/status` and
+`/api/argus/sessions` endpoints were removed rather than left unconsumed.
+
+### 4.22 Arsenal tab (Armory) — inventory of the Claude Code arsenal
+- `GET /api/armory` — a **read-only** inventory of what this machine's Claude Code layer actually has: skills, hooks, memory pins, agents and commands, each tagged `global` (`~/.claude`), `project` (a registered project's `.claude/`) or `plugin`.
+- Nothing here writes. Fail-soft by construction: a missing or malformed file yields an empty default rather than throwing.
+- Not filtered by the selected project — it deliberately shows everything, across every registered project at once.
+
+### 4.23 Settings tab — AI provider, notifications, About
+- `GET /api/settings/ai` · `POST /api/settings/ai` — which credential NARUKAMI hands the `claude` processes it spawns:
+  - `claude-code` (**default**) — inject nothing; every launch uses the CLI's own signed-in credential.
+  - `api-key` — inject `ANTHROPIC_API_KEY` (and optionally `ANTHROPIC_BASE_URL`) into the spawn env so sessions bill to that Console key instead.
+  - Also holds `defaultEffort`, the `/effort <level>` typed into every fresh Claude tab (default `ultracode`, matching the previously hard-coded behaviour).
+- **The stored key is never serialized back.** Responses carry a masked preview only (`publicAiConfig`) — which is exactly why this config has dedicated endpoints instead of riding the generic `/api/settings` bulk-upsert, whose values echo straight back out through `/api/workspace`.
+- `DELETE /api/settings/ai/key` — forget the key **and** reset the provider to `claude-code`; leaving it on `api-key` with no key would claim a credential that isn't there.
+- `GET /api/settings/about` — read-only diagnostics for the About block.
+- Notification preferences (finish toast / task-done toast, §4.12) are non-secret and use the generic `/api/settings` store.
+
+### 4.24 Idle/hidden efficiency
 NARUKAMI's own runtime stays ~1% CPU even while a Claude tab streams (the visible load in Task Manager is the Claude workload itself plus everything terminals spawn, all grouped under NARUKAMI.exe). The app-side waste that DID exist is engineered out:
 
 - **Real visibility signal**: the shell needs `backgroundThrottling:false` (live terminals must never stall), but that pins the Page Visibility API to `visible`. The Electron main now forwards true minimize/restore over IPC (`narukami:visibility`); `lib/visibility.ts` fans it out (with a `visibilitychange` fallback in plain browsers).
 - **Polls pause while hidden** (and refresh instantly on restore): header vitals (5s), editor git status/diff (3s, spawns git), editor branch (3.5s, spawns git), GODCLAUDE status/memory-graph (5s/30s, can spawn Electron-as-node). CSS pulse animations pause via a `win-hidden` root class; xterm cursor blink stops.
-- **Graph loops park**: GraphGlobe got GraphFlat's idle-stop (full rate only while settling/interacting, ~12fps when only the glow pulses, 0 when static), and both park entirely while the window is hidden.
+- **Graph loops park**: the memory graph (`GraphFlat`) runs at full rate only while settling or being interacted with, drops to ~12 fps when only the glow pulses, 0 when static, and parks entirely while the window is hidden.
 - **Fewer git spawns**: repo-prefix / repo-ness / tracked-ness are TTL-cached (15s) in `gitStatus.ts`, cutting the editor's steady-state poll from ~5 spawns per tick to 2.
 - **Preview CDP capture is lifecycle-scoped**: the Browser view's debugger enables Runtime/Network only while a preview is watched (+ a grace window preserving the unwatch→rewatch replay race) and buffers only replayable methods — previously every terminal WS frame was serialized cross-process forever after the first Browser-view open.
 - **Monaco is code-split**: the entry chunk dropped ~3.9MB → ~0.7MB; pop-out terminal windows and the phone share page never parse the editor bundle.
@@ -273,23 +353,26 @@ NARUKAMI's own runtime stays ~1% CPU even while a Claude tab streams (the visibl
 
 ## 5. API surface
 
-All under `/api`, bearer-token gated.
+Enumerated from the route modules registered in `src/index.ts` — `projects, runs,
+files, git, workspace, eod, release, terminals, argus, godclaude, vitals, pcstats,
+statsLan, armory, settings, share`. All under `/api` and bearer-token gated by the
+global `onRequest` hook, **except** `/api/mobile/*`, which is exempt from master
+auth and validates a per-terminal share token instead (§4.17).
 
-**Projects**
-- `GET /api/projects`
-- `POST /api/projects`
+**Projects & commands** (`routes/projects.ts`)
+- `GET    /api/projects`
+- `POST   /api/projects`
 - `DELETE /api/projects/:id`
-- `POST /api/projects/:id/analyze`
-
-**Commands**
-- `POST /api/projects/:id/commands`
-- `POST /api/projects/:id/commands/suggest`
+- `POST   /api/projects/:id/analyze`
+- `POST   /api/projects/:id/commands`
+- `POST   /api/projects/:id/commands/suggest`
+- `PATCH  /api/commands/:commandId` — change a command's shell
 - `DELETE /api/commands/:commandId`
 
-**Runs / terminals**
+**Runs / terminals** (`routes/runs.ts`)
 - `POST /api/projects/:id/run`
-- `POST /api/projects/:id/shell`
-- `POST /api/projects/:id/claude`
+- `POST /api/projects/:id/shell` — `{admin?, shell?}`
+- `POST /api/projects/:id/claude` — `{effort?, setEffort?, continue?}`
 - `POST /api/runs/:runId/stop`
 - `POST /api/runs/:runId/close`
 - `POST /api/runs/:runId/name`
@@ -297,36 +380,97 @@ All under `/api`, bearer-token gated.
 - `GET  /api/runs/:runId`
 - `POST /api/runs/:runId/diagnose`
 
-**Orchestration**
+**Orchestration** (`routes/terminals.ts`, §4.13)
 - `GET  /api/terminals`
 - `GET  /api/terminals/:id/read`
 - `POST /api/terminals/:id/send`
 
-**Files**
+**Files & editor git reads** (`routes/files.ts`, §4.9 / §4.18)
 - `GET  /api/projects/:id/tree`
+- `GET  /api/projects/:id/dir`
+- `GET  /api/projects/:id/files` — path/name search over the tree
+- `GET  /api/projects/:id/search` — content grep
 - `GET  /api/projects/:id/file`
 - `POST /api/projects/:id/file`
-- `GET  /api/projects/:id/search`
+- `GET  /api/projects/:id/file-stat`
+- `GET  /api/projects/:id/git/branch`
+- `GET  /api/projects/:id/git/status`
+- `GET  /api/projects/:id/git/diff`
+- `GET  /api/projects/:id/git/file-head`
 
-**End-of-Day**
-- `GET    /api/projects/:id/eod` (each entry includes the day's git `commits`)
-- `POST   /api/projects/:id/eod/compile`
-- `POST   /api/eod/:eodId/note`
-- `POST   /api/eod/:eodId/summarize`
-- `DELETE /api/eod/:eodId`
+**Source control** (`routes/git.ts`, §4.18)
+- `GET  /api/projects/:id/git/changes`
+- `POST /api/projects/:id/git/stage`
+- `POST /api/projects/:id/git/unstage`
+- `POST /api/projects/:id/git/discard`
+- `POST /api/projects/:id/git/stage-all`
+- `POST /api/projects/:id/git/unstage-all`
+- `POST /api/projects/:id/git/commit`
 
-**Workspace**
+**End-of-Day** (`routes/eod.ts`, §4.11)
+- `GET    /api/eod/active`
+- `POST   /api/eod/report`
+- `GET    /api/eod/reports`
+- `GET    /api/eod/reports/:id`
+- `DELETE /api/eod/reports/:id`
+
+**Release** (`routes/release.ts`, §4.20)
+- `GET    /api/projects/:id/release/preflight`
+- `POST   /api/projects/:id/release`
+- `POST   /api/projects/:id/release/commit`
+- `POST   /api/projects/:id/release/push`
+- `GET    /api/projects/:id/releases`
+- `POST   /api/releases/:id/notes`
+- `GET    /api/releases/:id/zip`
+- `DELETE /api/releases/:id`
+- `POST   /api/release/zip-dir`
+
+**GODCLAUDE** (`routes/godclaude.ts`, §4.21)
+- `GET  /api/godclaude/status`
+- `POST /api/godclaude/install`
+- `POST /api/godclaude/arm`
+- `POST /api/godclaude/mode`
+- `POST /api/godclaude/autopilot`
+- `GET  /api/godclaude/sessions/:sessionId/state`
+- `GET  /api/godclaude/logs`
+
+**Argus — read-only native `~/.claude` projection** (`routes/argus.ts`, §4.21)
+- `GET /api/argus/memory-graph`
+- `GET /api/argus/memory/note`
+- `GET /api/argus/logs`
+
+**Arsenal** (`routes/armory.ts`, §4.22)
+- `GET /api/armory`
+
+**Settings** (`routes/settings.ts`, §4.23)
+- `GET    /api/settings/ai`
+- `POST   /api/settings/ai`
+- `DELETE /api/settings/ai/key`
+- `GET    /api/settings/about`
+
+**Workspace** (`routes/workspace.ts`, §4.15)
 - `GET  /api/workspace`
-- `POST /api/settings`
+- `POST /api/settings` — generic key/value bulk-upsert (UI state)
+- `POST /api/open-url` — open a detected dev-server URL in the system browser
 
-**PC Stats** (§4.16)
+**Mobile share** (`routes/share.ts`, §4.17)
+- `POST   /api/runs/:runId/share` — mint a scoped share + start the LAN relay
+- `GET    /api/shares`
+- `POST   /api/runs/:runId/devices/:deviceId` — allow / deny a knocking phone
+- `DELETE /api/shares/:id`
+- `GET    /api/mobile/run` — **share-token gated, exempt from master auth**
+
+**Header vitals** (`routes/vitals.ts`)
+- `GET /api/vitals` — machine CPU/MEM history + totals + account Claude usage windows
+
+**PC Stats** (`routes/pcstats.ts` + `routes/statsLan.ts`, §4.16)
 - `GET  /api/pcstats` — the full readout (CPU, mem, series, GPUs, temps, status)
 - `GET  /api/pcstats/lan` — is the phone listener running, and where
 - `POST /api/pcstats/lan/start` — start it → `{ port, token, urls, phoneUrls }`
 - `POST /api/pcstats/lan/stop` — stop it
 
 **WebSocket**
-- `GET /ws/runs/:runId?token=…` — live terminal stream (see §4.5).
+- `GET /ws/runs/:runId?token=…` — live terminal stream (see §4.5). Accepts the master token **or** a share token scoped to that run.
 
 ### Separate listener — the phone stats server (port 4311)
 
@@ -343,13 +487,35 @@ Everything else 404s.
 
 ## 6. Data model (Prisma / SQLite)
 
-- **Project** — `id, name, path (unique), type?, packageMgr?, status, createdAt, updatedAt`.
-- **RunCommand** — `id, projectId, label, command, cwd?, isDefault, source(detected|custom)`.
-- **Run** — `id, projectId, commandId?, kind(shell|claude|command), name?, dockOpen, pid?, status(running|exited|killed|error), exitCode?, startedAt, endedAt?`.
-- **RunLog** — `id, runId, chunk, ts` (append-only output history).
-- **AppSetting** — `key, value(JSON string), updatedAt` (UI state).
+Eight models, mirroring `packages/backend/prisma/schema.prisma`. Every `projectId`
+relation is `onDelete: Cascade`.
+
+- **Project** — `id, name, path (unique), type?, packageMgr?, status, createdAt, updatedAt`. Owns `commands`, `runs`, `analyses`, `releases`.
+- **RunCommand** — `id, projectId, label, command, cwd?, isDefault, source(detected|custom), shell(powershell|cmd), createdAt`.
+- **Run** — `id, projectId, commandId?, kind(shell|claude|command), name?, shell?, dockOpen, pid?, claudeSessionId?, status(running|exited|killed|error), exitCode?, startedAt, endedAt?`. Indexed on `[dockOpen]`, `[projectId, startedAt]`, `[claudeSessionId]`.
+- **RunLog** — `id, runId, chunk, ts` (append-only output history), indexed on `[runId, ts]`.
+- **AppSetting** — `key, value(JSON string), updatedAt` — the generic key/value store behind `/api/settings` and `/api/workspace` (UI state, release zip dir, EOD digest cache).
 - **Analysis** — `id, projectId, rawResult(JSON), createdAt` (audit of each `claude -p` analyze).
-- **EodEntry** — `id, projectId, day, items(JSON), note?, summary?` — unique `[projectId, day]`.
+- **Release** — `id, projectId, version, zipPath, zipBytes, headCommit?, dirtyIncluded, summary?, notes?, createdAt, updatedAt` — indexed on `[projectId, createdAt]` (§4.20).
+- **EodReport** — `id, day (unique), markdown, projects(JSON array of {name,path}), createdAt, updatedAt` — one cross-project report per day/range key (§4.11).
+
+**Schema self-heal, not runtime migration.** The packaged desktop app copies a
+template DB on first launch and **never** runs `prisma migrate`. So `src/db.ts`
+converges an already-installed DB at boot, idempotently and best-effort:
+`ADDITIVE_TABLES` (`CREATE TABLE/INDEX IF NOT EXISTS`) → `ADDITIVE_COLUMNS`
+(`PRAGMA table_info` guard, then `ADD COLUMN`) → `ADDITIVE_INDEXES`
+(`CREATE INDEX IF NOT EXISTS`, after the columns they may cover) →
+`REMOVED_COLUMNS` (`DROP COLUMN`) → `REMOVED_TABLES` (`DROP TABLE IF EXISTS`).
+The last two are the only place this routine destroys data, and only for a
+feature that is gone. Keep each list in lockstep with `schema.prisma`; covered by
+`src/db.test.ts`.
+
+> Removed: **EodEntry**, the per-project End-of-Day snapshot. It was superseded by
+> the cross-project `EodReport` and had no route, no Prisma call site and no UI —
+> its schema comment even documented a 10-day retention policy nothing
+> implemented. Dropped from `schema.prisma`, from installed DBs via
+> `REMOVED_TABLES`, and forward-migrated by
+> `prisma/migrations/20260801010000_drop_eod_entry`.
 
 ---
 
@@ -409,7 +575,7 @@ gradle assembleRelease      # -> app/build/outputs/apk/release/app-release.apk
 adb install -r app/build/outputs/apk/release/app-release.apk
 ```
 
-Backend test suite covers auth (token/origin/host), the analyzer's parsing helpers (fence-strip, parse-aware JSON extraction, normalization, envelope unwrap), the runner (transcript cap, shell selection, tail-lines), the WS message handling, EOD date/item logic, the orchestration route guards + rate limiter, and the PC Stats layer (payload parsing/nullability, `addressRank` ordering, constant-time `tokenMatches`, `safeAssetPath` traversal defence, plus a real listener asserting stats need the token).
+Backend test suite covers auth (token/origin/host), the analyzer's parsing helpers (fence-strip, parse-aware JSON extraction, normalization, envelope unwrap), the runner (transcript cap, shell selection, tail-lines), the WS message handling, the boot schema self-heal (`db.test.ts` — additive columns/tables/indexes plus the removed-column and removed-table drops, each asserted idempotent), EOD date/range + session-selection logic, the git source-control routes against a **real** temp repo, the release builder against a real repo with a local bare origin, the GODCLAUDE control plane against a real provisioned temp home, the orchestration route guards + rate limiter, and the PC Stats layer (payload parsing/nullability, `addressRank` ordering, constant-time `tokenMatches`, `safeAssetPath` traversal defence, plus a real listener asserting stats need the token).
 
 The Android app's unit tests (`StatsTest`, `ZoomLayoutTest`, `theme/ModelTest`, `theme/ThemesTest`) cover payload parsing, zoom/pan maths, and the theme model's data mappings — all pure JVM, no emulator required.
 

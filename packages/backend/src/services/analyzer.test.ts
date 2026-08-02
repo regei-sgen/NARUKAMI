@@ -1,4 +1,23 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+
+// Capture the options `claude -p` is spawned with (analyzer promisifies execFile
+// at module load, so the mock must be in place before ./analyzer is imported).
+const spawn = vi.hoisted(() => ({
+  env: undefined as NodeJS.ProcessEnv | undefined,
+  stdout: '',
+}));
+vi.mock('node:child_process', () => ({
+  execFile: (
+    _file: string,
+    _args: string[],
+    options: { env?: NodeJS.ProcessEnv },
+    cb: (err: null, out: { stdout: string; stderr: string }) => void,
+  ) => {
+    spawn.env = options.env;
+    cb(null, { stdout: spawn.stdout, stderr: '' });
+  },
+}));
+
 import {
   isRecord,
   stripFences,
@@ -7,6 +26,7 @@ import {
   toStringArray,
   normalize,
   unwrapEnvelope,
+  analyzeProject,
 } from './analyzer';
 
 describe('isRecord', () => {
@@ -164,5 +184,38 @@ describe('normalize', () => {
   it('drops commands with no runnable command string', () => {
     const out = normalize({ commands: [{ label: 'a' }, { label: 'b', command: 'y' }] });
     expect(out.commands).toEqual([{ label: 'b', command: 'y', isDefault: true }]);
+  });
+});
+
+describe('runClaude env', () => {
+  it('spawns claude -p with cleanEnv, not a raw process.env', async () => {
+    // A headless `claude -p` is a spawned (untrusted) session like any other —
+    // it must not inherit the backend's secrets/internal wiring.
+    const added = {
+      DATABASE_URL: 'file:./dev.db',
+      RUNNER_TOKEN_FILE: '/tmp/.runner-token',
+      PORT: '4000',
+      CLAUDE_CODE_SESSION_ID: 'outer-session',
+      NARUKAMI_TOKEN: 'super-secret',
+      PRISMA_QUERY_ENGINE_LIBRARY: '/x/engine.node',
+      ORDINARY_VAR_XYZ: 'keepme',
+    };
+    Object.assign(process.env, added);
+    spawn.env = undefined;
+    spawn.stdout = JSON.stringify({ type: 'result', result: '{"type":"node"}' });
+    try {
+      await analyzeProject('/tmp/project');
+      const env: NodeJS.ProcessEnv = spawn.env ?? {};
+      expect(env.DATABASE_URL).toBeUndefined();
+      expect(env.RUNNER_TOKEN_FILE).toBeUndefined();
+      expect(env.PORT).toBeUndefined();
+      expect(env.CLAUDE_CODE_SESSION_ID).toBeUndefined();
+      expect(env.NARUKAMI_TOKEN).toBeUndefined();
+      expect(env.PRISMA_QUERY_ENGINE_LIBRARY).toBeUndefined();
+      // ...but ordinary vars still reach the child.
+      expect(env.ORDINARY_VAR_XYZ).toBe('keepme');
+    } finally {
+      for (const k of Object.keys(added)) delete process.env[k];
+    }
   });
 });

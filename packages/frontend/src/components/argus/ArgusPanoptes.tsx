@@ -64,8 +64,13 @@ export function ArgusPanoptes({ selectedPath }: Props) {
   // Prisma query + godclaude fs reads (and, on cache expiry, an
   // Electron-as-node godmonitor spawn) — leaving this tab selected and
   // minimizing overnight used to keep all of that running for zero viewers.
-  usePollWhileVisible(loadStatus, STATUS_POLL_MS);
-  usePollWhileVisible(loadGraph, GRAPH_POLL_MS);
+  // Stable void-returning wrappers: the poll helper expects `() => void`, and the
+  // callback must keep its identity or the interval re-arms every render. Both
+  // loaders already route their own failures (`setErr` / keep-last-graph).
+  const pollStatus = useCallback(() => void loadStatus(), [loadStatus]);
+  const pollGraph = useCallback(() => void loadGraph(), [loadGraph]);
+  usePollWhileVisible(pollStatus, STATUS_POLL_MS);
+  usePollWhileVisible(pollGraph, GRAPH_POLL_MS);
 
   // Only the project selected in the sidebar lights up. The graph's project field
   // is the Claude-encoded dir name (every non-alphanumeric char → '-'); encoding

@@ -1,0 +1,129 @@
+# NARUKAMI CI
+#
+# STATUS WHEN ADDED (2026-08-01): this file has never been executed. The repo has
+# a remote (git@github.com:regei-sgen/NARUKAMI.git) so it WILL run on the next
+# push, but every claim below about a hosted runner is unverified — what IS
+# verified is that each command this workflow invokes was run locally on Windows
+# and is reported in the change that added this file.
+#
+# Runner choice: windows-latest, not ubuntu. NARUKAMI is a Windows-first app
+# (node-pty conpty, LibreHardwareMonitor, powershell/cmd shell selection) and the
+# suite has only ever been proven green on Windows. Adding ubuntu to the matrix
+# is worth doing — but it should be added as a job that is allowed to fail first,
+# measured, and only then made blocking. Do not assume it is green.
+#
+# Job layout, and why:
+#   verify  — BLOCKING. typecheck (all three workspaces) + unit tests + coverage
+#             floors + the LAN-skip audit. Every step here exits 0 locally.
+#   lint    — BLOCKING as of 2026-08-02. It was advisory while 22 errors /
+#             6 warnings of pre-existing violations sat in application source;
+#             all 28 have since been fixed at the call sites (no rule was
+#             loosened and no eslint-disable was added — see eslint.config.mjs,
+#             which still carries the same narrow rule set). `npm run lint`
+#             now exits 0, and the blocking script is lint:strict
+#             (--max-warnings 0) so warnings cannot creep back in either.
+#   integration — STILL NON-BLOCKING, for one honest reason: these tests shell
+#             the real vendored god CLIs with 30 s timeouts and need a real git
+#             binary, and they have never been observed on a HOSTED runner —
+#             only locally on Windows, where they are green (6 files / 48
+#             tests). Promote this to blocking after one clean observed run.
+#             (The test that used to be RED here — a stale assertion against the
+#             deleted GET /api/godclaude/logs route — was removed, so a red
+#             result now means a genuine environment or product problem.)
+
+name: CI
+
+on:
+  push:
+    branches: [main, dan-dev]
+  pull_request:
+    branches: [main, dan-dev]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Electron is only needed to PACKAGE the desktop app; CI never launches it, and
+  # the ~100 MB binary download is the slowest, flakiest part of `npm ci`.
+  ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+
+jobs:
+  verify:
+    name: verify (typecheck + unit + coverage + skip audit)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      # NOT --ignore-scripts: packages/backend's postinstall runs `prisma
+      # generate`, which writes src/generated/prisma. That directory is
+      # gitignored, so without the postinstall the typecheck cannot resolve
+      # @prisma/client's generated types and every backend step fails.
+      - name: install
+        run: npm ci
+
+      - name: typecheck (backend + frontend + desktop)
+        run: npm run typecheck
+
+      - name: unit tests + coverage floors + LAN-skip audit
+        # NARUKAMI_REQUIRE_LAN=1 makes scripts/check-skips.mjs FAIL when the
+        # runner has no routable IPv4 interface, instead of letting six LAN tests
+        # self-skip and reporting a green run that verified nothing. If a hosted
+        # runner turns out to be loopback-only this job goes red with an explicit
+        # message — that is the intended behaviour, not a bug to paper over.
+        env:
+          NARUKAMI_REQUIRE_LAN: '1'
+        run: npm run test:coverage
+
+      - name: upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            packages/backend/build/coverage/lcov.info
+            packages/frontend/build/coverage/lcov.info
+          if-no-files-found: warn
+
+  lint:
+    name: lint (blocking)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      # lint:strict = eslint . --max-warnings 0. Warnings are treated as failures
+      # here because the tree is at zero of both; allowing warnings would let the
+      # count drift back up unnoticed, which is how the original 28 accumulated.
+      - name: eslint
+        run: npm run lint:strict
+
+  integration:
+    name: integration (advisory — unproven on a hosted runner)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    # Advisory. Green locally on Windows (6 files / 48 tests) but never yet
+    # observed on a hosted runner: these shell the real vendored god CLIs with
+    # 30 s timeouts and need a real git binary. Flip to `false` after one clean
+    # observed run — do NOT flip it by loosening or skipping tests.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: integration tests
+        run: npm run test:integration

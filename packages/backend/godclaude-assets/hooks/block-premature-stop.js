@@ -93,12 +93,18 @@ function decide(data) {
     // SubagentStop hands us the MAIN transcript; derive the subagent's own (incl. workflow subagents,
     // which nest one level deeper under subagents/workflows/<run-id>/). Mirrors the proof-gate: judge the
     // SUBAGENT, never fall back to the parent's mid-turn transcript.
+    // `probed` records every candidate tried so the fail-open below can report its EVIDENCE (audit item 12):
+    // 86% of SubagentStops end here and the cause is not the obvious creation race, so the layer has to say
+    // which paths it looked at. Mirrors the proof-gate's diagnostic.
+    const probed = [];
     const deriveSubagentTp = () => {
       if (!input.agent_id) return '';
       const base = tp.replace(/\.jsonl$/i, '');
       const direct = `${base}/subagents/agent-${input.agent_id}.jsonl`;
+      probed.push(direct);
       if (fs.existsSync(direct)) return direct;
-      try { const wf = `${base}/subagents/workflows`; for (const d of fs.readdirSync(wf)) { const c = `${wf}/${d}/agent-${input.agent_id}.jsonl`; if (fs.existsSync(c)) return c; } } catch (_) {}
+      const wf = `${base}/subagents/workflows`;
+      try { for (const d of fs.readdirSync(wf)) { const c = `${wf}/${d}/agent-${input.agent_id}.jsonl`; probed.push(c); if (fs.existsSync(c)) return c; } } catch (e) { probed.push(`${wf}/* (readdir failed: ${e && e.code})`); }
       return '';
     };
     if (event === 'SubagentStop') {
@@ -108,7 +114,16 @@ function decide(data) {
       let found = deriveSubagentTp();
       for (let r = 0; !found && r < 2; r++) { sleepSync(150); found = deriveSubagentTp(); }
       if (found) tp = found;
-      else { audit(`SubagentStop: derived path not found for agent-${input.agent_id || '(no agent_id)'} → fail-open (not parent-judged)`); return allow('subagent transcript not found — cannot judge subagent (fail-open)'); }
+      else {
+        // Log the evidence, not just the verdict. The fail-open itself is UNCHANGED (the root cause is not
+        // established; blocking on an unknown would trap real sessions) — this only makes it diagnosable.
+        const subDir = `${tp.replace(/\.jsonl$/i, '')}/subagents`;
+        const seen = [...new Set(probed)].map(p => `${p}:${fs.existsSync(p) ? 'EXISTS' : 'missing'}`);
+        audit(`SubagentStop: derived path not found for agent-${input.agent_id || '(no agent_id)'} → fail-open (not parent-judged)` +
+          ` input.transcript_path=${input.transcript_path} txExists=${fs.existsSync(input.transcript_path || '')}` +
+          ` subagentsDir=${subDir}:${fs.existsSync(subDir) ? 'EXISTS' : 'missing'} probed=[${seen.join(' | ')}]`);
+        return allow('subagent transcript not found — cannot judge subagent (fail-open)');
+      }
     }
 
     const parseObjs = (raw) => { const a = []; for (const l of raw.split('\n')) { if (!l.trim()) continue; try { a.push(JSON.parse(l)); } catch (_) {} } return a; };
@@ -128,11 +143,46 @@ function decide(data) {
     // with no closing text has no give-up to catch (it exits at "no closing message" below anyway). A
     // pure-chat / already-settled turn still breaks on the first read regardless of the cap.
     let objs = [], settled = false, lastSize = -1;
+    {
+      // FAST PATH — mirrors the proof-gate's. tool_uses are reliably flushed by Stop time (only the closing
+      // TEXT races), and a turn that used NO tools is exempt no matter what its closing text says. 'no tool use
+      // this turn' is this gate's DOMINANT allow, so paying the flush wait to reach a verdict the first read
+      // already settled was pure latency. statSync goes BEFORE the read so its size can only under-count (an
+      // under-count still forces a re-read; an over-count could skip one), and seeding lastSize + settled here
+      // stops the loop re-reading identical bytes on attempt 0 and stops it burning all 8 sleeps when statSync
+      // throws (size stays -1 == an unseeded lastSize forever, so it would never re-read).
+      let size0 = -1;
+      try { size0 = fs.statSync(tp).size; } catch (_) {}
+      let raw0 = '';
+      try { raw0 = fs.readFileSync(tp, 'utf8'); } catch (_) { return allow('transcript unreadable'); }
+      const o0 = parseObjs(raw0);
+      if (!o0.length) return allow('empty transcript');
+      let s0 = 0;
+      for (let i = o0.length - 1; i >= 0; i--) {
+        const o = o0[i];
+        if (o.type === 'user') {
+          const c = o.message && o.message.content;
+          const isTR = Array.isArray(c) && c.some(b => b && b.type === 'tool_result');
+          const isText = typeof c === 'string' || (Array.isArray(c) && c.some(b => b && b.type === 'text'));
+          if (isText && !isTR) { s0 = i; break; }
+        }
+      }
+      let used0 = false;
+      for (const o of o0.slice(s0)) {
+        if (o.type === 'assistant' && o.message && Array.isArray(o.message.content)) {
+          for (const b of o.message.content) if (b && b.type === 'tool_use') { used0 = true; break; }
+        }
+        if (used0) break;
+      }
+      if (!used0) return allow('no tool use this turn (pure chat/Q&A — exempt) [fast-path, no flush wait]');
+      objs = o0; lastSize = size0; settled = endsOnAsstText(o0);
+    }
     const maxAttempts = event === 'SubagentStop' ? 2 : 8;
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    for (let attempt = 0; !settled && attempt < maxAttempts; attempt++) {
       let size = -1;
       try { size = fs.statSync(tp).size; } catch (_) {}
-      if (size !== lastSize || !objs.length) {
+      // size < 0 => statSync failed => we cannot tell whether it grew, so re-read (the only way to progress).
+      if (size !== lastSize || size < 0 || !objs.length) {
         let raw = '';
         try { raw = fs.readFileSync(tp, 'utf8'); } catch (_) { return allow('transcript unreadable'); }
         objs = parseObjs(raw);

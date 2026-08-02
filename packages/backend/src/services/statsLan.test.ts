@@ -1,7 +1,11 @@
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import Fastify, { type FastifyInstance } from 'fastify';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   addressRank,
+  isStatsLanRunning,
   lanAddresses,
   safeAssetPath,
   startStatsLan,
@@ -9,6 +13,7 @@ import {
   stopStatsLan,
   tokenMatches,
 } from './statsLan';
+import { statsLanRoutes } from '../routes/statsLan';
 
 describe('safeAssetPath', () => {
   const root = path.resolve('/srv/dist');
@@ -132,7 +137,7 @@ describe('read-only LAN stats server', () => {
     expect(bad.status).toBe(401);
   });
 
-  it('exposes NOTHING but stats — no HTML, no token, no shell surface', async () => {
+  it('with NO SPA dir, exposes NOTHING but stats — no HTML, no token, no shell surface', async () => {
     const auth = { authorization: `Bearer ${token}` };
     // The dangerous routes of the main backend must not exist here at all.
     for (const path of ['/', '/index.html', '/api/runs', '/api/terminals', '/api/projects', '/api/files']) {
@@ -161,5 +166,118 @@ describe('read-only LAN stats server', () => {
     expect(ok.status).toBe(200);
     const bad = await fetch(`${base}/api/pcstats?token=deadbeef`);
     expect(bad.status).toBe(401);
+  });
+});
+
+describe('LAN stats server WITH an SPA dir — the branch the phone actually uses', () => {
+  // The suite above starts the listener with NO frontendDir, so spaIndex is null
+  // and the whole static-file branch is dead there. This one hands it a real
+  // dist-shaped directory, which is what the desktop app does in practice.
+  const PORT = 44312;
+  const base = `http://127.0.0.1:${PORT}`;
+  let dir = '';
+  let token = '';
+
+  beforeAll(async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'narukami-statslan-'));
+    fs.mkdirSync(path.join(dir, 'assets'));
+    fs.writeFileSync(path.join(dir, 'index.html'), '<html><head></head><body>ok</body></html>');
+    fs.writeFileSync(path.join(dir, 'assets', 'app.js'), 'export const bundled="secret-in-bundle";');
+    // a real dist tree routinely carries files that are not bundle assets
+    fs.writeFileSync(path.join(dir, '.env'), 'VITE_RUNNER_TOKEN=master-token-here');
+    token = (await startStatsLan(PORT, dir)).token;
+  });
+  afterAll(async () => {
+    await stopStatsLan();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('refuses every file in the SPA dir without a token', async () => {
+    for (const p of ['/', '/index.html', '/assets/app.js', '/.env']) {
+      const res = await fetch(base + p);
+      expect(res.status, `${p} must not be served unauthenticated`).toBe(401);
+      const body = await res.text();
+      expect(body, `${p} leaked its body`).not.toContain('secret-in-bundle');
+      expect(body, `${p} leaked its body`).not.toContain('master-token-here');
+    }
+  });
+
+  it('serves the injected index to an authed request and pins the session to a cookie', async () => {
+    const res = await fetch(`${base}/?pcstats=1&token=${token}`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('__NARUKAMI__');
+    const setCookie = res.headers.get('set-cookie') ?? '';
+    expect(setCookie).toContain(`nk_stats=${token}`);
+    expect(setCookie).toMatch(/HttpOnly/i);
+    expect(setCookie).toMatch(/SameSite=Lax/i);
+  });
+
+  it('lets that cookie alone authorise the bundle the SPA loads with no header', async () => {
+    // <script src> and Monaco's lazy import() carry no Authorization header, so
+    // once the 401 gates assets the cookie is the only thing keeping the phone
+    // page working.
+    const ok = await fetch(`${base}/assets/app.js`, { headers: { cookie: `nk_stats=${token}` } });
+    expect(ok.status).toBe(200);
+    expect(await ok.text()).toContain('secret-in-bundle');
+
+    const bad = await fetch(`${base}/assets/app.js`, { headers: { cookie: 'nk_stats=nope' } });
+    expect(bad.status).toBe(401);
+  });
+});
+
+describe('POST /api/pcstats/lan/start', () => {
+  const PORT = 44313;
+  const base = `http://127.0.0.1:${PORT}`;
+  let app: FastifyInstance;
+  let served = '';
+  let hostile = '';
+
+  beforeAll(async () => {
+    served = fs.mkdtempSync(path.join(os.tmpdir(), 'narukami-served-'));
+    fs.writeFileSync(path.join(served, 'index.html'), '<html><head></head><body>served</body></html>');
+    fs.writeFileSync(path.join(served, 'safe.txt'), 'safe');
+    hostile = fs.mkdtempSync(path.join(os.tmpdir(), 'narukami-hostile-'));
+    fs.writeFileSync(path.join(hostile, 'index.html'), '<html><head></head><body>hostile</body></html>');
+    fs.writeFileSync(path.join(hostile, 'hostile.txt'), 'attacker-chosen-directory');
+
+    app = Fastify();
+    await app.register(statsLanRoutes);
+    await app.ready();
+  });
+  afterAll(async () => {
+    await stopStatsLan();
+    await app.close();
+    vi.unstubAllEnvs();
+    fs.rmSync(served, { recursive: true, force: true });
+    fs.rmSync(hostile, { recursive: true, force: true });
+  });
+
+  it('rejects a port that is not an integer in [1024,65535]', async () => {
+    for (const port of [80, 1023, 65536, 70000, 4311.5, -1, 'abc']) {
+      const res = await app.inject({ method: 'POST', url: '/api/pcstats/lan/start', payload: { port } });
+      expect(res.statusCode, `port ${String(port)} must be rejected`).toBe(400);
+    }
+    expect(isStatsLanRunning()).toBe(false);
+  });
+
+  it('ignores a caller-supplied frontendDir', async () => {
+    // Honouring body.frontendDir turns this into a general file server for any
+    // directory that happens to contain an index.html.
+    vi.stubEnv('NARUKAMI_FRONTEND_DIR', served);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/pcstats/lan/start',
+      payload: { port: PORT, frontendDir: hostile },
+    });
+    expect(res.statusCode).toBe(200);
+    const token = (res.json() as { info: { token: string } }).info.token;
+
+    const auth = { authorization: `Bearer ${token}` };
+    const leak = await fetch(`${base}/hostile.txt`, { headers: auth });
+    expect(leak.status).toBe(404);
+    expect(await leak.text()).not.toContain('attacker-chosen-directory');
+
+    const own = await fetch(`${base}/safe.txt`, { headers: auth });
+    expect(own.status).toBe(200);
   });
 });

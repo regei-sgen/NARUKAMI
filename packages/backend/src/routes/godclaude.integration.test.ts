@@ -126,13 +126,4 @@ describe('embedded godclaude lifecycle over HTTP', () => {
     expect(on.statusCode).toBe(200);
     expect(on.json().active).toBe(true);
   }, 30_000);
-
-  it('GET /logs rejects an unknown source (400) and reports a missing log cleanly', async () => {
-    const bad = await app.inject({ method: 'GET', url: '/api/godclaude/logs?source=nope' });
-    expect(bad.statusCode).toBe(400);
-
-    const ok = await app.inject({ method: 'GET', url: '/api/godclaude/logs?source=audit' });
-    expect(ok.statusCode).toBe(200);
-    expect(ok.json().exists).toBe(false); // nothing gated yet in a fresh home
-  });
 });

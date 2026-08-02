@@ -227,27 +227,6 @@ export interface EodItem {
   durationMs: number | null;
 }
 
-// A git commit landed on an EOD day (the day's "added features" list).
-export interface EodCommit {
-  hash: string;
-  subject: string;
-  body: string;
-  filesChanged: number | null;
-}
-
-// A saved End-of-Day entry: what a project finished on one local day.
-export interface EodEntry {
-  id: string;
-  projectId: string;
-  day: string; // 'YYYY-MM-DD'
-  items: EodItem[];
-  commits: EodCommit[]; // features/changes committed that day (recomputed from git)
-  note: string | null;
-  summary: string | null; // AI-generated narrative (on demand)
-  createdAt: string;
-  updatedAt: string;
-}
-
 // --- Settings tab (mirrors packages/backend/src/services/aiProvider.ts) ---
 
 /** Which credential NARUKAMI hands to the `claude` processes it spawns. */
@@ -413,20 +392,6 @@ export interface Usage {
   model?: string;
   session_id?: string;
   rate_limits?: Record<string, { used_percentage?: number; resets_at?: number }>;
-}
-
-export interface ArgusStatus {
-  ok: boolean;
-  ts: string;
-  godclaudeDetected: boolean;
-  health: ArgusHealth | null;
-  modes: ArgusModeIntegrity[];
-  activity: Record<string, { allow: number; block: number }>;
-  heartbeats: ArgusHeartbeat[];
-  routing: ArgusRouting | null;
-  stats: GodStats | null;
-  sessions: ArgusSessions;
-  usage: Usage | null;
 }
 
 /** NARUKAMI's own embedded godclaude instance (separate from the native ~/.claude). */

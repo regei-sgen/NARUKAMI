@@ -207,7 +207,6 @@ export default function App() {
         booted.current = true;
       }
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Persist UI layout (debounced) whenever it changes, once booted.
@@ -410,6 +409,11 @@ export default function App() {
     }
   }, []);
 
+  // Fire-and-forget wrappers for the terminal tab controls: restartRun already
+  // surfaces failures through setError, so the promise is deliberately dropped.
+  // useCallback (not an inline arrow) keeps the identity stable — TerminalTab is
+  // memoized and would otherwise re-render on every App render.
+  const beginRestart = useCallback((runId: string) => void restartRun(runId), [restartRun]);
   const continueRun = useCallback((runId: string) => void restartRun(runId, true), [restartRun]);
 
   // Tear a terminal off into its own desktop window (move semantics): ask the
@@ -500,7 +504,6 @@ export default function App() {
     report();
     window.addEventListener('resize', report);
     return () => window.removeEventListener('resize', report);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dockPosition, dockHeight, dockWidth, dockMinimized, sidebarCollapsed, view, selectedId, activeRuns.length]);
 
   // Drag a terminal tab out of the strip to tear it off. We don't hijack the
@@ -839,8 +842,8 @@ export default function App() {
               if (!confirmLeaveEditor()) return;
               setSelectedId(id);
             }}
-            onAdd={addProject}
-            onDelete={deleteProject}
+            onAdd={(path) => void addProject(path)}
+            onDelete={(id) => void deleteProject(id)}
           />
           <main className="main">
             {selected ? (
@@ -902,10 +905,10 @@ export default function App() {
                       key={selected.id}
                       project={selected}
                       onAnalyze={analyze}
-                      onRun={runCommand}
-                      onShell={openShell}
-                      onClaude={openClaude}
-                      onContinueClaude={(p) => openClaude(p, true)}
+                      onRun={(p, c) => void runCommand(p, c)}
+                      onShell={(p, admin, shell) => void openShell(p, admin, shell)}
+                      onClaude={(p) => void openClaude(p)}
+                      onContinueClaude={(p) => void openClaude(p, true)}
                       onChanged={refresh}
                     />
                   </div>
@@ -1154,7 +1157,7 @@ export default function App() {
                     <TerminalTab
                       run={r}
                       onStatus={onRunStatus}
-                      onRestart={restartRun}
+                      onRestart={beginRestart}
                       onContinue={continueRun}
                       onActivity={onActivity}
                       onDevUrl={handleDevUrl}

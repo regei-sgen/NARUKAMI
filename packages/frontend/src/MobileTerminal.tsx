@@ -359,7 +359,6 @@ export function MobileTerminal({ runId, shareToken }: { runId: string; shareToke
       termRef.current = null;
       fitRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId, shareToken, error, approval]);
 
   // Scrollback from the WHOLE surface, not just the rows.

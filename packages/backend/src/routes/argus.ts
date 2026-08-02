@@ -1,12 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../db';
-import {
-  collectMemoryGraph,
-  collectSessions,
-  collectStatus,
-  readNote,
-  tailLog,
-} from '../services/argus';
+import { collectMemoryGraph, readNote } from '../services/argus';
 
 /**
  * Every Claude session id THIS NARUKAMI instance launched (via `--session-id`),
@@ -31,17 +25,18 @@ export async function narukamiSessionIds(): Promise<Set<string>> {
 }
 
 /**
- * Argus Panoptes — read-only god-monitor endpoints over ~/.claude. All GET;
+ * Argus — read-only endpoints over the native ~/.claude state tree. All GET;
  * token-gated for free by the global onRequest hook (paths start with /api).
  * Nothing here mutates the GODCLAUDE state tree.
+ *
+ * The former /status, /sessions and /logs feeds were removed: the ArgusPanoptes
+ * tab now polls the EMBEDDED layer (/api/godclaude/status) and deliberately does
+ * not show the native god layer, so nothing consumed them. The /logs tail was
+ * backend-only from the start — the planned LogFeed panel was never built, on
+ * either the native or the embedded side. What survives here is the memory graph
+ * / note viewer, which is genuinely native-scoped.
  */
 export async function argusRoutes(app: FastifyInstance): Promise<void> {
-  // The single feed the dashboard polls: health/modes/gate/perf/sessions/usage.
-  app.get('/api/argus/status', async () => collectStatus(await narukamiSessionIds()));
-
-  // Live Claude session fleet (also embedded in /status).
-  app.get('/api/argus/sessions', async () => collectSessions(Date.now(), await narukamiSessionIds()));
-
   // Obsidian-style memory knowledge graph across all projects.
   app.get('/api/argus/memory-graph', async () => collectMemoryGraph());
 
@@ -56,18 +51,6 @@ export async function argusRoutes(app: FastifyInstance): Promise<void> {
       const note = await readNote(project, slug);
       if (!note) return reply.code(404).send({ error: 'Note not found.' });
       return note;
-    },
-  );
-
-  // Byte-bounded tail of an allowlisted god log (monitor|perf|audit).
-  app.get<{ Querystring: { source?: string; limit?: string } }>(
-    '/api/argus/logs',
-    async (req, reply) => {
-      const source = req.query.source ?? 'monitor';
-      const limit = Number(req.query.limit ?? 200);
-      const result = await tailLog(source, Number.isFinite(limit) ? limit : 200);
-      if ('error' in result) return reply.code(400).send(result);
-      return result;
     },
   );
 }

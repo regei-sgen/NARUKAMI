@@ -1,0 +1,14 @@
+-- EodEntry (the per-project End-of-Day snapshot) removed: it never had a route,
+-- a Prisma call site or a UI, and was superseded by the cross-project EodReport
+-- added in 20260707030000_add_eod_report. Its schema comment also documented a
+-- 10-day-per-project retention policy that no code ever implemented.
+--
+-- The earlier 20260706040457_add_eod_entry migration is deliberately left in
+-- place: applied migration history is never rewritten, so databases that already
+-- ran it stay consistent and this migration undoes it forward.
+--
+-- DROP TABLE takes the table's own indexes (EodEntry_projectId_day_idx and the
+-- EodEntry_projectId_day unique) with it, so they need no separate statement.
+-- Databases seeded from the packaged app's template never run migrations at all;
+-- their copy of this table is dropped at boot by REMOVED_TABLES in src/db.ts.
+DROP TABLE IF EXISTS "EodEntry";

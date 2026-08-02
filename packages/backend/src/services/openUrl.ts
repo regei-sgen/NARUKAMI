@@ -29,9 +29,11 @@ export function validateDevUrl(raw: unknown): string | null {
 export function openInBrowser(url: string): void {
   const [file, args] =
     process.platform === 'win32'
-      ? // `start` is a cmd builtin; the empty "" is the window-title slot so the
-        // URL isn't consumed as the title.
-        ['cmd.exe', ['/c', 'start', '', url]]
+      ? // NOT `cmd /c start` — cmd.exe treats `&` as a statement separator and
+        // libuv only quotes an argv element containing a space/tab/quote, so a
+        // `&` in a perfectly legal query string splits the command line. url.dll's
+        // FileProtocolHandler takes the URL as one argv element, no shell parser.
+        ['rundll32.exe', ['url.dll,FileProtocolHandler', url]]
       : process.platform === 'darwin'
         ? ['open', [url]]
         : ['xdg-open', [url]];

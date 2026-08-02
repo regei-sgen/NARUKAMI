@@ -148,7 +148,7 @@ export function ProjectPanel({
           >
             <Ic name="spark" /> Continue
           </button>
-          <button className="btn btn-primary" onClick={analyze} disabled={analyzing}>
+          <button className="btn btn-primary" onClick={() => void analyze()} disabled={analyzing}>
             {analyzing ? 'Analyzing…' : 'Analyze'}
           </button>
         </div>
@@ -200,7 +200,7 @@ export function ProjectPanel({
                 <button className="btn btn-run" onClick={() => onRun(project, c)}>
                   <Ic name="play" /> Run
                 </button>
-                <button className="btn-icon" title="Delete command" onClick={() => del(c.id)}>
+                <button className="btn-icon" title="Delete command" onClick={() => void del(c.id)}>
                   ×
                 </button>
               </div>
@@ -212,7 +212,7 @@ export function ProjectPanel({
       {/* Add a custom command */}
       <div className="add-command">
         <h4>Add a command</h4>
-        <form className="add-command-row" onSubmit={addManual}>
+        <form className="add-command-row" onSubmit={(e) => void addManual(e)}>
           <input
             className="cmd-label-input"
             value={label}
@@ -240,7 +240,7 @@ export function ProjectPanel({
           </button>
         </form>
 
-        <form className="add-command-row" onSubmit={askClaude}>
+        <form className="add-command-row" onSubmit={(e) => void askClaude(e)}>
           <input
             className="cmd-command-input"
             value={describe}

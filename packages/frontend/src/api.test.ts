@@ -104,6 +104,53 @@ describe('request + api methods', () => {
     expect(JSON.parse(init.body)).toEqual({ commandId: 'cmd1' });
   });
 
+  it('getRun asks for logs by default (the reconnect path replays history)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(makeResponse(200, '{"id":"r1","live":true}'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await apiMod.api.getRun('r1');
+    expect(fetchMock.mock.calls[0][0]).toBe('http://127.0.0.1:4000/api/runs/r1');
+  });
+
+  it('getRun sends ?logs=0 when the caller opts out of the transcript', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(makeResponse(200, '{"id":"r1","live":true}'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    // The claudeSessionId lookup only needs the Run row — skipping the log query
+    // avoids serializing an entire terminal transcript on every Claude tab mount.
+    await apiMod.api.getRun('r1', { logs: false });
+    expect(fetchMock.mock.calls[0][0]).toBe('http://127.0.0.1:4000/api/runs/r1?logs=0');
+  });
+
+  it('getRun keeps the logs when logs:true is passed explicitly', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(makeResponse(200, '{"id":"r1","live":true}'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await apiMod.api.getRun('r1', { logs: true });
+    expect(fetchMock.mock.calls[0][0]).toBe('http://127.0.0.1:4000/api/runs/r1');
+  });
+
+  it('diagnoseRun POSTs to the run and returns the explanation', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(makeResponse(200, '{"explanation":"exit 1: missing tsconfig"}'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const res = await apiMod.api.diagnoseRun('r1');
+    expect(res).toEqual({ explanation: 'exit 1: missing tsconfig' });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('http://127.0.0.1:4000/api/runs/r1/diagnose');
+    expect(init.method).toBe('POST');
+  });
+
+  it('diagnoseRun surfaces the 502 body (the model/CLI call failed)', async () => {
+    // 502 is the analyzer's own failure — a normal, recoverable condition whose
+    // message is the only thing the UI can tell the user.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(makeResponse(502, '{"error":"claude -p exited 1"}')),
+    );
+    await expect(apiMod.api.diagnoseRun('r1')).rejects.toThrow('claude -p exited 1');
+  });
+
   it('deleteProject issues a DELETE and tolerates a 204', async () => {
     const fetchMock = vi.fn().mockResolvedValue(makeResponse(204, ''));
     vi.stubGlobal('fetch', fetchMock);

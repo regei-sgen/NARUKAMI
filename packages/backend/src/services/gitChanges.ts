@@ -106,6 +106,40 @@ async function git(projectPath: string, args: string[]): Promise<string> {
   return stdout;
 }
 
+/**
+ * `rev-parse --show-prefix` is a constant for a given path, but the source-control
+ * panel polls every few seconds — so it was one git child process per tick purely
+ * to re-learn where the project sits inside its repo. Cache it per projectPath.
+ *
+ * Two things keep the cache from lying: the entry is dropped the moment a later
+ * git call on that path fails (a repo that disappears is re-probed on the very
+ * next poll rather than being reported as a repo), and a short TTL covers the
+ * silent case where the prefix genuinely changes without any command failing —
+ * e.g. `git init` inside the project turns 'app/' into ''. Capped so a long-lived
+ * server can't grow the map without bound.
+ */
+const PREFIX_TTL_MS = 60_000;
+const PREFIX_CACHE_MAX = 64;
+const prefixCache = new Map<string, { prefix: string; at: number }>();
+
+function cachedPrefix(projectPath: string): string | null {
+  const hit = prefixCache.get(projectPath);
+  if (!hit) return null;
+  if (Date.now() - hit.at > PREFIX_TTL_MS) {
+    prefixCache.delete(projectPath);
+    return null;
+  }
+  return hit.prefix;
+}
+
+function rememberPrefix(projectPath: string, prefix: string): void {
+  if (!prefixCache.has(projectPath) && prefixCache.size >= PREFIX_CACHE_MAX) {
+    const oldest = prefixCache.keys().next().value; // Map iterates in insertion order
+    if (oldest !== undefined) prefixCache.delete(oldest);
+  }
+  prefixCache.set(projectPath, { prefix, at: Date.now() });
+}
+
 /** True when a git failure is "HEAD doesn't resolve" (unborn branch / no commits). */
 function isUnborn(err: unknown): boolean {
   const msg = String((err as { stderr?: string })?.stderr ?? (err as Error)?.message ?? '');
@@ -114,11 +148,14 @@ function isUnborn(err: unknown): boolean {
 
 /** Full source-control snapshot: branch + staged/unstaged/conflict buckets. Fail-soft. */
 export async function gitSourceControl(projectPath: string): Promise<GitChangesResult> {
-  let prefix: string;
-  try {
-    prefix = (await git(projectPath, ['rev-parse', '--show-prefix'])).trim();
-  } catch {
-    return { isRepo: false, branch: null, detached: false, staged: [], unstaged: [], conflicts: [] };
+  let prefix = cachedPrefix(projectPath);
+  if (prefix === null) {
+    try {
+      prefix = (await git(projectPath, ['rev-parse', '--show-prefix'])).trim();
+    } catch {
+      return { isRepo: false, branch: null, detached: false, staged: [], unstaged: [], conflicts: [] };
+    }
+    rememberPrefix(projectPath, prefix);
   }
 
   const { branch, detached } = await currentBranch(projectPath);
@@ -127,6 +164,9 @@ export async function gitSourceControl(projectPath: string): Promise<GitChangesR
   try {
     raw = await git(projectPath, ['status', '--porcelain=v1', '-z', '--untracked-files=all']);
   } catch {
+    // The worktree may have stopped being a repo since the prefix was cached —
+    // forget it so the next call re-probes instead of asserting isRepo forever.
+    prefixCache.delete(projectPath);
     return { isRepo: true, branch, detached, staged: [], unstaged: [], conflicts: [] };
   }
 

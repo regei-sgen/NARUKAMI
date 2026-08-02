@@ -424,7 +424,14 @@ export interface EmbeddedGodStatus {
   stats: GodStats | null;
   /** NARUKAMI-launched Claude sessions only, modes from the embedded overlay */
   sessions: ArgusSessions;
-  /** account-wide rate limits (written to the native ~/.claude by the usage collector) */
+  /**
+   * Account-wide rate limits, read by argus `readUsage()` from BOTH godclaude
+   * homes' usage-live.json — the native ~/.claude and this embedded home
+   * (`godClaudeDir()`) — with the newest `ts` winning. Neither home owns the
+   * reading: the statusline hook writes into `${DET_HOOKS_HOME}/.claude`, so
+   * NARUKAMI-launched sessions land in the embedded home while native `claude`
+   * terminals land in ~/.claude. Fail-soft: null only when NEITHER side is readable.
+   */
   usage: Usage | null;
 }
 

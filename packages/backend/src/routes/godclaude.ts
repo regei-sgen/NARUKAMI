@@ -1,9 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { narukamiSessionIds } from './argus';
-import { tailLog } from '../services/argus';
 import {
   collectStatus,
-  godClaudeDir,
   isProvisioned,
   provision,
   sessionGodActive,
@@ -86,17 +84,5 @@ export async function godclaudeRoutes(app: FastifyInstance): Promise<void> {
       active: sessionGodActive(req.params.sessionId),
       modes: sessionModes(req.params.sessionId),
     }),
-  );
-
-  // Byte-bounded tail of the EMBEDDED home's god logs (monitor|perf|audit).
-  app.get<{ Querystring: { source?: string; limit?: string } }>(
-    '/api/godclaude/logs',
-    async (req, reply) => {
-      const source = req.query.source ?? 'monitor';
-      const limit = Number(req.query.limit ?? 200);
-      const result = await tailLog(source, Number.isFinite(limit) ? limit : 200, godClaudeDir());
-      if ('error' in result) return reply.code(400).send(result);
-      return result;
-    },
   );
 }

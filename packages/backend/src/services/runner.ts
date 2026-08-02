@@ -8,6 +8,9 @@ import { buildClaudeMcpArgs, cleanupMcpConfig } from './mcpConfig';
 import { claudeSpawnEnv } from './aiProvider';
 import { godSpawnEnv } from './godclaude';
 import { resolveExecutable, wrapForWindows } from './exec';
+// The ONE liveness primitive (process.kill(pid, 0), EPERM => alive-but-not-ours).
+// instanceLock.ts owns it; reconcileStaleRuns below is its second consumer.
+import { pidAlive } from './instanceLock';
 
 // Re-exported for callers/tests that import it from the runner module.
 export { resolveExecutable } from './exec';
@@ -59,10 +62,7 @@ function ptyTransport(
     cols: 80,
     rows: 30,
     cwd,
-    // godSpawnEnv points the GODCLAUDE layer's state home at NARUKAMI's own
-    // embedded god home, so Claude sessions (and `godmode.mjs` invocations) in
-    // NARUKAMI terminals use NARUKAMI's godclaude — never the native ~/.claude.
-    env: { ...cleanEnv(), ...godSpawnEnv(), ...extraEnv },
+    env: spawnEnv(extraEnv),
   });
   return {
     pid: proc.pid,
@@ -88,10 +88,22 @@ interface ManagedRun {
   /** Un-persisted chunks awaiting a DB flush. */
   logBuffer: string[];
   flushTimer: NodeJS.Timeout | null;
+  /** In-flight flush, if any — flushes are serialized through it (see flushLogs). */
+  flushing: Promise<void> | null;
+  /** Consecutive transient flush failures (drives the retry backoff + cap). */
+  flushAttempts: number;
   /** Pty chunks not yet fanned out — micro-batched (see BATCH_MS). */
   pendingChunks: string[];
   pendingChars: number;
   batchTimer: NodeJS.Timeout | null;
+  /**
+   * Date.now() of the last output batch drained to subscribers; null until the
+   * pty has produced a byte. A NUMBER, stamped on the drain path and never
+   * persisted: idle detection has to be free on the hot path, and this file
+   * already writes one RunLog row per 300ms batch — a per-chunk Date or DB write
+   * would be pure amplification.
+   */
+  lastOutputAt: number | null;
   /** In-memory rolling transcript (capped) for gap-free live (re)connects. */
   transcript: string[];
   transcriptChars: number;
@@ -117,6 +129,15 @@ const BATCH_MAX_CHARS = 256 * 1024;
 // Cap the in-memory transcript so a chatty long-lived run can't grow unbounded.
 // The DB still holds the full history for post-mortem; live reconnects see the tail.
 const MAX_TRANSCRIPT_CHARS = 2_000_000;
+// Same idea for the UN-PERSISTED log buffer, which normally holds a single 300ms
+// batch: if the DB keeps rejecting writes the chunks stay buffered (deliberately —
+// see flushLogs) and nothing else bounds them.
+const MAX_LOG_BUFFER_CHARS = 2_000_000;
+// A transient flush failure (SQLITE_BUSY) is retried with exponential backoff and
+// then abandoned. The old path rescheduled at a flat 300ms with no attempt limit,
+// so a permanently failing write left a timer firing — and the whole ManagedRun
+// retained — for the rest of the process's life.
+export const MAX_FLUSH_ATTEMPTS = 4;
 
 /** Which Windows shell a command / terminal should use. Ignored on POSIX. */
 export type ShellKind = 'powershell' | 'cmd';
@@ -157,6 +178,12 @@ const ENV_DENYLIST = new Set([
   // id; NARUKAMI terminals are not part of that session, and a leaked id would
   // silently re-scope godmode CLI calls to a phantom session overlay.
   'CLAUDE_CODE_SESSION_ID',
+  // The GODCLAUDE state home is decided by godSpawnEnv() alone (below), which
+  // returns {} while the embedded layer is unprovisioned. An INHERITED value
+  // would otherwise survive into every spawned process and point it at a god
+  // home NARUKAMI never installed — the opposite of the documented fail-open
+  // "an uninstalled layer changes nothing about spawned sessions".
+  'DET_HOOKS_HOME',
 ]);
 const ENV_DENY_PREFIXES = ['NARUKAMI_', 'PRISMA_'];
 
@@ -170,6 +197,18 @@ export function cleanEnv(): Record<string, string> {
     out[k] = v;
   }
   return out;
+}
+
+/**
+ * The full environment for a spawned process: the sanitized parent env, then the
+ * GODCLAUDE overlay (godSpawnEnv points the layer's state home at NARUKAMI's own
+ * embedded god home, so Claude sessions and `godmode.mjs` invocations in NARUKAMI
+ * terminals use NARUKAMI's godclaude — never the native ~/.claude), then the
+ * per-launch overlay. Order matters: the INTENDED embedded home must win over an
+ * inherited one, and only the Claude launch path passes `extraEnv`.
+ */
+export function spawnEnv(extraEnv: Record<string, string> = {}): Record<string, string> {
+  return { ...cleanEnv(), ...godSpawnEnv(), ...extraEnv };
 }
 
 /**
@@ -211,6 +250,11 @@ function flushPending(m: ManagedRun): void {
   const chunk = m.pendingChunks.length === 1 ? m.pendingChunks[0] : m.pendingChunks.join('');
   m.pendingChunks.length = 0;
   m.pendingChars = 0;
+  // The one synchronous point every pty byte passes through, and therefore the
+  // only place "when did this terminal last speak" is knowable for free. Stamped
+  // AFTER the early return above, so a reader that drains an empty buffer (see
+  // getRunActivity/attach) can never make a quiet terminal look busy.
+  m.lastOutputAt = Date.now();
   appendTranscript(m, chunk);
   // ONE event object shared by every subscriber, so the ws layer can serialize
   // the wire payload once per batch instead of once per attached socket.
@@ -220,12 +264,31 @@ function flushPending(m: ManagedRun): void {
   scheduleFlush(m);
 }
 
-function scheduleFlush(m: ManagedRun): void {
+function scheduleFlush(m: ManagedRun, delayMs: number = LOG_FLUSH_MS): void {
   if (m.flushTimer) return;
   m.flushTimer = setTimeout(() => {
     m.flushTimer = null;
     void flushLogs(m);
-  }, LOG_FLUSH_MS);
+  }, delayMs);
+}
+
+/**
+ * Drop the OLDEST buffered chunks until the un-flushed log buffer is within
+ * `max` characters; returns how many were dropped. Mutates `buffer` and always
+ * keeps at least one chunk, mirroring {@link capTranscript}. Pure (no I/O) so it
+ * can be unit-tested directly.
+ */
+export function capLogBuffer(buffer: string[], max: number = MAX_LOG_BUFFER_CHARS): number {
+  let total = 0;
+  for (const c of buffer) total += c.length;
+  let dropped = 0;
+  while (total > max && buffer.length > 1) {
+    const gone = buffer.shift();
+    if (!gone) break;
+    total -= gone.length;
+    dropped += 1;
+  }
+  return dropped;
 }
 
 /** The referenced Run row no longer exists (record-not-found or FK failure). */
@@ -236,12 +299,41 @@ function isMissingRowError(err: unknown): boolean {
   );
 }
 
-async function flushLogs(m: ManagedRun): Promise<void> {
+/**
+ * Persist the buffered chunks, SERIALIZED per run.
+ *
+ * flushLogs has two independent callers — the 300ms timer and the exit path —
+ * and flushOnce only splices the buffer AFTER the write commits (so a transient
+ * DB error can't lose output). Left unserialized they interleave: the second
+ * caller sees the chunks the first has already written but not yet spliced and
+ * persists them a SECOND time. Nothing errors; the duplicate simply repaints when
+ * the tab is restored. Chaining (rather than skipping) preserves the exit path's
+ * guarantee that everything buffered is written before the run is forgotten.
+ */
+function flushLogs(m: ManagedRun): Promise<void> {
+  const once = (): Promise<void> => flushOnce(m);
+  const next = m.flushing ? m.flushing.then(once, once) : once();
+  m.flushing = next;
+  return next.finally(() => {
+    if (m.flushing === next) m.flushing = null;
+  });
+}
+
+async function flushOnce(m: ManagedRun): Promise<void> {
   if (m.flushTimer) {
     clearTimeout(m.flushTimer);
     m.flushTimer = null;
   }
   if (m.logBuffer.length === 0) return;
+  // Bound the buffer BEFORE snapshotting: chunks are dropped from the front, and
+  // doing that while a write is in flight would misalign the splice below (which
+  // is by index). Only reachable when the DB has been failing for a while.
+  const dropped = capLogBuffer(m.logBuffer);
+  if (dropped > 0) {
+    process.stderr.write(
+      `[narukami] dropped ${dropped} un-persisted log chunk(s) for run ${m.runId} (buffer over cap)\n`,
+    );
+  }
   // Snapshot what we're flushing but DON'T clear the buffer yet — only drop these
   // chunks once the write is durable, so a transient DB error can't silently and
   // permanently lose terminal output. New chunks appended during the await sit
@@ -251,14 +343,28 @@ async function flushLogs(m: ManagedRun): Promise<void> {
   try {
     await prisma.runLog.create({ data: { runId: m.runId, chunk } });
     m.logBuffer.splice(0, count);
+    m.flushAttempts = 0;
   } catch (err) {
     if (isMissingRowError(err)) {
       // Run row gone (e.g. project deleted mid-run) — the chunk can never persist,
       // so drop it rather than retry forever.
       m.logBuffer.splice(0, count);
+      m.flushAttempts = 0;
     } else {
-      // Transient failure (e.g. SQLite busy) — keep the chunk buffered and retry.
-      scheduleFlush(m);
+      // Transient failure (e.g. SQLite busy) — keep the chunk buffered and retry
+      // with backoff, up to a limit. Past the limit we stop TIMING retries but
+      // keep the chunks: the next flush the run's own output triggers picks them
+      // up again, and capLogBuffer bounds the memory in the meantime.
+      m.flushAttempts += 1;
+      if (m.flushAttempts >= MAX_FLUSH_ATTEMPTS) {
+        m.flushAttempts = 0;
+        process.stderr.write(
+          `[narukami] log flush for run ${m.runId} failed ${MAX_FLUSH_ATTEMPTS}x, ` +
+            `giving up on the retry timer: ${String(err)}\n`,
+        );
+        return;
+      }
+      scheduleFlush(m, LOG_FLUSH_MS * 2 ** (m.flushAttempts - 1));
     }
   }
 }
@@ -295,9 +401,12 @@ export function registerRun(runId: string, transport: RunTransport): void {
     killIssued: false,
     logBuffer: [],
     flushTimer: null,
+    flushing: null,
+    flushAttempts: 0,
     pendingChunks: [],
     pendingChars: 0,
     batchTimer: null,
+    lastOutputAt: null,
     transcript: [],
     transcriptChars: 0,
     cols: 80, // both pty transports spawn at 80x30 (ptyTransport + admin broker)
@@ -358,6 +467,21 @@ export function registerRun(runId: string, transport: RunTransport): void {
               `[narukami] failed to persist final status for run ${runId}: ${String(err2)}\n`,
             );
           }
+        }
+      }
+      // A final flush that hit a transient error scheduled a retry timer. The
+      // record is about to leave the map, so that timer would keep the whole
+      // ManagedRun (transcript included) alive and firing with nothing able to
+      // observe the result. Cancel it and make ONE last inline attempt instead,
+      // so a momentary SQLITE_BUSY still persists the tail.
+      if (managed.flushTimer) {
+        clearTimeout(managed.flushTimer);
+        managed.flushTimer = null;
+        await new Promise((resolve) => setTimeout(resolve, LOG_FLUSH_MS));
+        await flushLogs(managed);
+        if (managed.flushTimer) {
+          clearTimeout(managed.flushTimer);
+          managed.flushTimer = null;
         }
       }
       runs.delete(runId);
@@ -554,6 +678,34 @@ export function getFinalState(runId: string): { status: RunFinalStatus; exitCode
 }
 
 /**
+ * Liveness + last-output snapshot for a run whose record still exists. Returns
+ * null once the record has been forgotten (the run ended and its final flush
+ * committed) — the caller then reads the DB row for the exit code.
+ *
+ * `lastOutputAt` is epoch ms of the most recent drained output batch, so an
+ * orchestrator can tell a terminal that is still working from one that has gone
+ * quiet WITHOUT re-reading its transcript. `exitCode` is only meaningful once
+ * `live` is false.
+ */
+export function getRunActivity(runId: string): {
+  live: boolean;
+  lastOutputAt: number | null;
+  exitCode: number | null;
+} | null {
+  const m = runs.get(runId);
+  if (!m) return null;
+  // Fold in any micro-batched bytes first: they have already left the pty, and
+  // without this a caller landing inside the BATCH_MS window would be told the
+  // terminal has been quiet for longer than it actually has.
+  flushPending(m);
+  return {
+    live: !m.exited,
+    lastOutputAt: m.lastOutputAt,
+    exitCode: m.exited ? m.finalExitCode : null,
+  };
+}
+
+/**
  * Full in-memory transcript for a run whose record still exists — including the
  * brief window AFTER the pty exited but BEFORE its final log flush has committed
  * and the record is deleted. The WS replay path prefers this over the DB so a
@@ -697,25 +849,80 @@ export function tailLines(text: string, n: number): string {
  * On boot, any runs the DB still thinks are 'running' had their ptys die with
  * the previous server process and can never emit onExit. Mark them 'exited'
  * (neutral) — they remain restorable as read-only tabs with a Restart button.
+ *
+ * EXCEPT rows whose recorded pid is still alive: those belong to a SECOND
+ * instance sharing this database, and flipping them to 'exited' renders its live
+ * tabs dead-but-restorable while the ptys keep running (and projects.ts finds
+ * live ptys by querying status:'running', so deleting that project then orphans
+ * them). instanceLock.ts is the primary guard — it makes a peer-detecting boot
+ * skip this function entirely — and this pid predicate is the belt-and-braces
+ * half for when the lock is bypassed (crash-cleared lock dir, mixed versions, a
+ * copied DB). Cost of the safety: a recycled pid can leave one row stuck at
+ * 'running' until a later boot sees it dead. A stale-live row is recoverable
+ * (restart the tab); a clobbered live row is not.
  */
 export async function reconcileStaleRuns(): Promise<number> {
-  const res = await prisma.run.updateMany({
+  const stale = await prisma.run.findMany({
     where: { status: 'running' },
+    select: { id: true, pid: true },
+  });
+  // No recorded pid (elevated shell still waiting on UAC, pre-pid crash) means
+  // nothing can prove it alive — reconcile it, as before.
+  const dead = stale.filter((r) => r.pid === null || !pidAlive(r.pid)).map((r) => r.id);
+  if (dead.length === 0) return 0;
+  const res = await prisma.run.updateMany({
+    where: { id: { in: dead } },
     data: { status: 'exited', endedAt: new Date() },
   });
   return res.count;
 }
 
+/** Run rows outlive their logs by this many days (see pruneOldRunLogs). */
+const RUN_RETENTION_DAYS = 90;
+
 /**
- * Boot-time retention sweep: RunLog otherwise grows without bound (one row per
- * 300ms flush per live run, forever), which slowly taxes every replay query and
- * bloats the DB file. Deleting logs of runs that ENDED more than `days` ago
- * keeps recent history (EOD, restored-tab replay) fully intact.
+ * How long a run's OUTPUT is kept after it ends (see pruneOldRunLogs). Exported
+ * so ws.ts can tell a replay with zero rows apart: past this window the history
+ * was pruned, inside it the run genuinely never wrote a byte. The two need the
+ * same number or the restored tab explains itself wrongly.
  */
-export async function pruneOldRunLogs(days = 14): Promise<number> {
-  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-  const res = await prisma.runLog.deleteMany({
-    where: { run: { endedAt: { lt: cutoff } } },
+export const LOG_RETENTION_DAYS = 14;
+
+/**
+ * Boot-time retention sweep, in two parts.
+ *
+ * RunLog otherwise grows without bound (one row per 300ms flush per live run,
+ * forever), which slowly taxes every replay query and bloats the DB file.
+ * Deleting logs of runs that ENDED more than `days` ago keeps recent history
+ * (EOD, restored-tab replay) intact — EXCEPT for runs still PINNED as workspace
+ * tabs. schema.prisma defines dockOpen as "an open tab in the workspace (restored
+ * on reopen)" and ws.ts replays a restored tab purely from its RunLog rows, so
+ * pruning those emptied the tab: it reopened permanently blank, with no data
+ * frame and no explanation. A pinned tab's history is therefore bounded on the
+ * REPLAY side (capped tail) rather than by deletion here; closing the tab
+ * (dockOpen:false) makes it eligible for this sweep again.
+ *
+ * Run itself is never bulk-deleted anywhere else — it gains a row per terminal
+ * ever opened — so rows that ended more than `runDays` ago and are NOT pinned are
+ * dropped whole, their logs following via the FK cascade. That window is
+ * deliberately much longer than the log window: an EOD report can be regenerated
+ * for any past date range from Run rows alone, and those stay useful long after
+ * the terminal output is gone.
+ *
+ * Returns the number of rows deleted (log rows + expired run rows).
+ */
+export async function pruneOldRunLogs(
+  days = LOG_RETENTION_DAYS,
+  runDays = RUN_RETENTION_DAYS,
+): Promise<number> {
+  const now = Date.now();
+  const logCutoff = new Date(now - days * 24 * 60 * 60 * 1000);
+  const logs = await prisma.runLog.deleteMany({
+    where: { run: { endedAt: { lt: logCutoff }, dockOpen: false } },
   });
-  return res.count;
+  const runCutoff = new Date(now - runDays * 24 * 60 * 60 * 1000);
+  const rows = await prisma.run.deleteMany({
+    where: { endedAt: { lt: runCutoff }, dockOpen: false },
+  });
+  return logs.count + rows.count;
 }

@@ -36,6 +36,22 @@ fs.cpSync(path.join(repoRoot, 'packages', 'backend', 'dist'), path.join(stage, '
   recursive: true,
 });
 
-const engine = path.join(stage, 'backend', 'dist', 'generated', 'prisma', 'query_engine-windows.dll.node');
-console.log('[stage] prisma engine present:', fs.existsSync(engine));
+// Fail closed before electron-builder runs (package.json "dist" chains
+// build:main && stage && electron-builder). The engine is what we stage; the
+// rest are the extraResources electron-builder copies straight from the source
+// tree — the packaged app resolves every one of them from process.resourcesPath
+// with no fallback, so a missing file here ships as a broken installer.
+const required = [
+  ['prisma query engine', path.join(stage, 'backend', 'dist', 'generated', 'prisma', 'query_engine-windows.dll.node')],
+  ['frontend build', path.join(repoRoot, 'packages', 'frontend', 'dist')],
+  ['db template', path.join(repoRoot, 'packages', 'backend', 'prisma', 'dev.db')],
+  ['mcp bridge', path.join(repoRoot, 'packages', 'backend', 'mcp-bridge.mjs')],
+  ['broker agent', path.join(repoRoot, 'packages', 'backend', 'broker-agent.mjs')],
+  ['godclaude assets', path.join(repoRoot, 'packages', 'backend', 'godclaude-assets')],
+];
+const missing = required.filter(([, p]) => !fs.existsSync(p));
+if (missing.length) {
+  for (const [label, p] of missing) console.error(`[stage] FATAL: ${label} missing at ${p}`);
+  process.exit(1);
+}
 console.log('[stage] done →', stage);
