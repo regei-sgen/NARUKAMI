@@ -12,6 +12,18 @@ import {
   Tray,
 } from 'electron';
 import { autoUpdater } from 'electron-updater';
+// Pure shell logic, extracted so it is testable without an Electron runtime.
+import {
+  clamp,
+  hasHiddenFlag,
+  isStatsUrl as isStatsUrlPure,
+  normalizeShellPrefs,
+  pointInRect,
+  statsBoundsFor,
+  SHELL_PREFS_DEFAULTS,
+  STATS_MARK,
+  type ShellPrefs as ShellPrefsT,
+} from './shell-lib';
 import path from 'node:path';
 import fs from 'node:fs';
 import net from 'node:net';
@@ -125,15 +137,11 @@ let isQuitting = false;
 
 /** Shell-level prefs, kept next to the app's other userData. Deliberately NOT in
  *  the backend's SQLite: these are read during startup, before/independently of
- *  the backend, and must survive a backend that fails to boot. */
-interface ShellPrefs {
-  /** Close hides to the tray instead of quitting. */
-  runInBackground: boolean;
-  /** Launch NARUKAMI (hidden) when the user signs in to Windows. */
-  startAtLogin: boolean;
-}
-
-const SHELL_PREFS_DEFAULTS: ShellPrefs = { runInBackground: true, startAtLogin: true };
+ *  the backend, and must survive a backend that fails to boot.
+ *
+ *  The TYPE and the pure parsing live in ./shell-lib so they are reachable from a test — this file
+ *  imports electron at module scope and therefore cannot be loaded by one. */
+type ShellPrefs = ShellPrefsT;
 
 function shellPrefsPath(): string {
   return path.join(app.getPath('userData'), 'shell-prefs.json');
@@ -144,15 +152,8 @@ let shellPrefsCache: ShellPrefs | null = null;
 function shellPrefs(): ShellPrefs {
   if (shellPrefsCache) return shellPrefsCache;
   try {
-    const raw = JSON.parse(fs.readFileSync(shellPrefsPath(), 'utf8')) as Partial<ShellPrefs>;
-    shellPrefsCache = {
-      runInBackground:
-        typeof raw.runInBackground === 'boolean'
-          ? raw.runInBackground
-          : SHELL_PREFS_DEFAULTS.runInBackground,
-      startAtLogin:
-        typeof raw.startAtLogin === 'boolean' ? raw.startAtLogin : SHELL_PREFS_DEFAULTS.startAtLogin,
-    };
+    const raw = JSON.parse(fs.readFileSync(shellPrefsPath(), 'utf8')) as unknown;
+    shellPrefsCache = normalizeShellPrefs(raw, SHELL_PREFS_DEFAULTS);
   } catch {
     // No file yet (first run) or unreadable — fall back to the defaults.
     shellPrefsCache = { ...SHELL_PREFS_DEFAULTS };
@@ -200,7 +201,7 @@ function applyLoginItem(enabled: boolean): void {
  * (always false on Windows), so it is the fallback, not the primary signal.
  */
 function launchedHidden(): boolean {
-  if (process.argv.includes('--hidden')) return true;
+  if (hasHiddenFlag(process.argv)) return true;
   try {
     return app.getLoginItemSettings().wasOpenedAtLogin === true;
   } catch {
@@ -235,10 +236,7 @@ function screenDockRect(): { x: number; y: number; width: number; height: number
 // Is the OS cursor currently over the main window's dock? Drives the drop hint
 // and the re-dock decision while a torn-off window is dragged.
 function cursorOverDock(): boolean {
-  const r = screenDockRect();
-  if (!r) return false;
-  const p = screen.getCursorScreenPoint();
-  return p.x >= r.x && p.x <= r.x + r.width && p.y >= r.y && p.y <= r.y + r.height;
+  return pointInRect(screen.getCursorScreenPoint(), screenDockRect());
 }
 
 // Last dockhint value actually sent. win.on('move') fires per position change
@@ -282,9 +280,7 @@ function reclaim(runId: string): void {
 }
 
 /** The PC Stats window is the app's own URL with this marker. */
-const STATS_MARK = 'pcstats=1';
 
-const clamp = (n: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, n));
 
 /**
  * Size + place the PC Stats window RELATIVE TO THE DISPLAY it will open on, so
@@ -311,11 +307,7 @@ function statsWindowBounds(): { width: number; height: number; x: number; y: num
 }
 
 function isStatsUrl(url: string): boolean {
-  try {
-    return new URL(url).search.includes(STATS_MARK);
-  } catch {
-    return false;
-  }
+  return isStatsUrlPure(url);
 }
 
 interface Bounds {
