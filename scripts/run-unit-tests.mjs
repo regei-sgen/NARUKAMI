@@ -22,7 +22,10 @@ const repoRoot = path.resolve(here, '..');
 const withCoverage = process.argv.includes('--coverage');
 
 const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'narukami-vitest-'));
-const WORKSPACES = ['backend', 'frontend'];
+// `desktop` added 2026-08-03. It was excluded for as long as it had no tests, which meant the
+// Electron shell — 1,479 lines including the main process — was the only code here with typecheck
+// as its sole automated check. It now has a suite; excluding it would keep that suite unrun by CI.
+const WORKSPACES = ['backend', 'frontend', 'desktop'];
 const reports = [];
 let failed = false;
 

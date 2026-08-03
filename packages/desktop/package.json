@@ -12,7 +12,9 @@
     "serve:updates": "node scripts/serve-updates.mjs",
     "start": "npm run build:main && electron .",
     "dist": "npm run build:main && npm run stage && electron-builder --win nsis",
-    "icon": "electron scripts/render-icon.mjs"
+    "icon": "electron scripts/render-icon.mjs",
+    "test:unit": "vitest run --exclude \"**/node_modules/**\" --exclude \"**/dist-main/**\"",
+    "test:coverage": "npm run test:unit -- --coverage"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.2",
@@ -27,7 +29,9 @@
   "devDependencies": {
     "electron": "33.4.11",
     "electron-builder": "^25.1.8",
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8",
+    "@vitest/coverage-v8": "^2.1.9"
   },
   "build": {
     "appId": "com.narukami.app",
