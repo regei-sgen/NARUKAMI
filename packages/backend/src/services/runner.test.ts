@@ -231,6 +231,33 @@ describe('cleanEnv', () => {
       for (const k of Object.keys(added)) delete process.env[k];
     }
   });
+
+  it('strips BOTH Claude Code session markers a Claude-launched backend inherits', () => {
+    // Claude Code stamps CLAUDE_CODE_SESSION_ID *and* CLAUDE_CODE_CHILD_SESSION=1
+    // onto every process it spawns, so a backend started from inside a Claude Code
+    // session hands both to every pty. A NARUKAMI terminal is a genuine top-level
+    // session, and the CHILD marker makes the `claude` in it disable transcript
+    // persistence entirely ("Transcript saving is off — inherited
+    // CLAUDE_CODE_CHILD_SESSION marker"), which also breaks --resume for that tab.
+    // Verified 2026-08-03 against claude.exe v2.1.220: the suppression is
+    // `if (!(CLAUDE_CODE_CHILD_SESSION && ...)) return false`, short-circuited only
+    // by CLAUDE_CODE_FORCE_SESSION_PERSISTENCE. Claude Code strips the same var
+    // itself when it spawns MCP stdio servers.
+    const added = {
+      CLAUDE_CODE_SESSION_ID: '113f776c-c0a5-4860-8fe4-dc079d40fc0c',
+      CLAUDE_CODE_CHILD_SESSION: '1',
+    };
+    Object.assign(process.env, added);
+    try {
+      const env = cleanEnv();
+      expect(env.CLAUDE_CODE_SESSION_ID).toBeUndefined();
+      expect(env.CLAUDE_CODE_CHILD_SESSION).toBeUndefined();
+      // The overlay path must not reintroduce them either.
+      expect(spawnEnv().CLAUDE_CODE_CHILD_SESSION).toBeUndefined();
+    } finally {
+      for (const k of Object.keys(added)) delete process.env[k];
+    }
+  });
 });
 
 describe('capTranscript', () => {

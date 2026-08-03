@@ -178,6 +178,16 @@ const ENV_DENYLIST = new Set([
   // id; NARUKAMI terminals are not part of that session, and a leaked id would
   // silently re-scope godmode CLI calls to a phantom session overlay.
   'CLAUDE_CODE_SESSION_ID',
+  // Its twin. Claude Code stamps CLAUDE_CODE_CHILD_SESSION=1 on every process it
+  // spawns so a NESTED claude knows not to write a competing transcript. A Claude-
+  // launched backend inherits it, so without this the `claude` in every NARUKAMI
+  // terminal — a genuine top-level session — sees the marker and disables
+  // transcript persistence: no session file, and --resume cannot find that tab.
+  // Verified 2026-08-03 against claude.exe v2.1.220, whose own guard is
+  // `if (!(CLAUDE_CODE_CHILD_SESSION && ...)) return false`, overridden only by
+  // CLAUDE_CODE_FORCE_SESSION_PERSISTENCE. Claude Code strips this exact var
+  // itself before spawning MCP stdio servers, for the same reason.
+  'CLAUDE_CODE_CHILD_SESSION',
   // The GODCLAUDE state home is decided by godSpawnEnv() alone (below), which
   // returns {} while the embedded layer is unprovisioned. An INHERITED value
   // would otherwise survive into every spawned process and point it at a god
