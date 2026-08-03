@@ -19,6 +19,15 @@ export default defineConfig({
       reportsDirectory: 'build/coverage',
       include: ['src/**/*.ts'],
       exclude: ['src/**/*.test.ts'],
+      // Floors set from the FIRST measurement on 2026-08-03 (18.32/67.12/24.52/18.32), rounded
+      // down. A ratchet, never lowered — same convention as backend and frontend.
+      //
+      // These are low on purpose and should be read honestly: main.ts sits at 13.9% statements
+      // because most of it is the async boot block (backend spawn, window creation, tray, updater)
+      // which the mock deliberately never runs. What IS covered is the IPC surface the renderer
+      // actually calls. Raising this means simulating more of Electron, which risks testing the
+      // mock rather than the shell.
+      thresholds: { statements: 18, branches: 67, functions: 24, lines: 18 },
     },
   },
 });

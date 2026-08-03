@@ -65,6 +65,13 @@ function analyze(h, opts = {}) {
   // ---------- hook-audit.log (gate decisions) ----------
   const audit = readLines(AUDIT);
   let allow = 0, block = 0, settled = 0, unsettled = 0;
+  // Split by EVENT. Averaging Stop with SubagentStop produced a headline that misattributed a
+  // subagent-transcript limitation to the whole gate: measured 2026-08-03, main-agent Stop was
+  // 960 settled / 8 unsettled (0.8%) while SubagentStop was 16 / 270 (94%). Reported as one number
+  // that reads "the gate is broken", when main-agent enforcement is in fact healthy and the
+  // subagent half is limited by transcripts that arrive late or never.
+  let settledMain = 0, unsettledMain = 0, settledSub = 0, unsettledSub = 0;
+  let failOpenSub = 0;
   const allowReasons = {}, diagEvents = {};
   const normAllow = (s) => {
     s = s.trim();
@@ -84,6 +91,15 @@ function analyze(h, opts = {}) {
     else if (/\[proof-gate\] BLOCK:/.test(line)) block++;
     if (/read settled/.test(line)) settled++;
     if (/UNSETTLED/.test(line)) unsettled++;
+    // The per-event split must come from the DIAG line: it is the only record carrying BOTH the
+    // event and the settled state. The `read settled` / `read UNSETTLED` lines carry neither, so
+    // keying the split off them classified every read as main-agent.
+    let d;
+    if ((d = line.match(/DIAG event=(\S+)[^\n]*\bsettled=(true|false)/))) {
+      const sub = d[1] === 'SubagentStop';
+      if (d[2] === 'true') { if (sub) settledSub++; else settledMain++; }
+      else if (sub) unsettledSub++; else unsettledMain++;
+    }
     if ((m = line.match(/DIAG event=(\S+)/))) diagEvents[m[1]] = (diagEvents[m[1]] || 0) + 1;
   }
   const decisions = allow + block;
@@ -117,7 +133,16 @@ function analyze(h, opts = {}) {
         (unsettled ? `${unsettled} run(s) hit UNSETTLED (budget expired).` : 'No UNSETTLED runs, so the budget is rarely exhausted — you may be able to shorten it.'));
     }
     if (unsettled > 0) {
-      add('medium', `Flush race: ${unsettled} of ${settled + unsettled} gate reads ended UNSETTLED (final message not flushed within ~1.2s) → those turns were under-enforced (fail-open). If this is frequent, raise the flush budget or investigate transcript flush timing.`);
+      const pct = (n, d) => (d ? ((n / d) * 100).toFixed(0) + '%' : 'n/a');
+      const mainTot = settledMain + unsettledMain, subTot = settledSub + unsettledSub;
+      add('medium',
+        `Flush race, BY EVENT (a combined figure misattributes this): ` +
+        `main-agent Stop ${unsettledMain}/${mainTot} unsettled (${pct(unsettledMain, mainTot)}) — ` +
+        `SubagentStop ${unsettledSub}/${subTot} (${pct(unsettledSub, subTot)}). ` +
+        (unsettledMain / (mainTot || 1) < 0.05
+          ? `Main-agent enforcement is healthy; raising the ~1.2s budget would tax every turn to fix a population that is not the problem. `
+          : `Main-agent reads are genuinely racing the flush — that IS worth a longer budget. `) +
+        `Subagent transcripts arrive late or never, so SubagentStop enforcement is structurally unreliable; the PARENT's Stop gate is the real backstop (it treats Task/Workflow as mutation-equivalent since 2026-08-02).`);
     }
     if (decisions >= 10 && blockRate > 0.25) {
       add('medium', `Block rate is ${(blockRate * 100).toFixed(0)}% (${block}/${decisions}). If many of these are turns you felt DID verify, the claim/evidence patterns may be over-firing — review the BLOCK lines in hook-audit.log and loosen a pattern.`);
@@ -137,7 +162,17 @@ function analyze(h, opts = {}) {
     if (decisions >= 10 && failOpen / decisions > 0.15) {
       const top = Object.keys(allowReasons).filter(r => /^fail-open/.test(r)).sort((a, b) => allowReasons[b] - allowReasons[a]).slice(0, 3)
         .map(r => `${r} ×${allowReasons[r]}`).join('; ');
-      add('high', `${failOpen} of ${decisions} decisions (${(failOpen / decisions * 100).toFixed(0)}%) FAILED OPEN — the gate allowed without ever judging the turn, so those turns were enforced by NOTHING. Top reasons: ${top}. Check the DIAG lines in hook-audit.log (they now log the probed transcript paths + existsSync) to find why the transcript wasn't readable.`);
+      // Derive the subagent share from the SAME population as failOpen (the ALLOW-reason buckets).
+      // Counting it from DIAG lines instead mixed two different record types and produced 167%.
+      failOpenSub = Object.keys(allowReasons)
+        .filter((r) => /^fail-open/.test(r) && /subagent transcript/.test(r))
+        .reduce((n, r) => n + allowReasons[r], 0);
+      const subShare = failOpen ? failOpenSub / failOpen : 0;
+      add(subShare > 0.8 ? 'medium' : 'high',
+        `${failOpen} of ${decisions} decisions (${(failOpen / decisions * 100).toFixed(0)}%) failed open. ` +
+        (subShare > 0.8
+          ? `BUT ${(subShare * 100).toFixed(0)}% of those are "subagent transcript not found" — investigated 2026-08-03: those transcripts are genuinely never written (searched every project tree; sampled ids from minutes earlier existed nowhere), so there is nothing to read and fail-open is the only possible behaviour. Delegated work is instead gated at the PARENT's Stop. Do not read this as "a third of turns are unenforced".`
+          : `Top reasons: ${top}. Check the DIAG lines in hook-audit.log (they log the probed paths + existsSync).`));
     }
     const verifiedReadOnly = allowReasons['verified: re-read of written path'] || 0;
     const verifiedTest = (allowReasons['verified: test/verify command ran'] || 0);
